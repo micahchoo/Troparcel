@@ -1,0 +1,16 @@
+{
+  "name": "troparcel-server",
+  "version": "2.0.0",
+  "description": "Troparcel collaboration server — WebSocket relay with persistence and auth",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "yjs": "^13.6.0",
+    "y-websocket": "^1.5.0",
+    "y-leveldb": "^0.1.2",
+    "ws": "^8.16.0",
+    "lib0": "^0.2.88"
+  }
+}
