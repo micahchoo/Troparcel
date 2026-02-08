@@ -29,6 +29,14 @@ class ApiClient {
   }
 
   /**
+   * Get project info including the project file path.
+   * @returns {{ status, project, version }} project info
+   */
+  async getProjectInfo() {
+    return this.get('/')
+  }
+
+  /**
    * Get all items in the project.
    * Returns an array of item summaries (id, template, etc.)
    */
@@ -93,12 +101,33 @@ class ApiClient {
   }
 
   /**
+   * Delete tags from the project entirely.
+   * @param {number[]} tagIds
+   */
+  async deleteTags(tagIds) {
+    let params = new URLSearchParams()
+    for (let id of tagIds) params.append('id', id)
+    return this.request('DELETE', `/project/tags?${params.toString()}`)
+  }
+
+  /**
    * Add tags to an item.
    * @param {number} itemId
    * @param {number[]} tagIds
    */
   async addTagsToItem(itemId, tagIds) {
     return this.post(`/project/items/${itemId}/tags`, { tag: tagIds })
+  }
+
+  /**
+   * Remove tags from an item.
+   * @param {number} itemId
+   * @param {number[]} tagIds
+   */
+  async removeTagsFromItem(itemId, tagIds) {
+    let params = new URLSearchParams()
+    for (let id of tagIds) params.append('tag', id)
+    return this.request('DELETE', `/project/items/${itemId}/tags?${params.toString()}`)
   }
 
   /**
@@ -116,6 +145,15 @@ class ApiClient {
    */
   async createNote(params) {
     return this.postJson('/project/notes', params)
+  }
+
+  /**
+   * Update an existing note.
+   * @param {number} noteId
+   * @param {Object} params - { html, language }
+   */
+  async updateNote(noteId, params) {
+    return this.putJson(`/project/notes/${noteId}`, params)
   }
 
   /**
@@ -140,17 +178,110 @@ class ApiClient {
   }
 
   /**
+   * Create a selection on a photo.
+   * @param {Object} params - { photo, x, y, width, height, angle }
+   */
+  async createSelection(params) {
+    return this.postJson('/project/selections', params)
+  }
+
+  /**
+   * Update a selection's coordinates.
+   * @param {number} selectionId
+   * @param {Object} params - { x, y, width, height, angle }
+   */
+  async updateSelection(selectionId, params) {
+    return this.putJson(`/project/selections/${selectionId}`, params)
+  }
+
+  /**
+   * Delete a selection.
+   */
+  async deleteSelection(selectionId) {
+    return this.request('DELETE', `/project/selections/${selectionId}`)
+  }
+
+  /**
+   * Get a transcription by ID.
+   * @param {number} id
+   * @param {string} format - 'json' or 'html'
+   */
+  async getTranscription(id, format = 'json') {
+    return this.get(`/project/transcriptions/${id}?format=${format}`)
+  }
+
+  /**
    * Get transcriptions for an item.
    */
-  async getTranscriptions(itemId) {
+  async getItemTranscriptions(itemId) {
     return this.get(`/project/items/${itemId}/transcriptions`)
   }
 
   /**
-   * Get lists.
+   * Create a new transcription.
+   * @param {Object} params - { text, data, photo, selection }
    */
-  async getLists(id = null) {
-    return this.get(`/project/lists${id != null ? '/' + id : ''}`)
+  async createTranscription(params) {
+    return this.postJson('/project/transcriptions', params)
+  }
+
+  /**
+   * Update a transcription.
+   * @param {number} id
+   * @param {Object} params - { text, data }
+   */
+  async updateTranscription(id, params) {
+    return this.putJson(`/project/transcriptions/${id}`, params)
+  }
+
+  /**
+   * Delete a transcription.
+   */
+  async deleteTranscription(id) {
+    return this.request('DELETE', `/project/transcriptions/${id}`)
+  }
+
+  /**
+   * Get all lists in the project.
+   */
+  async getLists() {
+    return this.get('/project/lists')
+  }
+
+  /**
+   * Get a specific list.
+   * @param {number} id
+   */
+  async getList(id) {
+    return this.get(`/project/lists/${id}`)
+  }
+
+  /**
+   * Get items in a list.
+   * @param {number} listId
+   */
+  async getListItems(listId) {
+    return this.get(`/project/lists/${listId}/items`)
+  }
+
+  /**
+   * Add items to a list.
+   * @param {number} listId
+   * @param {number[]} itemIds
+   */
+  async addItemsToList(listId, itemIds) {
+    return this.post(`/project/lists/${listId}/items`, { item: itemIds })
+  }
+
+  /**
+   * Remove items from a list.
+   * @param {number} listId
+   * @param {number[]} itemIds
+   */
+  async removeItemsFromList(listId, itemIds) {
+    let params = new URLSearchParams()
+    for (let id of itemIds) params.append('item', id)
+    return this.request('DELETE', `/project/lists/${listId}/items?${params.toString()}`)
   }
 
   /**
@@ -207,7 +338,17 @@ class ApiClient {
     })
   }
 
-  request(method, path, body = null, headers = {}) {
+  async putJson(path, data) {
+    return this.request('PUT', path, JSON.stringify(data), {
+      'Content-Type': 'application/json'
+    })
+  }
+
+  request(method, path, body = null, headers = {}, retries = 3) {
+    return this._doRequest(method, path, body, headers, retries, 0)
+  }
+
+  _doRequest(method, path, body, headers, retriesLeft, attempt) {
     return new Promise((resolve, reject) => {
       let options = {
         hostname: this.host,
@@ -235,6 +376,23 @@ class ApiClient {
             let err = new Error(`API ${method} ${path}: ${res.statusCode}`)
             err.status = res.statusCode
             err.body = raw
+            err.sqliteBusy = raw.includes('SQLITE_BUSY')
+
+            // Retry on SQLITE_BUSY with exponential backoff
+            if (err.sqliteBusy && retriesLeft > 0) {
+              let delay = Math.min(1000 * Math.pow(2, attempt), 8000)
+              if (this.logger) {
+                this.logger.debug(
+                  `SQLITE_BUSY on ${method} ${path}, retry ${attempt + 1} in ${delay}ms`
+                )
+              }
+              setTimeout(() => {
+                this._doRequest(method, path, body, headers, retriesLeft - 1, attempt + 1)
+                  .then(resolve, reject)
+              }, delay)
+              return
+            }
+
             reject(err)
             return
           }

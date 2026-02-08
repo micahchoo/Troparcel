@@ -1,14 +1,15 @@
 {
   "name": "troparcel",
   "productName": "Troparcel",
-  "version": "2.0.0",
-  "description": "Annotation overlay collaboration layer for Tropy — sync notes, tags, metadata, and selections across instances via CRDTs",
-  "author": "Your Name",
+  "version": "3.0.2",
+  "description": "Annotation overlay collaboration layer for Tropy — sync notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs",
+  "author": "Micah",
   "license": "AGPL-3.0",
   "icon": "icon.svg",
   "main": "index.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
+    "pack": "node esbuild.config.mjs && zip -r troparcel.zip package.json index.js icon.svg",
     "watch": "node esbuild.config.mjs --watch",
     "server": "node server/index.js",
     "test": "echo \"No tests yet\" && exit 0"
@@ -50,11 +51,26 @@
       "hint": "Automatically sync annotations in the background. Disable to only sync via File menu."
     },
     {
-      "field": "syncInterval",
-      "label": "Sync Interval (seconds)",
-      "type": "number",
-      "default": 10,
-      "hint": "How often to poll for local changes when auto-sync is enabled."
+      "field": "syncMode",
+      "label": "Sync Mode",
+      "type": "string",
+      "default": "auto",
+      "placeholder": "auto",
+      "hint": "How remote changes are handled. 'auto' applies changes as they arrive. 'review' accumulates changes and only applies them when you trigger Import from the File menu."
+    },
+    {
+      "field": "syncPhotoAdjustments",
+      "label": "Sync Photo Adjustments",
+      "type": "boolean",
+      "default": false,
+      "hint": "Sync photo metadata (brightness, contrast, saturation, angle, mirror, negative) between collaborators."
+    },
+    {
+      "field": "syncLists",
+      "label": "Sync Lists",
+      "type": "boolean",
+      "default": false,
+      "hint": "Sync list membership between collaborators. Items will be added/removed from lists based on other users' changes."
     },
     {
       "field": "apiPort",
@@ -70,6 +86,76 @@
       "default": "",
       "placeholder": "shared-secret",
       "hint": "Shared secret for room authentication. All participants must use the same token."
+    },
+    {
+      "field": "startupDelay",
+      "label": "Startup Delay (ms)",
+      "type": "number",
+      "default": 8000,
+      "hint": "Milliseconds to wait after connecting before first sync. Allows Tropy's startup operations (FTS, migrations) to finish. Increase if you see SQLITE_BUSY errors on startup."
+    },
+    {
+      "field": "localDebounce",
+      "label": "Local Change Debounce (ms)",
+      "type": "number",
+      "default": 2000,
+      "hint": "Milliseconds to wait after detecting a local DB change before pushing to the CRDT. Batches rapid edits."
+    },
+    {
+      "field": "remoteDebounce",
+      "label": "Remote Change Debounce (ms)",
+      "type": "number",
+      "default": 500,
+      "hint": "Milliseconds to wait after receiving a remote CRDT change before applying locally. Batches rapid concurrent edits."
+    },
+    {
+      "field": "safetyNetInterval",
+      "label": "Safety Net Interval (seconds)",
+      "type": "number",
+      "default": 120,
+      "hint": "Periodic full sync interval in seconds, as a safety net in case the file watcher misses changes. Set to 0 to disable."
+    },
+    {
+      "field": "writeDelay",
+      "label": "Write Delay (ms)",
+      "type": "number",
+      "default": 100,
+      "hint": "Milliseconds to wait between API write operations. Gives the database breathing room. Increase if you see lock errors."
+    },
+    {
+      "field": "maxBackups",
+      "label": "Max Backups",
+      "type": "number",
+      "default": 10,
+      "hint": "Maximum number of backup snapshots to keep per room. Older backups are pruned automatically."
+    },
+    {
+      "field": "maxNoteSize",
+      "label": "Max Note Size (bytes)",
+      "type": "number",
+      "default": 1048576,
+      "hint": "Maximum size for notes and transcriptions from remote sources (default 1 MB). Larger values are rejected."
+    },
+    {
+      "field": "maxMetadataSize",
+      "label": "Max Metadata Size (bytes)",
+      "type": "number",
+      "default": 65536,
+      "hint": "Maximum size for individual metadata values from remote sources (default 64 KB). Larger values are rejected."
+    },
+    {
+      "field": "tombstoneFloodThreshold",
+      "label": "Tombstone Flood Threshold",
+      "type": "number",
+      "default": 0.5,
+      "hint": "If more than this fraction (0-1) of an item's data is tombstoned in a single sync, a warning is logged. Protects against bulk deletion from a rogue node."
+    },
+    {
+      "field": "debug",
+      "label": "Debug Logging",
+      "type": "boolean",
+      "default": false,
+      "hint": "Enable verbose debug logging for troubleshooting sync issues. Check the Tropy developer console for output."
     }
   ],
   "keywords": [

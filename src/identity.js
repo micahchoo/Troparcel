@@ -110,6 +110,77 @@ function hashFallback(item) {
 }
 
 /**
+ * Compute a stable identity key for a selection across instances.
+ *
+ * Selections don't have checksums — they're regions on a photo.
+ * We key them by the photo's checksum + normalized coordinates,
+ * so the same region on the same photo matches across machines.
+ *
+ * @param {string} photoChecksum - checksum of the parent photo
+ * @param {Object} sel - selection with x, y, width/w, height/h
+ * @returns {string} stable selection key
+ */
+function computeSelectionKey(photoChecksum, sel) {
+  let x = Math.round(sel.x || 0)
+  let y = Math.round(sel.y || 0)
+  let w = Math.round(sel.width || sel.w || 0)
+  let h = Math.round(sel.height || sel.h || 0)
+
+  return crypto
+    .createHash('sha256')
+    .update(`sel:${photoChecksum}:${x}:${y}:${w}:${h}`)
+    .digest('hex')
+    .slice(0, 24)
+}
+
+/**
+ * Compute a stable key for a note across instances.
+ *
+ * Notes are identified by their content hash + parent association
+ * (photo or selection). This lets us match notes across machines
+ * even though they have different local SQLite IDs.
+ *
+ * For existing notes with a known noteId, we use a deterministic
+ * hash so updates are idempotent.
+ *
+ * @param {Object} note - note with text/html/photo/selection fields
+ * @param {string} [photoChecksum] - checksum of parent photo (for cross-instance matching)
+ * @returns {string} stable note key
+ */
+function computeNoteKey(note, photoChecksum) {
+  // Use content + parent for a stable key
+  let text = note.text || ''
+  let html = note.html || ''
+  let parent = photoChecksum || note.photo || note.selection || 'orphan'
+
+  // Use first 200 chars of content to avoid huge hashes but still differentiate
+  let content = (html || text).slice(0, 200)
+
+  return crypto
+    .createHash('sha256')
+    .update(`note:${parent}:${content}`)
+    .digest('hex')
+    .slice(0, 24)
+}
+
+/**
+ * Compute a stable key for a transcription across instances.
+ *
+ * @param {string} photoChecksum - checksum of the parent photo
+ * @param {number} idx - transcription index on that photo
+ * @param {string} [selKey] - selection key if transcription is on a selection
+ * @returns {string} stable transcription key
+ */
+function computeTranscriptionKey(photoChecksum, idx, selKey) {
+  let parent = selKey ? `${photoChecksum}:${selKey}` : photoChecksum
+  return crypto
+    .createHash('sha256')
+    .update(`tx:${parent}:${idx}`)
+    .digest('hex')
+    .slice(0, 24)
+}
+
+/**
  * Build a lookup table mapping identity hashes to local item IDs.
  *
  * @param {Array} items - Array of JSON-LD items from the Tropy API
@@ -142,9 +213,33 @@ function findLocalMatch(identity, localIndex) {
   return localIndex.get(identity) || null
 }
 
+/**
+ * Build a photo checksum lookup from an enriched item.
+ * Returns Map<localPhotoId, checksum>
+ */
+function buildPhotoChecksumMap(item) {
+  let map = new Map()
+  let photos = item.photo || item['https://tropy.org/v1/tropy#photo'] || []
+  if (!Array.isArray(photos)) photos = [photos]
+
+  for (let photo of photos) {
+    let id = photo['@id'] || photo.id
+    let checksum = photo.checksum || photo['https://tropy.org/v1/tropy#checksum']
+    if (id && checksum) {
+      if (typeof checksum === 'object') checksum = checksum['@value'] || String(checksum)
+      map.set(id, String(checksum))
+    }
+  }
+  return map
+}
+
 module.exports = {
   computeIdentity,
   extractChecksums,
   buildIdentityIndex,
-  findLocalMatch
+  findLocalMatch,
+  computeSelectionKey,
+  computeNoteKey,
+  computeTranscriptionKey,
+  buildPhotoChecksumMap
 }
