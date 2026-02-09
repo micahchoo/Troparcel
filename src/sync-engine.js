@@ -114,19 +114,53 @@ class SyncEngine {
     }
   }
 
+  _debug(msg, data) {
+    if (!this.debug) return
+    if (data) {
+      this.logger.info(data, `[troparcel:debug] ${msg}`)
+    } else {
+      this.logger.info(`[troparcel:debug] ${msg}`)
+    }
+  }
+
+  _resetApplyStats() {
+    this._applyStats = {
+      notesCreated: 0, notesDeduped: 0, notesUpdated: 0, notesRetracted: 0,
+      tagsAdded: 0, tagsDeduped: 0,
+      selectionsCreated: 0, selectionsDeduped: 0,
+      metadataUpdated: 0,
+      transcriptionsCreated: 0,
+      listsAdded: 0,
+      itemsProcessed: 0, itemsChanged: 0
+    }
+  }
+
+  _logApplyStats() {
+    let s = this._applyStats
+    if (!s) return
+    let parts = []
+    if (s.notesCreated) parts.push(`${s.notesCreated} notes created`)
+    if (s.notesUpdated) parts.push(`${s.notesUpdated} notes updated`)
+    if (s.notesRetracted) parts.push(`${s.notesRetracted} notes retracted`)
+    if (s.tagsAdded) parts.push(`${s.tagsAdded} tags added`)
+    if (s.selectionsCreated) parts.push(`${s.selectionsCreated} selections created`)
+    if (s.metadataUpdated) parts.push(`${s.metadataUpdated} metadata fields`)
+    if (s.transcriptionsCreated) parts.push(`${s.transcriptionsCreated} transcriptions`)
+    if (s.listsAdded) parts.push(`${s.listsAdded} list memberships`)
+    if (parts.length > 0) {
+      this._log(`applied: ${parts.join(', ')} across ${s.itemsChanged}/${s.itemsProcessed} items`)
+    } else {
+      this._debug(`applied: nothing changed across ${s.itemsProcessed} items`)
+    }
+  }
+
   /**
    * Read all items fully enriched from the store adapter.
    * Used by syncOnce and import hook when store is available.
    */
   readAllItemsFull() {
     if (!this.adapter) return []
-    let summaries = this.adapter.getAllItems()
-    let items = []
-    for (let s of summaries) {
-      let full = this.adapter.getItemFull(s.id)
-      if (full) items.push(full)
-    }
-    return items
+    return this.adapter.getAllItemsFull()
   }
 
   // --- Async mutex (R2) ---
@@ -330,7 +364,7 @@ class SyncEngine {
       try {
         schema.deregisterUser(this.doc, this.doc.clientID)
       } catch (err) {
-        this.logger.debug('Failed to deregister user', { error: err.message })
+        this._debug('Failed to deregister user', { error: err.message })
       }
     }
 
@@ -443,12 +477,12 @@ class SyncEngine {
       })
 
       this.fileWatcher.on('error', (err) => {
-        this.logger.debug('File watcher error', { error: err.message })
+        this._debug('File watcher error', { error: err.message })
         // R9: Try to restart the watcher
         this._restartFileWatcher()
       })
     } catch (err) {
-      this.logger.debug('Could not start file watcher', { error: err.message })
+      this._debug('Could not start file watcher', { error: err.message })
     }
   }
 
@@ -494,11 +528,11 @@ class SyncEngine {
 
     if (this._applyingRemote) {
       this._queuedLocalChange = true
-      this._log('handleLocalChange: queued (applying remote)')
+      this._debug('handleLocalChange: queued (applying remote)')
       return
     }
 
-    this._log('handleLocalChange: store change detected, debouncing')
+    this._debug('handleLocalChange: store change detected, debouncing')
 
     if (this._localDebounceTimer) {
       clearTimeout(this._localDebounceTimer)
@@ -506,7 +540,7 @@ class SyncEngine {
 
     this._localDebounceTimer = setTimeout(() => {
       this._localDebounceTimer = null
-      this._log('handleLocalChange: debounce fired, triggering syncOnce')
+      this._debug('handleLocalChange: debounce fired')
       this.syncOnce()
     }, this.options.localDebounce)
   }
@@ -533,7 +567,7 @@ class SyncEngine {
     if (this._paused) return
     if (this._pendingRemoteIdentities.size === 0) return
     if (this.localIndex.size === 0) {
-      this._log('applyPendingRemote: localIndex empty, deferring')
+      this._debug('applyPendingRemote: localIndex empty, deferring')
       return
     }
 
@@ -579,11 +613,16 @@ class SyncEngine {
 
       this._applyingRemote = true
       if (this.adapter) this.adapter.suppressChanges()
+      this._resetApplyStats()
 
       try {
+        // First pass: exact matches (these take priority over fuzzy matches)
+        let processedLocalIds = new Set()
         for (let itemIdentity of identities) {
           let local = identity.findLocalMatch(itemIdentity, this.localIndex)
           if (!local) continue
+
+          processedLocalIds.add(local.localId)
 
           // C3: Validate inbound CRDT data before applying
           if (this.backup && validationSnapshot) {
@@ -602,17 +641,44 @@ class SyncEngine {
           try {
             await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
           } catch (err) {
-            this.logger.debug(`Failed to apply remote for ${itemIdentity}`, {
+            this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
+              error: err.message
+            })
+          }
+        }
+
+        // Second pass: fuzzy matches for identities with no exact match,
+        // skipping locals already processed by exact matches
+        for (let itemIdentity of identities) {
+          if (identity.findLocalMatch(itemIdentity, this.localIndex)) continue
+          let local = this._fuzzyMatchLocal(itemIdentity)
+          if (!local) continue
+          if (processedLocalIds.has(local.localId)) continue
+          processedLocalIds.add(local.localId)
+
+          if (this.backup && validationSnapshot) {
+            let crdtItem = validationSnapshot[itemIdentity]
+            if (crdtItem) {
+              let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
+              if (!validation.valid) continue
+            }
+          }
+
+          try {
+            await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
+          } catch (err) {
+            this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
               error: err.message
             })
           }
         }
       } finally {
+        this._logApplyStats()
         this._applyingRemote = false
         if (this.adapter) this.adapter.resumeChanges()
         if (this._queuedLocalChange) {
           this._queuedLocalChange = false
-          this._log('applyPendingRemote: replaying queued local change')
+          this._debug('replaying queued local change')
           this.handleLocalChange()
         }
       }
@@ -637,7 +703,7 @@ class SyncEngine {
     this.state = 'syncing'
 
     try {
-      this._log('syncOnce: starting cycle')
+      this._debug('syncOnce: starting cycle')
 
       let items
 
@@ -645,36 +711,33 @@ class SyncEngine {
         // Store-first: read everything from Redux state (no HTTP calls)
         items = this.readAllItemsFull()
         if (items.length === 0) {
-          this._log('syncOnce: no items in store')
+          this._debug('syncOnce: no items in store')
           this.state = prev
           return
         }
-        this._log(`syncOnce: got ${items.length} items from store`)
+        this._debug(`syncOnce: got ${items.length} items from store`)
       } else {
         // Fallback: HTTP API enrichment
         let alive = await this.api.ping()
         if (!alive) {
-          this._log('syncOnce: API not reachable, skipping')
+          this._debug('syncOnce: API not reachable, skipping')
           this.state = prev
           return
         }
 
         let summaries = await this.api.getItems()
         if (!summaries || !Array.isArray(summaries)) {
-          this._log('syncOnce: no items from API')
+          this._debug('syncOnce: no items from API')
           this.state = prev
           return
         }
-        this._log(`syncOnce: got ${summaries.length} item summaries`)
+        this._debug(`syncOnce: got ${summaries.length} item summaries`)
 
         items = await this._enrichAll(summaries)
       }
 
       this.localIndex = identity.buildIdentityIndex(items)
-      this._log(`syncOnce: identity index built`, {
-        items: items.length,
-        identities: this.localIndex.size
-      })
+      this._debug(`syncOnce: ${items.length} items, ${this.localIndex.size} identities`)
 
       // C2: Build list name cache
       await this._refreshListNameCache()
@@ -688,7 +751,7 @@ class SyncEngine {
         this.vault.updateAnnotationCount(Object.keys(snapshot).length)
 
         if (this.vault.hasCRDTChanged(snapshot)) {
-          this._log('syncOnce: CRDT changed, applying remote')
+          this._debug('syncOnce: CRDT changed, applying remote')
           appliedIdentities = await this.applyRemoteFromCRDT()
 
           // P2: Re-read modified items after apply
@@ -724,7 +787,7 @@ class SyncEngine {
             this.localIndex = identity.buildIdentityIndex(items)
           }
         } else {
-          this._log('syncOnce: CRDT unchanged, skipping apply phase')
+          this._debug('syncOnce: CRDT unchanged, skip apply')
         }
       }
 
@@ -749,7 +812,7 @@ class SyncEngine {
       this.lastSync = new Date()
       this._consecutiveErrors = 0
       this.state = 'connected'
-      this._log('syncOnce: cycle complete')
+      this._debug('syncOnce: cycle complete')
 
     } catch (err) {
       this._consecutiveErrors++
@@ -773,7 +836,7 @@ class SyncEngine {
 
       if (this._queuedLocalChange) {
         this._queuedLocalChange = false
-        this._log('syncOnce: replaying queued local change')
+        this._debug('replaying queued local change')
         this.handleLocalChange()
       }
     }
@@ -792,7 +855,7 @@ class SyncEngine {
       let batch = summaries.slice(i, i + batchSize)
       let results = await Promise.all(
         batch.map(s => this.enrichItem(s).catch(err => {
-          this.logger.debug(`Failed to enrich item ${s.id}`, { error: err.message })
+          this.logger.warn(`Failed to enrich item ${s.id}`, { error: err.message })
           return null
         }))
       )
@@ -979,6 +1042,38 @@ class SyncEngine {
     }
   }
 
+  /**
+   * Try to find a local item that matches a CRDT identity by shared photo checksums.
+   * Used when exact identity matching fails (e.g., after item merges).
+   * Returns { localId, item } or null.
+   */
+  _fuzzyMatchLocal(crdtIdentity) {
+    if (this.localIndex.size === 0 || !this.doc) return null
+
+    let crdtChecksums = schema.getItemChecksums(this.doc, crdtIdentity)
+    if (crdtChecksums.length === 0) return null
+
+    let crdtSet = new Set(crdtChecksums)
+
+    for (let [, local] of this.localIndex) {
+      let photos = local.item.photo || []
+      if (!Array.isArray(photos)) photos = [photos]
+      let localChecksums = new Set()
+      for (let p of photos) {
+        if (p.checksum) localChecksums.add(p.checksum)
+      }
+
+      // ALL CRDT checksums must be present in the local item
+      let allFound = true
+      for (let cs of crdtSet) {
+        if (!localChecksums.has(cs)) { allFound = false; break }
+      }
+      if (allFound) return local
+    }
+
+    return null
+  }
+
   // --- Push local → CRDT ---
 
   async pushLocal(items) {
@@ -1021,11 +1116,15 @@ class SyncEngine {
         this.saveItemSnapshot(item, id, checksumMap)
         this.vault.markPushed(id, item)
       } catch (err) {
-        this.logger.debug(`Failed to push item ${id}`, { error: err.message })
+        this.logger.warn(`Failed to push item ${id}`, { error: err.message })
       }
     }
 
-    this._log(`pushLocal: pushed ${pushed}, skipped ${skipped} (unchanged)`)
+    if (pushed > 0) {
+      this._log(`pushed ${pushed} item(s) to CRDT`)
+    } else {
+      this._debug(`pushLocal: ${skipped} item(s) unchanged`)
+    }
   }
 
   pushMetadata(item, itemIdentity, userId) {
@@ -1261,6 +1360,8 @@ class SyncEngine {
       let checksum = photo.checksum
       if (!checksum || !photo.metadata) continue
 
+      let existing = schema.getPhotoMetadata(this.doc, itemIdentity, checksum)
+
       for (let [key, value] of Object.entries(photo.metadata)) {
         if (key === 'id') continue
         let text = ''
@@ -1275,7 +1376,6 @@ class SyncEngine {
 
         if (!text) continue
 
-        let existing = schema.getPhotoMetadata(this.doc, itemIdentity, checksum)
         if (existing[key] && existing[key].text === text) continue
         if (existing[key] && existing[key].author !== userId && existing[key].ts > lastPushTs) continue
 
@@ -1481,12 +1581,12 @@ class SyncEngine {
 
   // --- Deletion detection ---
 
-  // P4: Accepts checksumMap parameter
-  saveItemSnapshot(item, itemIdentity, checksumMap) {
-    let tags = (item.tag || []).map(t =>
-      typeof t === 'string' ? t : (t.name || '')
-    ).filter(Boolean)
-
+  /**
+   * Compute all identity keys for an item's sub-resources (notes, selections,
+   * transcriptions, selection notes, list names). Shared by saveItemSnapshot
+   * and pushDeletions to avoid duplicated photo traversal code.
+   */
+  _computeItemKeys(item, checksumMap) {
     let noteKeys = new Set()
     let selectionKeys = new Set()
     let transcriptionKeys = new Set()
@@ -1514,7 +1614,6 @@ class SyncEngine {
             { text, html, photo: photo['@id'] || photo.id },
             photoChecksum
           )
-          // C1: Use stable key from vault
           let localNoteId = note['@id'] || note.id
           let key = localNoteId
             ? this.vault.getNoteKey(localNoteId, contentKey)
@@ -1591,9 +1690,18 @@ class SyncEngine {
       }
     }
 
-    this.previousSnapshot.set(itemIdentity, {
-      tags, noteKeys, selectionKeys, transcriptionKeys, selectionNoteKeys, listNames
-    })
+    return { noteKeys, selectionKeys, transcriptionKeys, selectionNoteKeys, listNames }
+  }
+
+  // P4: Accepts checksumMap parameter
+  saveItemSnapshot(item, itemIdentity, checksumMap) {
+    let tags = (item.tag || []).map(t =>
+      typeof t === 'string' ? t : (t.name || '')
+    ).filter(Boolean)
+
+    let keys = this._computeItemKeys(item, checksumMap)
+
+    this.previousSnapshot.set(itemIdentity, { tags, ...keys })
   }
 
   pushDeletions(item, itemIdentity, userId, checksumMap) {
@@ -1613,103 +1721,12 @@ class SyncEngine {
       }
     }
 
-    // Detect removed notes, selections, transcriptions, selection notes
-    let currentNoteKeys = new Set()
-    let currentSelectionKeys = new Set()
-    let currentTranscriptionKeys = new Set()
-    let currentSelectionNoteKeys = new Set()
-
-    let photos = item.photo || []
-    if (!Array.isArray(photos)) photos = [photos]
-
-    for (let photo of photos) {
-      let photoChecksum = photo.checksum || checksumMap.get(photo['@id'] || photo.id)
-
-      // Photo-level notes
-      let notes = photo.note || []
-      if (!Array.isArray(notes)) notes = [notes]
-
-      for (let note of notes) {
-        if (!note) continue
-        let text = note['@value'] || note.text || ''
-        let html = note.html || ''
-        if (typeof text === 'object') text = text['@value'] || ''
-        if (typeof html === 'object') html = html['@value'] || ''
-        if (text || html) {
-          let contentKey = identity.computeNoteKey(
-            { text, html, photo: photo['@id'] || photo.id },
-            photoChecksum
-          )
-          let localNoteId = note['@id'] || note.id
-          let key = localNoteId
-            ? this.vault.getNoteKey(localNoteId, contentKey)
-            : contentKey
-          currentNoteKeys.add(key)
-        }
-      }
-
-      // Photo-level transcriptions
-      let txs = photo.transcription || []
-      if (!Array.isArray(txs)) txs = [txs]
-      txs.forEach((tx, idx) => {
-        if (!tx) return
-        let contentKey = identity.computeTranscriptionKey(photoChecksum, idx)
-        let localTxId = tx['@id'] || tx.id
-        let txKey = localTxId
-          ? this.vault.getTxKey(localTxId, contentKey)
-          : contentKey
-        currentTranscriptionKeys.add(txKey)
-      })
-
-      // Selections and sub-resources
-      let selections = photo.selection || []
-      if (!Array.isArray(selections)) selections = [selections]
-
-      for (let sel of selections) {
-        if (!sel || !photoChecksum) continue
-        let selKey = identity.computeSelectionKey(photoChecksum, sel)
-        currentSelectionKeys.add(selKey)
-
-        // Selection notes
-        let selNotes = sel.note || []
-        if (!Array.isArray(selNotes)) selNotes = [selNotes]
-        for (let note of selNotes) {
-          if (!note) continue
-          let text = note['@value'] || note.text || ''
-          let html = note.html || ''
-          if (typeof text === 'object') text = text['@value'] || ''
-          if (typeof html === 'object') html = html['@value'] || ''
-          if (text || html) {
-            let contentKey = identity.computeNoteKey(
-              { text, html, selection: sel['@id'] || sel.id },
-              photoChecksum
-            )
-            let localNoteId = note['@id'] || note.id
-            let noteKey = localNoteId
-              ? this.vault.getNoteKey(localNoteId, contentKey)
-              : contentKey
-            currentSelectionNoteKeys.add(`${selKey}:${noteKey}`)
-          }
-        }
-
-        // Selection transcriptions
-        let selTxs = sel.transcription || []
-        if (!Array.isArray(selTxs)) selTxs = [selTxs]
-        selTxs.forEach((tx, idx) => {
-          if (!tx) return
-          let contentKey = identity.computeTranscriptionKey(photoChecksum, idx, selKey)
-          let localTxId = tx['@id'] || tx.id
-          let txKey = localTxId
-            ? this.vault.getTxKey(localTxId, contentKey)
-            : contentKey
-          currentTranscriptionKeys.add(txKey)
-        })
-      }
-    }
+    // Compute current keys and compare with previous snapshot
+    let current = this._computeItemKeys(item, checksumMap)
 
     // Tombstone removed notes
     for (let noteKey of prev.noteKeys) {
-      if (!currentNoteKeys.has(noteKey)) {
+      if (!current.noteKeys.has(noteKey)) {
         schema.removeNote(this.doc, itemIdentity, noteKey, userId)
       }
     }
@@ -1717,7 +1734,7 @@ class SyncEngine {
     // Tombstone removed selections
     if (prev.selectionKeys) {
       for (let selKey of prev.selectionKeys) {
-        if (!currentSelectionKeys.has(selKey)) {
+        if (!current.selectionKeys.has(selKey)) {
           schema.removeSelection(this.doc, itemIdentity, selKey, userId)
         }
       }
@@ -1726,7 +1743,7 @@ class SyncEngine {
     // Tombstone removed transcriptions
     if (prev.transcriptionKeys) {
       for (let txKey of prev.transcriptionKeys) {
-        if (!currentTranscriptionKeys.has(txKey)) {
+        if (!current.transcriptionKeys.has(txKey)) {
           schema.removeTranscription(this.doc, itemIdentity, txKey, userId)
         }
       }
@@ -1735,7 +1752,7 @@ class SyncEngine {
     // Tombstone removed selection notes
     if (prev.selectionNoteKeys) {
       for (let compositeKey of prev.selectionNoteKeys) {
-        if (!currentSelectionNoteKeys.has(compositeKey)) {
+        if (!current.selectionNoteKeys.has(compositeKey)) {
           let sepIdx = compositeKey.indexOf(':')
           if (sepIdx > 0) {
             let selKey = compositeKey.slice(0, sepIdx)
@@ -1748,16 +1765,8 @@ class SyncEngine {
 
     // Tombstone removed list memberships
     if (prev.listNames && this.options.syncLists) {
-      let currentListNames = new Set()
-      let listIds = item.lists || []
-      if (Array.isArray(listIds)) {
-        for (let listId of listIds) {
-          let name = this._listNameCache.get(listId) || this._listNameCache.get(String(listId))
-          if (name) currentListNames.add(name)
-        }
-      }
       for (let listName of prev.listNames) {
-        if (!currentListNames.has(listName)) {
+        if (!current.listNames.has(listName)) {
           schema.removeListMembership(this.doc, itemIdentity, listName, userId)
         }
       }
@@ -1780,7 +1789,7 @@ class SyncEngine {
       return appliedIdentities
     }
 
-    this._log(`applyRemote: scanning ${identities.length} CRDT items`)
+    this._debug(`applyRemote: scanning ${identities.length} CRDT items`)
 
     let allTags = this.adapter
       ? this.adapter.getAllTags()
@@ -1807,6 +1816,8 @@ class SyncEngine {
 
     // Collect and validate matched items
     let matched = []
+    let matchedIdentities = new Set()
+    let matchedLocalIds = new Set()  // Track which local items have exact matches
     for (let itemIdentity of identities) {
       let local = identity.findLocalMatch(itemIdentity, this.localIndex)
       if (!local) continue
@@ -1817,17 +1828,74 @@ class SyncEngine {
         for (let warn of validation.warnings) {
           this.logger.warn(`Validation warning for ${itemIdentity.slice(0, 8)}: ${warn}`)
         }
-        // S3: Block apply for items that fail validation
         this.logger.warn(`Skipping apply for ${itemIdentity.slice(0, 8)} — validation failed`)
         continue
       }
 
       matched.push({ itemIdentity, local })
+      matchedIdentities.add(itemIdentity)
+      matchedLocalIds.add(local.localId)
+    }
+
+    // Fuzzy matching: for unmatched CRDT identities, try to find local items
+    // that contain ALL of the CRDT item's photo checksums (handles merged items)
+    let unmatchedIdentities = identities.filter(id => !matchedIdentities.has(id))
+    if (unmatchedIdentities.length > 0) {
+      for (let crdtIdentity of unmatchedIdentities) {
+        let crdtChecksums = schema.getItemChecksums(this.doc, crdtIdentity)
+        if (crdtChecksums.length === 0) {
+          this._debug(`no checksums for unmatched CRDT item ${crdtIdentity.slice(0, 8)}`)
+          continue
+        }
+
+        let crdtSet = new Set(crdtChecksums)
+        let bestLocal = null
+        let bestLocalIdentity = null
+
+        for (let [localIdentity, local] of this.localIndex) {
+          let photos = local.item.photo || []
+          if (!Array.isArray(photos)) photos = [photos]
+          let localChecksums = new Set()
+          for (let p of photos) {
+            if (p.checksum) localChecksums.add(p.checksum)
+          }
+
+          // ALL CRDT checksums must be present in the local item
+          let allFound = true
+          for (let cs of crdtSet) {
+            if (!localChecksums.has(cs)) { allFound = false; break }
+          }
+          if (allFound) {
+            bestLocal = local
+            bestLocalIdentity = localIdentity
+            break
+          }
+        }
+
+        if (bestLocal) {
+          // Skip fuzzy matches to locals that already have an exact match —
+          // the merged identity's CRDT data supersedes pre-merge data
+          if (matchedLocalIds.has(bestLocal.localId)) {
+            this._debug(`fuzzy skip: CRDT ${crdtIdentity.slice(0, 8)} → local ${bestLocalIdentity.slice(0, 8)} (already has exact match)`)
+            continue
+          }
+          this._log(`fuzzy match: CRDT ${crdtIdentity.slice(0, 8)} → local ${bestLocalIdentity.slice(0, 8)} (merged item, ${crdtChecksums.length} shared photo(s))`)
+          let crdtItem = snapshot[crdtIdentity]
+          let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
+          if (validation.valid) {
+            matched.push({ itemIdentity: crdtIdentity, local: bestLocal })
+            matchedLocalIds.add(bestLocal.localId)
+          }
+        } else {
+          this._debug(`no fuzzy match for CRDT item ${crdtIdentity.slice(0, 8)}`)
+        }
+      }
     }
 
     if (matched.length === 0) {
       this._applyingRemote = false
-      this._log('applyRemote: no matched items')
+      if (this.adapter) this.adapter.resumeChanges()
+      this._debug('applyRemote: no matched items')
       return appliedIdentities
     }
 
@@ -1843,11 +1911,13 @@ class SyncEngine {
         } catch {}
       }
       if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
-        this.backup.saveSnapshot(backupItems)
+        await this.backup.saveSnapshot(backupItems)
       }
     } catch (err) {
-      this.logger.debug('Batch backup failed', { error: err.message })
+      this.logger.warn('Batch backup failed', { error: err.message })
     }
+
+    this._resetApplyStats()
 
     try {
       for (let { itemIdentity, local } of matched) {
@@ -1855,21 +1925,21 @@ class SyncEngine {
           await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
           appliedIdentities.add(itemIdentity)
         } catch (err) {
-          this.logger.debug(`Failed to apply remote for ${itemIdentity}`, {
+          this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
             error: err.message
           })
         }
       }
     } finally {
+      this._logApplyStats()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
       if (this._queuedLocalChange) {
         this._queuedLocalChange = false
-        this._log('applyRemote: replaying queued local change')
+        this._debug('replaying queued local change')
         this.handleLocalChange()
       }
     }
-    this._log(`applyRemote: processed ${appliedIdentities.size} matched items`)
     return appliedIdentities
   }
 
@@ -1899,7 +1969,13 @@ class SyncEngine {
     let localId = local.localId
     let userId = this._stableUserId
 
-    this._log(`applyAnnotations: item ${localId}, identity ${itemIdentity.slice(0, 8)}...`)
+    this._debug(`applyAnnotations: item ${localId}, identity ${itemIdentity.slice(0, 8)}...`)
+
+    // Snapshot stats before this item to detect if anything changed
+    let s = this._applyStats
+    let before = s ? (s.notesCreated + s.notesUpdated + s.tagsAdded +
+      s.selectionsCreated + s.metadataUpdated + s.transcriptionsCreated +
+      s.listsAdded + s.notesRetracted) : 0
 
     // Apply metadata (batched — no per-field delay)
     await this.applyMetadata(itemIdentity, localId, userId, local.item)
@@ -1933,6 +2009,14 @@ class SyncEngine {
       await this._writeDelay()
       await this.applyLists(itemIdentity, local, userId, listMap)
     }
+
+    if (s) {
+      s.itemsProcessed++
+      let after = s.notesCreated + s.notesUpdated + s.tagsAdded +
+        s.selectionsCreated + s.metadataUpdated + s.transcriptionsCreated +
+        s.listsAdded + s.notesRetracted
+      if (after > before) s.itemsChanged++
+    }
   }
 
   // P6: No per-field delay within metadata apply
@@ -1955,11 +2039,14 @@ class SyncEngine {
       batch[prop] = { text: value.text, type: value.type }
     }
 
-    if (Object.keys(batch).length > 0) {
+    let batchKeys = Object.keys(batch)
+    if (batchKeys.length > 0) {
       try {
         await this.api.saveMetadata(localId, batch)
+        if (this._applyStats) this._applyStats.metadataUpdated += batchKeys.length
+        this._debug(`metadata: ${batchKeys.length} field(s) on item ${localId}`)
       } catch (err) {
-        this.logger.debug(`Failed to save metadata batch on ${localId}`, {
+        this.logger.warn(`Failed to save metadata batch on ${localId}`, {
           error: err.message
         })
       }
@@ -1988,9 +2075,11 @@ class SyncEngine {
         try {
           await this.api.createTag(tag.name, tag.color, [localId])
           localTagNames.add(tag.name)
+          if (this._applyStats) this._applyStats.tagsAdded++
+          this._debug(`tag created: "${tag.name}" on item ${localId}`)
           continue
         } catch (err) {
-          this.logger.debug(`Failed to create tag "${tag.name}"`, { error: err.message })
+          this.logger.warn(`Failed to create tag "${tag.name}"`, { error: err.message })
           continue
         }
       }
@@ -1998,6 +2087,8 @@ class SyncEngine {
       try {
         await this.api.addTagsToItem(localId, [existing.id || existing.tag_id])
         localTagNames.add(tag.name)
+        if (this._applyStats) this._applyStats.tagsAdded++
+        this._debug(`tag added: "${tag.name}" on item ${localId}`)
       } catch {}
     }
 
@@ -2019,6 +2110,116 @@ class SyncEngine {
     }
   }
 
+  /**
+   * Build a dedup set from existing local notes (text + html with prefix stripping).
+   */
+  _buildExistingNoteTexts(notes) {
+    let set = new Set()
+    for (let n of notes) {
+      if (n && n.text) {
+        set.add(n.text.trim())
+        let stripped = n.text
+          .replace(/^troparcel:\s*[^\n]*\n?/, '')
+          .replace(/^\[(?:troparcel:)?[^\]]{1,80}\]\s*/, '')
+          .trim()
+        if (stripped) set.add(stripped)
+      }
+      if (n && n.html) {
+        set.add(n.html.trim())
+        let strippedHtml = n.html
+          .replace(/^<blockquote><p><em>troparcel:[^<]*<\/em><\/p><\/blockquote>/, '')
+          .replace(/^<p><strong>\[[^\]]*\]<\/strong><\/p>/, '')
+          .trim()
+        if (strippedHtml) set.add(strippedHtml)
+      }
+    }
+    return set
+  }
+
+  /**
+   * Apply a single remote note: sanitize, dedup, update-or-create.
+   * Shared by applyNotes and applySelectionNotes.
+   *
+   * @param {string} noteKey - vault key for this note
+   * @param {Object} note - remote note data
+   * @param {Object} parent - { photo, selection } — which parent to attach to
+   * @param {Set} existingTexts - dedup set (mutated on create)
+   * @param {string} userId - local user ID
+   * @param {string} label - label for log messages (e.g. "note" or "sel note")
+   * @returns {boolean} true if note was created/updated, false if skipped
+   */
+  async _applyRemoteNote(noteKey, note, parent, existingTexts, userId, label) {
+    let safeHtml = note.html
+      ? sanitizeHtml(note.html)
+      : `<p>${escapeHtml(note.text)}</p>`
+
+    let authorLabel = escapeHtml(note.author || 'unknown')
+    safeHtml = `<blockquote><p><em>troparcel: ${authorLabel}</em></p></blockquote>${safeHtml}`
+
+    // Content-based dedup
+    let plainText = (note.text || '').trim()
+    if ((plainText && existingTexts.has(plainText)) ||
+        existingTexts.has(safeHtml.trim())) {
+      this.vault.appliedNoteKeys.add(noteKey)
+      if (this._applyStats) this._applyStats.notesDeduped++
+      return false
+    }
+
+    // C1: Check if we've already applied this note (update instead of re-create)
+    let existingLocalId = this.vault.getLocalNoteId(noteKey)
+    if (existingLocalId) {
+      try {
+        if (this.adapter) {
+          let result = await this.adapter.updateNote(existingLocalId, { html: safeHtml })
+          this.vault.appliedNoteKeys.add(noteKey)
+          if (result && (result.id || result['@id'])) {
+            this.vault.mapAppliedNote(noteKey, result.id || result['@id'])
+          }
+        } else {
+          await this.api.updateNote(existingLocalId, { html: safeHtml })
+          this.vault.appliedNoteKeys.add(noteKey)
+        }
+        if (this._applyStats) this._applyStats.notesUpdated++
+        this._debug(`${label} updated: ${noteKey.slice(0, 8)}`)
+        return true
+      } catch {
+        // Note might have been deleted locally — fall through to create
+      }
+    }
+
+    try {
+      let created
+      let payload = {
+        html: safeHtml,
+        language: note.language,
+        photo: parent.photo || null,
+        selection: parent.selection || null
+      }
+      if (this.adapter) {
+        created = await this.adapter.createNote(payload)
+      } else {
+        created = await this.api.createNote(payload)
+      }
+      if (created && (created.id || created['@id'])) {
+        this.vault.appliedNoteKeys.add(noteKey)
+        this.vault.mapAppliedNote(noteKey, created.id || created['@id'])
+        if (plainText) existingTexts.add(plainText)
+        existingTexts.add(safeHtml.trim())
+        if (this._applyStats) this._applyStats.notesCreated++
+        this._debug(`${label} created: ${noteKey.slice(0, 8)} by ${note.author}`)
+        return true
+      } else {
+        this.logger.warn({ ...parent, noteKey: noteKey.slice(0, 8), author: note.author },
+          `${label}.create returned null`)
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to create ${label}`, {
+        error: err.message, ...parent, noteKey: noteKey.slice(0, 8)
+      })
+    }
+    return false
+  }
+
   // C1: Stores vault mapping when applying remote notes
   async applyNotes(itemIdentity, local, userId) {
     if (!this.options.syncNotes) return
@@ -2028,28 +2229,11 @@ class SyncEngine {
     if (!Array.isArray(photos)) photos = [photos]
 
     // Build index of existing local notes for content-based dedup
-    let existingNoteTexts = new Set()
+    let allLocalNotes = []
     for (let p of photos) {
-      for (let n of (p.note || [])) {
-        if (n && n.text) {
-          existingNoteTexts.add(n.text.trim())
-          // Strip troparcel prefixes for cross-format matching
-          let stripped = n.text
-            .replace(/^troparcel:\s*[^\n]*\n?/, '')       // blockquote text form
-            .replace(/^\[(?:troparcel:)?[^\]]{1,80}\]\s*/, '') // [author] text form
-            .trim()
-          if (stripped) existingNoteTexts.add(stripped)
-        }
-        if (n && n.html) {
-          existingNoteTexts.add(n.html.trim())
-          let strippedHtml = n.html
-            .replace(/^<blockquote><p><em>troparcel:[^<]*<\/em><\/p><\/blockquote>/, '') // v4.1+
-            .replace(/^<p><strong>\[[^\]]*\]<\/strong><\/p>/, '') // v4.0/legacy
-            .trim()
-          if (strippedHtml) existingNoteTexts.add(strippedHtml)
-        }
-      }
+      for (let n of (p.note || [])) allLocalNotes.push(n)
     }
+    let existingNoteTexts = this._buildExistingNoteTexts(allLocalNotes)
 
     // Also process tombstoned notes to update previously-applied notes as retracted
     let allNotes = schema.getNotes(this.doc, itemIdentity)
@@ -2084,76 +2268,11 @@ class SyncEngine {
       }
       if (!photoId) continue
 
-      let safeHtml = note.html
-        ? sanitizeHtml(note.html)
-        : `<p>${escapeHtml(note.text)}</p>`
-
-      let authorLabel = escapeHtml(note.author || 'unknown')
-      safeHtml = `<blockquote><p><em>troparcel: ${authorLabel}</em></p></blockquote>${safeHtml}`
-
-      // Content-based dedup: skip if a note with matching text already exists
-      let plainText = (note.text || '').trim()
-      if (plainText && existingNoteTexts.has(plainText)) {
-        this.vault.appliedNoteKeys.add(noteKey)
-        continue
-      }
-      // Also check by HTML content (with author prefix)
-      if (existingNoteTexts.has(safeHtml.trim())) {
-        this.vault.appliedNoteKeys.add(noteKey)
-        continue
-      }
-
-      // C1: Check if we've already applied this note (update instead of re-create)
-      let existingLocalId = this.vault.getLocalNoteId(noteKey)
-      if (existingLocalId) {
-        try {
-          if (this.adapter) {
-            let result = await this.adapter.updateNote(existingLocalId, { html: safeHtml })
-            this.vault.appliedNoteKeys.add(noteKey)
-            if (result && (result.id || result['@id'])) {
-              this.vault.mapAppliedNote(noteKey, result.id || result['@id'])
-            }
-          } else {
-            await this.api.updateNote(existingLocalId, { html: safeHtml })
-            this.vault.appliedNoteKeys.add(noteKey)
-          }
-          continue
-        } catch {
-          // Note might have been deleted locally — fall through to create
-        }
-      }
-
-      try {
-        let created
-        if (this.adapter) {
-          created = await this.adapter.createNote({
-            html: safeHtml,
-            language: note.language,
-            photo: Number(photoId) || null,
-            selection: null
-          })
-        } else {
-          created = await this.api.createNote({
-            html: safeHtml,
-            language: note.language,
-            photo: Number(photoId) || null,
-            selection: null
-          })
-        }
-        if (created && (created.id || created['@id'])) {
-          this.vault.appliedNoteKeys.add(noteKey)
-          this.vault.mapAppliedNote(noteKey, created.id || created['@id'])
-          // Add to dedup set so we don't re-create within same cycle
-          if (plainText) existingNoteTexts.add(plainText)
-          existingNoteTexts.add(safeHtml.trim())
-        } else {
-          this.logger.debug(`note.create returned null for ${localId} photo=${photoId}`)
-        }
-      } catch (err) {
-        this.logger.debug(`Failed to create note on ${localId}`, {
-          error: err.message
-        })
-      }
+      await this._applyRemoteNote(
+        noteKey, note,
+        { photo: Number(photoId) || null },
+        existingNoteTexts, userId, 'note'
+      )
     }
 
     // Handle tombstoned notes: update previously-applied notes to show retracted style
@@ -2170,6 +2289,8 @@ class SyncEngine {
           await this.adapter.updateNote(existingLocalId, { html: retractedHtml })
         }
         this.vault.appliedNoteKeys.add(noteKey)
+        if (this._applyStats) this._applyStats.notesRetracted++
+        this._debug(`note retracted: ${noteKey.slice(0, 8)} by ${note.author}`)
       } catch {
         // Note may have been deleted locally
       }
@@ -2205,11 +2326,13 @@ class SyncEngine {
         batch[prop] = { text: value.text, type: value.type }
       }
 
-      if (Object.keys(batch).length > 0) {
+      let photoBatchKeys = Object.keys(batch)
+      if (photoBatchKeys.length > 0) {
         try {
           await this.api.saveMetadata(localPhotoId, batch)
+          if (this._applyStats) this._applyStats.metadataUpdated += photoBatchKeys.length
         } catch (err) {
-          this.logger.debug(`Failed to save photo metadata batch`, { error: err.message })
+          this.logger.warn(`Failed to save photo metadata batch`, { error: err.message })
         }
       }
     }
@@ -2282,8 +2405,10 @@ class SyncEngine {
             })
           }
           this.vault.appliedSelectionKeys.add(selKey)
+          if (this._applyStats) this._applyStats.selectionsCreated++
+          this._debug(`selection created: ${selKey.slice(0, 8)} on photo ${localPhotoId}`)
         } catch (err) {
-          this.logger.debug(`Failed to create selection on photo ${localPhotoId}`, {
+          this.logger.warn(`Failed to create selection on photo ${localPhotoId}`, {
             error: err.message
           })
           this.vault.appliedSelectionKeys.add(selKey)
@@ -2309,26 +2434,7 @@ class SyncEngine {
       for (let sel of localSels) {
         if (!sel) continue
 
-        // Build existing note text set for this selection
-        let existingTexts = new Set()
-        for (let n of (sel.note || [])) {
-          if (n && n.text) {
-            existingTexts.add(n.text.trim())
-            let stripped = n.text
-              .replace(/^troparcel:\s*[^\n]*\n?/, '')
-              .replace(/^\[(?:troparcel:)?[^\]]{1,80}\]\s*/, '')
-              .trim()
-            if (stripped) existingTexts.add(stripped)
-          }
-          if (n && n.html) {
-            existingTexts.add(n.html.trim())
-            let strippedHtml = n.html
-              .replace(/^<blockquote><p><em>troparcel:[^<]*<\/em><\/p><\/blockquote>/, '')
-              .replace(/^<p><strong>\[[^\]]*\]<\/strong><\/p>/, '')
-              .trim()
-            if (strippedHtml) existingTexts.add(strippedHtml)
-          }
-        }
+        let existingTexts = this._buildExistingNoteTexts(sel.note || [])
 
         let selKey = identity.computeSelectionKey(checksum, sel)
         let remoteNotes = schema.getSelectionNotes(this.doc, itemIdentity, selKey)
@@ -2338,70 +2444,14 @@ class SyncEngine {
           if (!note.html && !note.text) continue
           if (this.vault.appliedNoteKeys.has(compositeKey)) continue
 
-          let safeHtml = note.html
-            ? sanitizeHtml(note.html)
-            : `<p>${escapeHtml(note.text)}</p>`
-
-          let authorLabel = escapeHtml(note.author || 'unknown')
-          safeHtml = `<blockquote><p><em>troparcel: ${authorLabel}</em></p></blockquote>${safeHtml}`
-
           let localSelId = sel['@id'] || sel.id
           if (!localSelId) continue
 
-          // Content-based dedup
-          let plainText = (note.text || '').trim()
-          if ((plainText && existingTexts.has(plainText)) ||
-              existingTexts.has(safeHtml.trim())) {
-            this.vault.appliedNoteKeys.add(compositeKey)
-            continue
-          }
-
-          // C1: Check for existing mapping (update vs create)
-          let existingLocalId = this.vault.getLocalNoteId(compositeKey)
-          if (existingLocalId) {
-            try {
-              if (this.adapter) {
-                let result = await this.adapter.updateNote(existingLocalId, { html: safeHtml })
-                this.vault.appliedNoteKeys.add(compositeKey)
-                if (result && (result.id || result['@id'])) {
-                  this.vault.mapAppliedNote(compositeKey, result.id || result['@id'])
-                }
-              } else {
-                await this.api.updateNote(existingLocalId, { html: safeHtml })
-                this.vault.appliedNoteKeys.add(compositeKey)
-              }
-              continue
-            } catch {}
-          }
-
-          try {
-            let created
-            if (this.adapter) {
-              created = await this.adapter.createNote({
-                html: safeHtml,
-                language: note.language,
-                selection: Number(localSelId) || null
-              })
-            } else {
-              created = await this.api.createNote({
-                html: safeHtml,
-                language: note.language,
-                selection: Number(localSelId) || null
-              })
-            }
-            if (created && (created.id || created['@id'])) {
-              this.vault.appliedNoteKeys.add(compositeKey)
-              this.vault.mapAppliedNote(compositeKey, created.id || created['@id'])
-              if (plainText) existingTexts.add(plainText)
-              existingTexts.add(safeHtml.trim())
-            } else {
-              this.logger.debug(`selection note.create returned null for sel=${localSelId}`)
-            }
-          } catch (err) {
-            this.logger.debug(`Failed to create selection note`, {
-              error: err.message
-            })
-          }
+          await this._applyRemoteNote(
+            compositeKey, note,
+            { selection: Number(localSelId) || null },
+            existingTexts, userId, 'sel note'
+          )
         }
       }
     }
@@ -2444,11 +2494,13 @@ class SyncEngine {
           batch[prop] = { text: value.text, type: value.type }
         }
 
-        if (Object.keys(batch).length > 0) {
+        let selBatchKeys = Object.keys(batch)
+        if (selBatchKeys.length > 0) {
           try {
             await this.api.saveMetadata(localSelId, batch)
+            if (this._applyStats) this._applyStats.metadataUpdated += selBatchKeys.length
           } catch (err) {
-            this.logger.debug(`Failed to save selection metadata`, { error: err.message })
+            this.logger.warn(`Failed to save selection metadata`, { error: err.message })
           }
         }
       }
@@ -2525,9 +2577,11 @@ class SyncEngine {
         this.vault.appliedTranscriptionKeys.add(txKey)
         if (created && (created.id || created['@id'])) {
           this.vault.mapAppliedTranscription(txKey, created.id || created['@id'])
+          if (this._applyStats) this._applyStats.transcriptionsCreated++
+          this._debug(`transcription created: ${txKey.slice(0, 8)} by ${tx.author}`)
         }
       } catch (err) {
-        this.logger.debug(`Failed to create transcription`, {
+        this.logger.warn(`Failed to create transcription`, {
           error: err.message
         })
         this.vault.appliedTranscriptionKeys.add(txKey)
@@ -2561,6 +2615,8 @@ class SyncEngine {
             await this.api.addItemsToList(localList.id, [localId])
           }
           localListNames.add(listKey)
+          if (this._applyStats) this._applyStats.listsAdded++
+          this._debug(`list add: item ${localId} → "${listKey}"`)
         } catch {}
       }
     }
@@ -2664,7 +2720,7 @@ class SyncEngine {
       } catch {}
     }
     if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
-      this.backup.saveSnapshot(backupItems)
+      await this.backup.saveSnapshot(backupItems)
     }
 
     this._applyingRemote = true
@@ -2678,7 +2734,7 @@ class SyncEngine {
           await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
           applied++
         } catch (err) {
-          this.logger.debug(`Import: failed to apply ${itemIdentity}`, {
+          this.logger.warn(`Import: failed to apply ${itemIdentity}`, {
             error: err.message
           })
         }

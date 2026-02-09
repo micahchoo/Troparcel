@@ -50,7 +50,7 @@ class BackupManager {
    * @param {Object[]} itemSnapshots - array of { identity, localId, metadata, tags, notes, selections, transcriptions }
    * @returns {string} path to the backup file
    */
-  saveSnapshot(itemSnapshots) {
+  async saveSnapshot(itemSnapshots) {
     this.ensureDir()
     let ts = new Date().toISOString().replace(/[:.]/g, '-')
     this._fileCounter++
@@ -64,7 +64,7 @@ class BackupManager {
       items: itemSnapshots
     }
 
-    fs.writeFileSync(filepath, JSON.stringify(data, null, 2))
+    await fs.promises.writeFile(filepath, JSON.stringify(data, null, 2))
     this.logger.info(`Backup saved: ${filepath}`, { items: itemSnapshots.length })
 
     this.pruneOldBackups()
@@ -86,7 +86,7 @@ class BackupManager {
         this.logger.debug(`Pruned old backup: ${oldest}`)
       }
     } catch (err) {
-      this.logger.debug('Failed to prune backups', { error: err.message })
+      this.logger.warn('Failed to prune backups', { error: err.message })
     }
   }
 
@@ -217,7 +217,7 @@ class BackupManager {
     }
 
     if (totalEntries > 0 && (tombstoned / totalEntries) > this.options.tombstoneFloodThreshold) {
-      this.logger.debug(
+      this.logger.info(
         `Tombstone ratio for ${itemIdentity.slice(0, 8)}: ${tombstoned}/${totalEntries} ` +
         `(${Math.round(tombstoned / totalEntries * 100)}%) — not blocking`
       )

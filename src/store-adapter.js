@@ -58,7 +58,26 @@ class StoreAdapter {
    * Returns the same nested shape that SyncEngine.enrichItem() produced.
    */
   getItemFull(itemId) {
+    return this._buildItemFull(this._getState(), itemId)
+  }
+
+  /**
+   * Return all items fully enriched in a single pass (one state read).
+   */
+  getAllItemsFull() {
     let state = this._getState()
+    let result = []
+    for (let id of Object.keys(state.items)) {
+      let item = this._buildItemFull(state, Number(id))
+      if (item) result.push(item)
+    }
+    return result
+  }
+
+  /**
+   * Build a fully-enriched item from a pre-read state snapshot.
+   */
+  _buildItemFull(state, itemId) {
     let item = state.items[itemId]
     if (!item) return null
 
@@ -387,7 +406,11 @@ class StoreAdapter {
       prevState = state
 
       if (changed) {
-        callback()
+        try {
+          callback()
+        } catch (err) {
+          this.logger.warn(`subscribe callback error: ${err.message}`)
+        }
       }
     })
   }
@@ -422,10 +445,7 @@ class StoreAdapter {
     return new Promise((resolve, reject) => {
       let timer = setTimeout(() => {
         unsub()
-        // Resolve anyway — the command might have completed but
-        // we missed the exact transition.  Callers read state after.
-        this.logger.debug(`waitForAction: ${action.type} seq=${seq} timed out`)
-        resolve()
+        reject(new Error(`waitForAction: ${action.type} seq=${seq} timed out after ${timeout}ms`))
       }, timeout)
 
       let unsub = this.store.subscribe(() => {
