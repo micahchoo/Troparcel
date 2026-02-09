@@ -1,0 +1,230 @@
+{
+  "name": "troparcel",
+  "productName": "Troparcel",
+  "version": "4.11.0",
+  "description": "Real-time collaboration for Tropy — requires a Troparcel server. Syncs notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs. See homepage for setup guide.",
+  "author": "Micah",
+  "license": "AGPL-3.0",
+  "homepage": "https://github.com/BIIIF/troparcel#quick-start",
+  "repository": "https://github.com/BIIIF/troparcel",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "pack": "node esbuild.config.mjs && zip -r troparcel.zip package.json index.js icon.svg",
+    "watch": "node esbuild.config.mjs --watch",
+    "server": "node server/index.js",
+    "test": "node --test test/index.test.js"
+  },
+  "hooks": {
+    "export": true,
+    "import": true
+  },
+  "options": [
+    {
+      "field": "serverUrl",
+      "label": "Server URL — ws://host:port of your Troparcel server",
+      "type": "string",
+      "default": "ws://localhost:2468",
+      "placeholder": "ws://localhost:2468",
+      "hint": "WebSocket URL of the Troparcel collaboration server. You must run the server separately."
+    },
+    {
+      "field": "room",
+      "label": "Room — all collaborators must use the same name",
+      "type": "string",
+      "default": "",
+      "placeholder": "blank = project name",
+      "hint": "Collaboration room name. All participants must use the same room. Leave blank to use the project name."
+    },
+    {
+      "field": "userId",
+      "label": "Your Name — shown to collaborators on your annotations",
+      "type": "string",
+      "default": "",
+      "placeholder": "alice",
+      "hint": "Your display name for attribution. Other collaborators will see this on your annotations."
+    },
+    {
+      "field": "roomToken",
+      "label": "Room Token — shared secret, all collaborators must match",
+      "type": "string",
+      "default": "",
+      "placeholder": "optional shared secret",
+      "hint": "Shared secret for room authentication. All participants must use the same token."
+    },
+    {
+      "field": "syncMode",
+      "label": "Sync Mode — auto / review / push / pull",
+      "type": "string",
+      "default": "auto",
+      "placeholder": "auto",
+      "hint": "'auto' — push and apply in real-time. 'review' — push automatically, apply only on Import. 'push' — only send local changes. 'pull' — only receive remote changes."
+    },
+    {
+      "field": "autoSync",
+      "label": "Auto-sync in background",
+      "type": "boolean",
+      "default": true,
+      "hint": "Start syncing automatically when Tropy opens. When off, use File > Export (push) and File > Import (pull) to sync manually."
+    },
+    {
+      "field": "syncMetadata",
+      "label": "Sync Metadata",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync item metadata (title, date, description, custom fields) between collaborators."
+    },
+    {
+      "field": "syncTags",
+      "label": "Sync Tags",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync tag assignments between collaborators."
+    },
+    {
+      "field": "syncNotes",
+      "label": "Sync Notes",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync notes (annotations) between collaborators."
+    },
+    {
+      "field": "syncSelections",
+      "label": "Sync Selections (photo regions)",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync photo region selections between collaborators."
+    },
+    {
+      "field": "syncTranscriptions",
+      "label": "Sync Transcriptions",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync transcription text between collaborators."
+    },
+    {
+      "field": "syncPhotoAdjustments",
+      "label": "Sync Photo Adjustments",
+      "type": "boolean",
+      "default": false,
+      "hint": "Sync brightness, contrast, saturation, angle, mirror, and negative settings between collaborators."
+    },
+    {
+      "field": "syncLists",
+      "label": "Sync List Membership",
+      "type": "boolean",
+      "default": false,
+      "hint": "Add/remove items from lists based on other users' changes. Lists are matched by name."
+    },
+    {
+      "field": "syncDeletions",
+      "label": "Propagate Deletions",
+      "type": "boolean",
+      "default": false,
+      "hint": "Send your deletions (tags, notes, selections, etc.) to other collaborators. When off, deletions stay local only."
+    },
+    {
+      "field": "debug",
+      "label": "Debug Logging",
+      "type": "boolean",
+      "default": false,
+      "hint": "Show verbose sync details in the developer console (View > Toggle Developer Tools)."
+    },
+    {
+      "field": "apiPort",
+      "label": "[Advanced] API Port — 2019 for latest, 2029 for stable",
+      "type": "number",
+      "default": 2019,
+      "hint": "Port of Tropy's local HTTP API. Only change if you use Tropy stable (2029) instead of latest (2019)."
+    },
+    {
+      "field": "startupDelay",
+      "label": "[Advanced] Startup Delay ms — wait for Tropy to initialize",
+      "type": "number",
+      "default": 8000,
+      "hint": "Milliseconds to wait for Tropy to finish loading before starting sync."
+    },
+    {
+      "field": "localDebounce",
+      "label": "[Advanced] Local Debounce ms — batch rapid edits",
+      "type": "number",
+      "default": 2000,
+      "hint": "Delay after a local edit before pushing to the server. Batches rapid edits."
+    },
+    {
+      "field": "remoteDebounce",
+      "label": "[Advanced] Remote Debounce ms",
+      "type": "number",
+      "default": 500,
+      "hint": "Delay after receiving a remote change before applying locally."
+    },
+    {
+      "field": "safetyNetInterval",
+      "label": "[Advanced] Full Sync Interval sec — 0 to disable",
+      "type": "number",
+      "default": 120,
+      "hint": "Periodic full sync interval as a safety net. Set to 0 to disable."
+    },
+    {
+      "field": "writeDelay",
+      "label": "[Advanced] Write Delay ms — increase if you see DB lock errors",
+      "type": "number",
+      "default": 100,
+      "hint": "Delay between write operations. Increase if you see SQLITE_BUSY errors."
+    },
+    {
+      "field": "maxBackups",
+      "label": "[Advanced] Max Backups",
+      "type": "number",
+      "default": 10,
+      "hint": "Maximum backup snapshots to keep per room."
+    },
+    {
+      "field": "maxNoteSize",
+      "label": "[Advanced] Max Note Size bytes — default 1MB",
+      "type": "number",
+      "default": 1048576,
+      "hint": "Maximum size for notes and transcriptions from remote sources."
+    },
+    {
+      "field": "maxMetadataSize",
+      "label": "[Advanced] Max Metadata Size bytes — default 64KB",
+      "type": "number",
+      "default": 65536,
+      "hint": "Maximum size for individual metadata values from remote sources."
+    },
+    {
+      "field": "tombstoneFloodThreshold",
+      "label": "[Advanced] Tombstone Flood Threshold 0-1",
+      "type": "number",
+      "default": 0.5,
+      "hint": "Warn if more than this fraction of an item's data is tombstoned in one sync."
+    },
+    {
+      "field": "clearTombstones",
+      "label": "[Advanced] Clear Tombstones — purge on next restart, then disable this",
+      "type": "boolean",
+      "default": false,
+      "hint": "One-shot: purges all deletion markers from the CRDT on next startup. Remember to disable this afterward."
+    }
+  ],
+  "keywords": [
+    "tropy",
+    "plugin",
+    "collaboration",
+    "annotation",
+    "crdt",
+    "yjs",
+    "sync",
+    "research"
+  ],
+  "dependencies": {
+    "yjs": "^13.6.0",
+    "y-websocket": "^1.5.0",
+    "lib0": "^0.2.88"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0"
+  }
+}

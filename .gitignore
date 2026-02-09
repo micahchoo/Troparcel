@@ -1,0 +1,10 @@
+node_modules/
+data/
+server/data/
+*.map
+*.log
+npm-debug.log
+troparcel.zip
+package-lock.json
+.claude/
+.DS_Store
