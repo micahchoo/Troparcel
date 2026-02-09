@@ -39,8 +39,8 @@ class BackupManager {
   /**
    * Ensure the backup directory exists.
    */
-  ensureDir() {
-    fs.mkdirSync(this.backupDir, { recursive: true })
+  async ensureDir() {
+    await fs.promises.mkdir(this.backupDir, { recursive: true })
   }
 
   /**
@@ -51,7 +51,7 @@ class BackupManager {
    * @returns {string} path to the backup file
    */
   async saveSnapshot(itemSnapshots) {
-    this.ensureDir()
+    await this.ensureDir()
     let ts = new Date().toISOString().replace(/[:.]/g, '-')
     this._fileCounter++
     let filename = `${ts}-${String(this._fileCounter).padStart(4, '0')}.json`
@@ -64,7 +64,7 @@ class BackupManager {
       items: itemSnapshots
     }
 
-    await fs.promises.writeFile(filepath, JSON.stringify(data, null, 2))
+    await fs.promises.writeFile(filepath, JSON.stringify(data))
     this.logger.info(`Backup saved: ${filepath}`, { items: itemSnapshots.length })
 
     await this.pruneOldBackups()
@@ -145,10 +145,21 @@ class BackupManager {
     if (!item) {
       return { identity: itemIdentity, localId, metadata: null, tags: [], photos: [] }
     }
+    // Extract metadata properties — skip known structural keys
+    let metadata = {}
+    let structuralKeys = new Set([
+      'id', 'photo', 'template', 'list', 'lists', 'tag', 'tags',
+      'photos', 'selections', 'notes', 'transcriptions'
+    ])
+    for (let [key, value] of Object.entries(item)) {
+      if (key.startsWith('@') || key.startsWith('_')) continue
+      if (structuralKeys.has(key)) continue
+      metadata[key] = value
+    }
     return {
       identity: itemIdentity,
       localId,
-      metadata: item,
+      metadata,
       tags: item.tag || [],
       photos: item.photo || []
     }
@@ -259,13 +270,14 @@ class BackupManager {
     let errors = []
 
     for (let item of data.items) {
+      let itemErrors = []
       try {
         // Restore metadata
         if (item.metadata) {
           try {
             await this.api.saveMetadata(item.localId, item.metadata)
           } catch (err) {
-            errors.push(`metadata for ${item.localId}: ${err.message}`)
+            itemErrors.push(`metadata for ${item.localId}: ${err.message}`)
           }
         }
 
@@ -277,7 +289,7 @@ class BackupManager {
               await this.api.addTagsToItem(item.localId, tagIds)
             }
           } catch (err) {
-            errors.push(`tags for ${item.localId}: ${err.message}`)
+            itemErrors.push(`tags for ${item.localId}: ${err.message}`)
           }
         }
 
@@ -292,12 +304,11 @@ class BackupManager {
                   if (adapter) {
                     await adapter.updateNote(noteId, { html: note.html })
                   } else {
-                    // HTTP PUT for notes returns 404 — log warning
                     this.logger.warn(`Rollback: note ${noteId} update skipped (no store adapter, HTTP PUT not supported)`)
                   }
                 }
               } catch (err) {
-                errors.push(`note ${noteId}: ${err.message}`)
+                itemErrors.push(`note ${noteId}: ${err.message}`)
               }
             }
 
@@ -309,9 +320,14 @@ class BackupManager {
           }
         }
 
+        if (itemErrors.length > 0) {
+          this.logger.warn(`Rollback: item ${item.localId} partially restored with ${itemErrors.length} error(s)`)
+          errors.push(...itemErrors)
+        }
         restored++
       } catch (err) {
         errors.push(`Failed to restore item ${item.localId}: ${err.message}`)
+        errors.push(...itemErrors)
       }
     }
 

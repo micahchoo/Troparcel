@@ -52,6 +52,17 @@ class SyncVault {
     // Persisted failed note keys — tracks keys that permanently failed
     // so they survive restart and don't retry indefinitely
     this.failedNoteKeys = new Map()  // key -> retryCount
+
+    // Dirty flag — set when applied keys change, cleared after persist
+    this._dirty = false
+  }
+
+  markDirty() {
+    this._dirty = true
+  }
+
+  get isDirty() {
+    return this._dirty
   }
 
   /**
@@ -103,15 +114,18 @@ class SyncVault {
   hasItemChanged(identity, item) {
     let hash = this._fastHash(item)
     let last = this.pushedHashes.get(identity)
+    // Cache for reuse in markPushed
+    this._lastItemHash = hash
     return last !== hash
   }
 
   /**
    * Record that an item was pushed to the CRDT.
+   * Uses cached hash from hasItemChanged when available.
    */
-  markPushed(identity, item) {
+  markPushed(identity, hash) {
     this._evictIfNeeded(this.pushedHashes, MAX_PUSHED_ITEMS)
-    this.pushedHashes.set(identity, this._fastHash(item))
+    this.pushedHashes.set(identity, hash || this._lastItemHash)
   }
 
   /**
@@ -302,11 +316,14 @@ class SyncVault {
         appliedNoteKeys: Array.from(this.appliedNoteKeys),
         appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
         appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys),
-        failedNoteKeys: Array.from(this.failedNoteKeys)
+        failedNoteKeys: Array.from(this.failedNoteKeys.entries()).map(([k, c]) => ({ key: k, count: c }))
       }
       await fs.promises.writeFile(tmpFile, JSON.stringify(data))
       await fs.promises.rename(tmpFile, file)
-    } catch {}
+      this._dirty = false
+    } catch (err) {
+      throw err
+    }
   }
 
   /**
@@ -333,7 +350,14 @@ class SyncVault {
       // v2: restore persisted failed note keys
       if (Array.isArray(data.failedNoteKeys)) {
         for (let k of data.failedNoteKeys) {
-          this.failedNoteKeys.set(typeof k === 'string' ? k : k.key, (k.count || 3))
+          if (typeof k === 'string') {
+            this.failedNoteKeys.set(k, 3)
+          } else if (Array.isArray(k)) {
+            // Legacy: Array.from(Map) produces [[key, count], ...]
+            this.failedNoteKeys.set(k[0], k[1] || 3)
+          } else if (k && k.key) {
+            this.failedNoteKeys.set(k.key, k.count || 3)
+          }
         }
       }
       return true

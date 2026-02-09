@@ -315,14 +315,17 @@ function setSelection(doc, identity, selKey, selection, author) {
   let selections = _getSection(doc, identity, 'selections')
 
   // Use ?? instead of || so that 0 is preserved (valid for x, y, angle)
+  let x = selection.x ?? 0
+  let y = selection.y ?? 0
   let w = selection.width ?? selection.w
   let h = selection.height ?? selection.h
-  if (w == null || h == null || w <= 0 || h <= 0) return  // invalid selection
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return  // invalid coordinates
+  if (w == null || h == null || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return
 
   selections.set(selKey, {
     selKey,
-    x: selection.x ?? 0,
-    y: selection.y ?? 0,
+    x,
+    y,
     w,
     h,
     angle: selection.angle ?? 0,
@@ -660,6 +663,61 @@ function getItemChecksums(doc, identity) {
 
 // --- Snapshot ---
 
+/**
+ * Get a snapshot of a single item from the CRDT, preserving author/ts.
+ * Used for validation where author info is needed.
+ */
+function getItemSnapshot(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) return null
+
+  let item = {}
+  for (let section of ITEM_SECTIONS) {
+    let map = itemMap.get(section)
+    if (!map) {
+      item[section] = {}
+      continue
+    }
+
+    if (section === 'photos') {
+      let photosObj = {}
+      map.forEach((photoMap, checksum) => {
+        let metaMap = photoMap.get('metadata')
+        let meta = {}
+        if (metaMap) {
+          metaMap.forEach((v, k) => { meta[k] = v })
+        }
+        photosObj[checksum] = { metadata: meta }
+      })
+      item[section] = photosObj
+    } else {
+      let obj = {}
+      map.forEach((v, k) => { obj[k] = v })
+      item[section] = obj
+    }
+  }
+  return item
+}
+
+/**
+ * Get all item identities in the CRDT.
+ */
+function getIdentities(doc) {
+  let annotations = doc.getMap('annotations')
+  let result = []
+  annotations.forEach((_, identity) => { result.push(identity) })
+  return result
+}
+
+function _stripMeta(v) {
+  if (v && typeof v === 'object') {
+    let { ts, author, ...content } = v
+    return content
+  }
+  return v
+}
+
 function getSnapshot(doc) {
   let annotations = doc.getMap('annotations')
   let result = {}
@@ -674,35 +732,19 @@ function getSnapshot(doc) {
       }
 
       if (section === 'photos') {
-        // Photos have nested Y.Maps, serialize them
         let photosObj = {}
         map.forEach((photoMap, checksum) => {
           let metaMap = photoMap.get('metadata')
           let meta = {}
           if (metaMap) {
-            metaMap.forEach((v, k) => {
-              if (v && typeof v === 'object') {
-                let { ts, author, ...content } = v
-                meta[k] = content
-              } else {
-                meta[k] = v
-              }
-            })
+            metaMap.forEach((v, k) => { meta[k] = _stripMeta(v) })
           }
           photosObj[checksum] = { metadata: meta }
         })
         item[section] = photosObj
       } else {
         let obj = {}
-        map.forEach((v, k) => {
-          // Strip ts/author metadata so snapshot hash reflects content only
-          if (v && typeof v === 'object') {
-            let { ts, author, ...content } = v
-            obj[k] = content
-          } else {
-            obj[k] = v
-          }
-        })
+        map.forEach((v, k) => { obj[k] = _stripMeta(v) })
         item[section] = obj
       }
     }
@@ -864,6 +906,8 @@ module.exports = {
   getItemChecksums,
   // Snapshot
   getSnapshot,
+  getItemSnapshot,
+  getIdentities,
   // Tombstone purge
   purgeTombstones,
   // Users

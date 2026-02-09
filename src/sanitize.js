@@ -265,16 +265,18 @@ function sanitizeTagAttributes(attrs, tagName) {
 const ENTITY_MAP = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }
 
 function decodeEntities(str) {
-  return str
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
-      let code = parseInt(hex, 16)
-      return code > 0 && code < 0x10FFFF ? String.fromCodePoint(code) : ''
+  return str.replace(/&(?:#x([0-9a-fA-F]+)|#(\d+)|(lt|gt|amp|quot|apos));/g,
+    (_, hex, dec, named) => {
+      if (hex) {
+        let code = parseInt(hex, 16)
+        return code > 0 && code < 0x10FFFF ? String.fromCodePoint(code) : ''
+      }
+      if (dec) {
+        let code = parseInt(dec, 10)
+        return code > 0 && code < 0x10FFFF ? String.fromCodePoint(code) : ''
+      }
+      return ENTITY_MAP[named]
     })
-    .replace(/&#(\d+);/g, (_, dec) => {
-      let code = parseInt(dec, 10)
-      return code > 0 && code < 0x10FFFF ? String.fromCodePoint(code) : ''
-    })
-    .replace(/&(lt|gt|amp|quot|apos);/g, (_, name) => ENTITY_MAP[name])
 }
 
 /**

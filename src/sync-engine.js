@@ -200,7 +200,7 @@ class SyncEngine {
       server: this.options.serverUrl,
       room: this.options.room,
       syncMode: this.options.syncMode
-    }, 'Sync engine v3.1 starting')
+    }, 'Sync engine v4.6 starting')
 
     try {
       this.doc = new Y.Doc()
@@ -307,9 +307,11 @@ class SyncEngine {
         }, safetyInterval)
       }
 
-      // Heartbeat
+      // Heartbeat — only when peers are connected (avoids spurious state vector changes)
       this.heartbeatTimer = setInterval(() => {
-        schema.heartbeat(this.doc, this.doc.clientID)
+        if (this.provider && this.provider.wsconnected) {
+          schema.heartbeat(this.doc, this.doc.clientID)
+        }
       }, 30000)
 
     } catch (err) {
@@ -334,17 +336,18 @@ class SyncEngine {
     this.syncOnce()
   }
 
-  async _persistVault() {
+  async _persistVault(force = false) {
+    if (!force && !this.vault.isDirty) return
     try {
       await this.vault.persistToFile(this.options.room)
     } catch (err) {
-      this._debug('vault persist failed', { error: err.message })
+      this.logger.warn('vault persist failed', { error: err.message })
     }
   }
 
-  stop() {
+  async stop() {
     this._stopping = true
-    this._persistVault()
+    await this._persistVault(true)
     this.logger.info('Sync engine stopping')
 
     if (this._storeUnsubscribe) {
@@ -642,8 +645,7 @@ class SyncEngine {
         }
       }
 
-      // C3: Cache CRDT snapshot for validation (same check as applyRemoteFromCRDT)
-      let validationSnapshot = this.backup ? schema.getSnapshot(this.doc) : null
+      // Validation uses per-item snapshots (avoids full doc serialization)
 
       this._applyingRemote = true
       if (this.adapter) this.adapter.suppressChanges()
@@ -660,9 +662,9 @@ class SyncEngine {
           exactMatchedIdentities.add(itemIdentity)
           processedLocalIds.add(local.localId)
 
-          // C3: Validate inbound CRDT data before applying
-          if (this.backup && validationSnapshot) {
-            let crdtItem = validationSnapshot[itemIdentity]
+          // Validate inbound CRDT data before applying (per-item)
+          if (this.backup) {
+            let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
             if (crdtItem) {
               let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
               if (!validation.valid) {
@@ -692,8 +694,8 @@ class SyncEngine {
           if (processedLocalIds.has(fuzzy.local.localId)) continue
           processedLocalIds.add(fuzzy.local.localId)
 
-          if (this.backup && validationSnapshot) {
-            let crdtItem = validationSnapshot[itemIdentity]
+          if (this.backup) {
+            let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
             if (crdtItem) {
               let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
               if (!validation.valid) continue
@@ -710,6 +712,7 @@ class SyncEngine {
         }
       } finally {
         this._logApplyStats()
+        this.vault.markDirty()
         await this._persistVault()
         this._applyingRemote = false
         if (this.adapter) this.adapter.resumeChanges()
@@ -737,10 +740,18 @@ class SyncEngine {
     if (this._paused) return
     if (this._stopping) return
 
+    // Set flag before acquiring lock to prevent concurrent slipthrough
     this._syncing = true
 
     // R2: Acquire mutex
     let release = await this._acquireLock()
+
+    // Re-check guards after acquiring lock (state may have changed while waiting)
+    if (this.state !== 'connected' || !this.doc || this._paused || this._stopping) {
+      this._syncing = false
+      release()
+      return
+    }
     let prev = this.state
     this.state = 'syncing'
 
@@ -800,18 +811,7 @@ class SyncEngine {
           // P2: Re-read modified items after apply
           if (appliedIdentities.size > 0) {
             if (this.adapter) {
-              // Store-first: re-read only changed items when possible
-              for (let appliedId of appliedIdentities) {
-                let local = identity.findLocalMatch(appliedId, this.localIndex)
-                if (local) {
-                  let fresh = this.adapter.getItemFull(local.localId)
-                  if (fresh) {
-                    let freshId = identity.computeIdentity(fresh)
-                    if (freshId) this.localIndex.set(freshId, { localId: local.localId, item: fresh })
-                  }
-                }
-              }
-              // Also refresh the full items list for push
+              // Store-first: re-read all items for push (index rebuilt below)
               items = this.readAllItemsFull()
             } else {
               // API fallback: re-enrich only affected summaries
@@ -858,23 +858,26 @@ class SyncEngine {
       let skipHashUpdate = false
       if (this._applyStats && this._applyStats.notesFailed > 0) {
         // Track per-key failures in vault for persistence across restarts
-        for (let key of this._failedNoteKeys) {
+        // Snapshot the set before iterating to avoid race with concurrent additions
+        let failedKeys = new Set(this._failedNoteKeys)
+        this._failedNoteKeys.clear()
+        let givenUp = 0
+        for (let key of failedKeys) {
           let count = (this.vault.failedNoteKeys.get(key) || 0) + 1
           this.vault.failedNoteKeys.set(key, count)
           if (count >= 3) {
             this.vault.appliedNoteKeys.add(key)
             this.vault.failedNoteKeys.delete(key)
             this._debug(`note key ${key.slice(0, 8)} permanently given up after ${count} retries`)
+            givenUp++
           }
         }
-        this._failedNoteKeys.clear()
 
-        // Check if any keys still pending retry
-        let stillRetrying = this._applyStats.notesFailed -
-          [...this.vault.failedNoteKeys.values()].filter(c => c >= 3).length
+        // Check if any keys still pending retry (failed minus permanently given up)
+        let stillRetrying = this._applyStats.notesFailed - givenUp
         if (stillRetrying > 0) {
           skipHashUpdate = true
-          this._debug(`apply had ${this._applyStats.notesFailed} note failures, some will retry next cycle`)
+          this._debug(`apply had ${this._applyStats.notesFailed} note failures, ${stillRetrying} will retry next cycle`)
         }
       } else if (this._applyStats) {
         this._failedNoteKeys.clear()
@@ -891,7 +894,8 @@ class SyncEngine {
       this.vault.pruneAppliedKeys()
 
       // Persist vault to prevent ghost notes on restart
-      this._persistVault()
+      this.vault.markDirty()
+      await this._persistVault()
 
       // R7: Bound previousSnapshot size using LRU-style eviction
       this.vault._evictIfNeeded(this.previousSnapshot, 5000)
@@ -903,16 +907,16 @@ class SyncEngine {
 
     } catch (err) {
       this._consecutiveErrors++
-      let isBusy = err && (err.sqliteBusy || (err.message && err.message.includes('SQLITE_BUSY')))
+      let errMsg = err instanceof Error ? err.message : String(err || '')
+      let isBusy = err && (err.sqliteBusy || errMsg.includes('SQLITE_BUSY'))
 
       if (isBusy) {
         this.logger.warn({ consecutiveErrors: this._consecutiveErrors },
           'Database busy, will back off')
       } else {
         this.logger.warn({
-          error: err instanceof Error ? err.message : String(err),
-          stack: err && err.stack,
-          raw: typeof err === 'object' ? JSON.stringify(err) : String(err)
+          error: errMsg,
+          stack: err && err.stack
         }, 'Sync cycle failed')
       }
 
@@ -961,7 +965,10 @@ class SyncEngine {
       for (let cs of crdtSet) {
         if (!localChecksums.has(cs)) { allFound = false; break }
       }
-      if (allFound) {
+      // Require minimum overlap: CRDT checksums must cover >= 50% of local photos
+      // to reduce false positives when items share a single common photo
+      if (allFound && localChecksums.size > 0 &&
+          crdtChecksums.length >= Math.ceil(localChecksums.size * 0.5)) {
         return { local, localIdentity, checksumCount: crdtChecksums.length }
       }
     }
@@ -976,8 +983,7 @@ class SyncEngine {
    * Returns Set of applied item identities (P2).
    */
   async applyRemoteFromCRDT() {
-    let snapshot = schema.getSnapshot(this.doc)
-    let identities = Object.keys(snapshot)
+    let identities = schema.getIdentities(this.doc)
     let appliedIdentities = new Set()
 
     if (identities.length === 0) {
@@ -1018,7 +1024,8 @@ class SyncEngine {
       let local = identity.findLocalMatch(itemIdentity, this.localIndex)
       if (!local) continue
 
-      let crdtItem = snapshot[itemIdentity]
+      let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
+      if (!crdtItem) continue
       let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
       if (!validation.valid) {
         for (let warn of validation.warnings) {
@@ -1050,7 +1057,8 @@ class SyncEngine {
         continue
       }
       this._log(`fuzzy match: CRDT ${crdtIdentity.slice(0, 8)} → local ${fuzzy.localIdentity.slice(0, 8)} (merged item, ${fuzzy.checksumCount} shared photo(s))`)
-      let crdtItem = snapshot[crdtIdentity]
+      let crdtItem = schema.getItemSnapshot(this.doc, crdtIdentity)
+      if (!crdtItem) continue
       let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
       if (validation.valid) {
         matched.push({ itemIdentity: crdtIdentity, local: fuzzy.local })
@@ -1098,6 +1106,7 @@ class SyncEngine {
       }
     } finally {
       this._logApplyStats()
+      this.vault.markDirty()
       await this._persistVault()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
@@ -1120,7 +1129,16 @@ class SyncEngine {
   async applyOnDemand() {
     if (!this.doc) return null
 
-    let snapshot = schema.getSnapshot(this.doc)
+    let release = await this._acquireLock()
+    try {
+      return await this._applyOnDemandInner()
+    } finally {
+      release()
+    }
+  }
+
+  async _applyOnDemandInner() {
+    let allIdentities = schema.getIdentities(this.doc)
     let userId = this._stableUserId
     let summary = {}
 
@@ -1144,7 +1162,9 @@ class SyncEngine {
       } catch {}
     }
 
-    for (let [itemIdentity, item] of Object.entries(snapshot)) {
+    for (let itemIdentity of allIdentities) {
+      let item = schema.getItemSnapshot(this.doc, itemIdentity)
+      if (!item) continue
       for (let section of ['metadata', 'tags', 'notes', 'selections', 'transcriptions', 'lists']) {
         let data = item[section]
         if (!data || typeof data !== 'object') continue
@@ -1172,12 +1192,14 @@ class SyncEngine {
     // Backup (with validation gating)
     let backupItems = []
     let validIdentities = []
-    for (let [itemIdentity] of Object.entries(snapshot)) {
+    for (let itemIdentity of allIdentities) {
       let local = identity.findLocalMatch(itemIdentity, this.localIndex)
       if (!local) continue
 
       // S3: Validate before applying
-      let validation = this.backup.validateInbound(itemIdentity, snapshot[itemIdentity], this._stableUserId)
+      let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
+      if (!crdtItem) continue
+      let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
       if (!validation.valid) {
         for (let warn of validation.warnings) {
           this.logger.warn(`Validation warning: ${warn}`)
@@ -1216,6 +1238,7 @@ class SyncEngine {
       }
     } finally {
       this._logApplyStats()
+      this.vault.markDirty()
       await this._persistVault()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()

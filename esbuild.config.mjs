@@ -8,8 +8,8 @@ const options = {
   platform: 'node',
   target: 'node20',
   external: ['electron'],
-  minify: false,
-  sourcemap: true,
+  minify: true,
+  sourcemap: process.argv.includes('--watch'),
   logLevel: 'info'
 }
 

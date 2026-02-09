@@ -333,12 +333,35 @@ class StoreAdapter {
     let selection = existing.selection || undefined
     let lang = language || existing.language || null
 
-    // Delete may succeed even if _waitForAction times out, so always
-    // attempt to recreate — prevents data loss when delete works but
-    // the activity-tracking promise rejects.
+    // Capture original content for rollback if create fails
+    let originalHtml = this._noteStateToHtml(existing)
+
     try { await this.deleteNote(id) } catch {}
 
-    return this.createNote({ photo, selection, html, language: lang })
+    let result
+    try {
+      result = await this.createNote({ photo, selection, html, language: lang })
+    } catch (createErr) {
+      // Create failed — attempt to restore original content
+      this.logger.warn(`updateNote: create threw after delete for note ${id}`, { error: createErr.message })
+      try {
+        result = await this.createNote({ photo, selection, html: originalHtml, language: lang })
+      } catch (restoreErr) {
+        this.logger.warn(`updateNote: restore also failed for note ${id}`, { error: restoreErr.message })
+        throw createErr
+      }
+      return result
+    }
+    if (!result) {
+      // Create returned null — attempt to restore original content
+      this.logger.warn(`updateNote: create returned null after delete, restoring original for note ${id}`)
+      try {
+        result = await this.createNote({ photo, selection, html: originalHtml, language: lang })
+      } catch (restoreErr) {
+        this.logger.warn(`updateNote: restore also failed for note ${id}`, { error: restoreErr.message })
+      }
+    }
+    return result
   }
 
   /**
@@ -564,12 +587,20 @@ class StoreAdapter {
   }
 
   _esc(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#x27;')
+    let s = String(str)
+    let out = ''
+    for (let i = 0; i < s.length; i++) {
+      let c = s[i]
+      switch (c) {
+        case '&': out += '&amp;'; break
+        case '<': out += '&lt;'; break
+        case '>': out += '&gt;'; break
+        case '"': out += '&quot;'; break
+        case "'": out += '&#x27;'; break
+        default: out += c
+      }
+    }
+    return out
   }
 }
 

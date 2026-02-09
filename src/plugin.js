@@ -211,7 +211,7 @@ class TroparcelPlugin {
         'falling back to manual export/import', {
         error: err.message
       })
-      this.engine.stop()
+      await this.engine.stop()
       this.engine = null
     }
   }
@@ -255,7 +255,7 @@ class TroparcelPlugin {
         `Shared ${data.length} item(s) to room "${this.options.room}"`
       )
 
-      setTimeout(() => tempEngine.stop(), 5000)
+      setTimeout(() => { tempEngine.stop() }, 5000)
 
     } catch (err) {
       this.context.logger.error('Export failed', {
@@ -305,7 +305,7 @@ class TroparcelPlugin {
         let alive = await engine.api.ping()
         if (!alive) {
           this.context.logger.warn('Import: Tropy API not reachable')
-          if (tempEngine) engine.stop()
+          if (tempEngine) await engine.stop()
           return
         }
       }
@@ -336,7 +336,7 @@ class TroparcelPlugin {
         )
       }
 
-      if (tempEngine) engine.stop()
+      if (tempEngine) await engine.stop()
 
     } catch (err) {
       this.context.logger.error('Import failed', {
@@ -361,10 +361,10 @@ class TroparcelPlugin {
     }
   }
 
-  unload() {
+  async unload() {
     this.context.logger.info('Troparcel unloading')
     if (this.engine) {
-      this.engine.stop()
+      await this.engine.stop()
       this.engine = null
     }
   }

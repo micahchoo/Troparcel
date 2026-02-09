@@ -13,7 +13,29 @@ const crypto = require('crypto')
  * For items with multiple photos, we sort the checksums and
  * hash the concatenation.  For items with no photos (rare),
  * we fall back to hashing template + key metadata fields.
+ *
+ * Sub-resource keys (notes, selections, transcriptions) use FNV-1a
+ * for speed — they only need to be unique within a CRDT room,
+ * not cryptographically secure.
  */
+
+/**
+ * Fast FNV-1a hash (non-crypto). Returns hex string of given length.
+ */
+function fnv1a(input, hexLen = 24) {
+  // Generate multiple 32-bit hashes with different seeds for longer output
+  let seeds = [0x811c9dc5, 0x01000193, 0x27d4eb2d]
+  let hex = ''
+  for (let seed of seeds) {
+    let h = seed
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i)
+      h = (h * 0x01000193) >>> 0
+    }
+    hex += (h >>> 0).toString(16).padStart(8, '0')
+  }
+  return hex.slice(0, hexLen)
+}
 
 /**
  * Compute a stable identity hash for a Tropy item.
@@ -126,11 +148,7 @@ function computeSelectionKey(photoChecksum, sel) {
   let w = Math.round(sel.width ?? sel.w ?? 0)
   let h = Math.round(sel.height ?? sel.h ?? 0)
 
-  return crypto
-    .createHash('sha256')
-    .update(`sel:${photoChecksum}:${x}:${y}:${w}:${h}`)
-    .digest('hex')
-    .slice(0, 24)
+  return fnv1a(`sel:${photoChecksum}:${x}:${y}:${w}:${h}`)
 }
 
 /**
@@ -156,11 +174,7 @@ function computeNoteKey(note, photoChecksum) {
   // Use first 200 chars of content to avoid huge hashes but still differentiate
   let content = (html || text).slice(0, 200)
 
-  return crypto
-    .createHash('sha256')
-    .update(`note:${parent}:${content}`)
-    .digest('hex')
-    .slice(0, 24)
+  return fnv1a(`note:${parent}:${content}`)
 }
 
 /**
@@ -173,11 +187,7 @@ function computeNoteKey(note, photoChecksum) {
  */
 function computeTranscriptionKey(photoChecksum, idx, selKey) {
   let parent = selKey ? `${photoChecksum}:${selKey}` : photoChecksum
-  return crypto
-    .createHash('sha256')
-    .update(`tx:${parent}:${idx}`)
-    .digest('hex')
-    .slice(0, 24)
+  return fnv1a(`tx:${parent}:${idx}`)
 }
 
 /**

@@ -409,7 +409,7 @@ class ApiClient {
           try {
             resolve(JSON.parse(raw))
           } catch {
-            resolve(raw)
+            reject(new Error(`API ${method} ${path}: invalid JSON response`))
           }
         })
       })
