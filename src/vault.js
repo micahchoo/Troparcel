@@ -48,6 +48,10 @@ class SyncVault {
 
     // Annotation count cache (P5) — avoids serializing whole doc
     this._cachedAnnotationCount = 0
+
+    // Persisted failed note keys — tracks keys that permanently failed
+    // so they survive restart and don't retry indefinitely
+    this.failedNoteKeys = new Map()  // key -> retryCount
   }
 
   /**
@@ -285,22 +289,23 @@ class SyncVault {
    * Persist applied key sets to disk so deleted notes aren't re-created on restart.
    * Saves to ~/.troparcel/vault/{room}.json
    */
-  persistToFile(room) {
+  async persistToFile(room) {
     if (!room) return
     try {
       let dir = path.join(os.homedir(), '.troparcel', 'vault')
-      fs.mkdirSync(dir, { recursive: true })
+      await fs.promises.mkdir(dir, { recursive: true })
       let file = path.join(dir, this._sanitizeRoom(room) + '.json')
       let tmpFile = file + '.tmp'
       let data = {
-        version: 1,
+        version: 2,
         timestamp: new Date().toISOString(),
         appliedNoteKeys: Array.from(this.appliedNoteKeys),
         appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
-        appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys)
+        appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys),
+        failedNoteKeys: Array.from(this.failedNoteKeys)
       }
-      fs.writeFileSync(tmpFile, JSON.stringify(data))
-      fs.renameSync(tmpFile, file)
+      await fs.promises.writeFile(tmpFile, JSON.stringify(data))
+      await fs.promises.rename(tmpFile, file)
     } catch {}
   }
 
@@ -315,7 +320,7 @@ class SyncVault {
       let file = path.join(dir, this._sanitizeRoom(room) + '.json')
       let raw = fs.readFileSync(file, 'utf8')
       let data = JSON.parse(raw)
-      if (data.version !== 1) return false
+      if (data.version !== 1 && data.version !== 2) return false
       if (Array.isArray(data.appliedNoteKeys)) {
         for (let k of data.appliedNoteKeys) this.appliedNoteKeys.add(k)
       }
@@ -324,6 +329,12 @@ class SyncVault {
       }
       if (Array.isArray(data.appliedTranscriptionKeys)) {
         for (let k of data.appliedTranscriptionKeys) this.appliedTranscriptionKeys.add(k)
+      }
+      // v2: restore persisted failed note keys
+      if (Array.isArray(data.failedNoteKeys)) {
+        for (let k of data.failedNoteKeys) {
+          this.failedNoteKeys.set(typeof k === 'string' ? k : k.key, (k.count || 3))
+        }
       }
       return true
     } catch {
@@ -350,6 +361,7 @@ class SyncVault {
     this.txIdToCrdtKey.clear()
     this.crdtKeyToTxId.clear()
     this._cachedAnnotationCount = 0
+    this.failedNoteKeys.clear()
   }
 }
 

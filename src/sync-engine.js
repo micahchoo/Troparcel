@@ -95,6 +95,7 @@ class SyncEngine {
     // Event queue for local changes detected during apply phase
     this._applyingRemote = false
     this._queuedLocalChange = false
+    this._stopping = false
 
     // R2: Async mutex — chains async operations to prevent concurrent access
     this._syncLock = Promise.resolve()
@@ -333,15 +334,16 @@ class SyncEngine {
     this.syncOnce()
   }
 
-  _persistVault() {
+  async _persistVault() {
     try {
-      this.vault.persistToFile(this.options.room)
+      await this.vault.persistToFile(this.options.room)
     } catch (err) {
       this._debug('vault persist failed', { error: err.message })
     }
   }
 
   stop() {
+    this._stopping = true
     this._persistVault()
     this.logger.info('Sync engine stopping')
 
@@ -514,9 +516,18 @@ class SyncEngine {
       try { this.fileWatcher.close() } catch {}
       this.fileWatcher = null
     }
+    // Clear old health timer to prevent accumulation
+    if (this._watcherHealthTimer) {
+      clearInterval(this._watcherHealthTimer)
+      this._watcherHealthTimer = null
+    }
     if (this.projectPath) {
       this._log('Restarting file watcher')
       this._startFileWatcher()
+      this._lastWatcherEvent = Date.now()
+      this._watcherHealthTimer = setInterval(() => {
+        this._checkWatcherHealth()
+      }, 60000)
     }
   }
 
@@ -547,6 +558,7 @@ class SyncEngine {
    */
   handleLocalChange() {
     if (this._paused) return
+    if (this._stopping) return
 
     if (this._applyingRemote) {
       this._queuedLocalChange = true
@@ -698,13 +710,17 @@ class SyncEngine {
         }
       } finally {
         this._logApplyStats()
-        this._persistVault()
+        await this._persistVault()
         this._applyingRemote = false
         if (this.adapter) this.adapter.resumeChanges()
         if (this._queuedLocalChange) {
           this._queuedLocalChange = false
-          this._debug('replaying queued local change')
-          this.handleLocalChange()
+          this._debug('replaying queued local change (debounced)')
+          if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
+          this._localDebounceTimer = setTimeout(() => {
+            this._localDebounceTimer = null
+            this.syncOnce()
+          }, Math.max(100, this.options.localDebounce))
         }
       }
     } finally {
@@ -719,6 +735,7 @@ class SyncEngine {
     if (!this.doc) return
     if (this._syncing) return
     if (this._paused) return
+    if (this._stopping) return
 
     this._syncing = true
 
@@ -769,19 +786,32 @@ class SyncEngine {
 
       // Apply remote FIRST — ensures remote changes land before push
       let appliedIdentities = new Set()
+      let crdtChanged = false
       if (this.options.syncMode === 'auto') {
         // P5: Cache annotation count from annotations map size (cheap)
         let annotationsMap = this.doc.getMap('annotations')
         this.vault.updateAnnotationCount(annotationsMap.size)
 
-        if (this.vault.hasCRDTChanged(this.doc)) {
+        crdtChanged = this.vault.hasCRDTChanged(this.doc)
+        if (crdtChanged) {
           this._debug('syncOnce: CRDT changed, applying remote')
           appliedIdentities = await this.applyRemoteFromCRDT()
 
           // P2: Re-read modified items after apply
           if (appliedIdentities.size > 0) {
             if (this.adapter) {
-              // Store-first: just re-read everything (cheap)
+              // Store-first: re-read only changed items when possible
+              for (let appliedId of appliedIdentities) {
+                let local = identity.findLocalMatch(appliedId, this.localIndex)
+                if (local) {
+                  let fresh = this.adapter.getItemFull(local.localId)
+                  if (fresh) {
+                    let freshId = identity.computeIdentity(fresh)
+                    if (freshId) this.localIndex.set(freshId, { localId: local.localId, item: fresh })
+                  }
+                }
+              }
+              // Also refresh the full items list for push
               items = this.readAllItemsFull()
             } else {
               // API fallback: re-enrich only affected summaries
@@ -815,30 +845,43 @@ class SyncEngine {
         }
       }
 
-      await this.pushLocal(items)
+      // Suppress store changes during push to avoid triggering overlapping syncs
+      if (this.adapter) this.adapter.suppressChanges()
+      try {
+        await this.pushLocal(items)
+      } finally {
+        if (this.adapter) this.adapter.resumeChanges()
+      }
 
       // Update CRDT hash after push so next cycle doesn't falsely re-apply
       // Skip if apply had failures — forces retry on next cycle
       let skipHashUpdate = false
       if (this._applyStats && this._applyStats.notesFailed > 0) {
-        this._applyFailureCount++
-        if (this._applyFailureCount <= 3) {
-          this._debug(`apply had ${this._applyStats.notesFailed} note failures, will retry next cycle (attempt ${this._applyFailureCount}/3)`)
-          skipHashUpdate = true
-        } else {
-          this.logger.warn(`Note create failures persisted after 3 retries, giving up`)
-          // Mark failed keys as applied so they don't retry on restart
-          for (let key of this._failedNoteKeys) {
+        // Track per-key failures in vault for persistence across restarts
+        for (let key of this._failedNoteKeys) {
+          let count = (this.vault.failedNoteKeys.get(key) || 0) + 1
+          this.vault.failedNoteKeys.set(key, count)
+          if (count >= 3) {
             this.vault.appliedNoteKeys.add(key)
+            this.vault.failedNoteKeys.delete(key)
+            this._debug(`note key ${key.slice(0, 8)} permanently given up after ${count} retries`)
           }
-          this._failedNoteKeys.clear()
-          this._applyFailureCount = 0
+        }
+        this._failedNoteKeys.clear()
+
+        // Check if any keys still pending retry
+        let stillRetrying = this._applyStats.notesFailed -
+          [...this.vault.failedNoteKeys.values()].filter(c => c >= 3).length
+        if (stillRetrying > 0) {
+          skipHashUpdate = true
+          this._debug(`apply had ${this._applyStats.notesFailed} note failures, some will retry next cycle`)
         }
       } else if (this._applyStats) {
-        this._applyFailureCount = 0
         this._failedNoteKeys.clear()
       }
-      if (this.options.syncMode === 'auto' && !skipHashUpdate) {
+      if (this.options.syncMode === 'auto' && !skipHashUpdate && !crdtChanged) {
+        // CRDT didn't change this cycle, hash is already up to date
+      } else if (this.options.syncMode === 'auto' && !skipHashUpdate) {
         // Record current state as baseline so next cycle's hasCRDTChanged
         // sees "no change" unless new remote updates arrive.
         this.vault.hasCRDTChanged(this.doc)
@@ -850,12 +893,8 @@ class SyncEngine {
       // Persist vault to prevent ghost notes on restart
       this._persistVault()
 
-      // R7: Bound previousSnapshot size
-      if (this.previousSnapshot.size > 5000) {
-        let keys = Array.from(this.previousSnapshot.keys())
-        let toRemove = keys.slice(0, keys.length - 5000)
-        for (let k of toRemove) this.previousSnapshot.delete(k)
-      }
+      // R7: Bound previousSnapshot size using LRU-style eviction
+      this.vault._evictIfNeeded(this.previousSnapshot, 5000)
 
       this.lastSync = new Date()
       this._consecutiveErrors = 0
@@ -884,8 +923,12 @@ class SyncEngine {
 
       if (this._queuedLocalChange) {
         this._queuedLocalChange = false
-        this._debug('replaying queued local change')
-        this.handleLocalChange()
+        this._debug('replaying queued local change (debounced)')
+        if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
+        this._localDebounceTimer = setTimeout(() => {
+          this._localDebounceTimer = null
+          this.syncOnce()
+        }, Math.max(100, this.options.localDebounce))
       }
     }
   }
@@ -1055,13 +1098,18 @@ class SyncEngine {
       }
     } finally {
       this._logApplyStats()
-      this._persistVault()
+      await this._persistVault()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
       if (this._queuedLocalChange) {
         this._queuedLocalChange = false
-        this._debug('replaying queued local change')
-        this.handleLocalChange()
+        this._debug('replaying queued local change (debounced)')
+        // Debounce the replay to avoid thundering herd
+        if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
+        this._localDebounceTimer = setTimeout(() => {
+          this._localDebounceTimer = null
+          this.syncOnce()
+        }, Math.max(100, this.options.localDebounce))
       }
     }
     return appliedIdentities
@@ -1168,7 +1216,7 @@ class SyncEngine {
       }
     } finally {
       this._logApplyStats()
-      this._persistVault()
+      await this._persistVault()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
     }

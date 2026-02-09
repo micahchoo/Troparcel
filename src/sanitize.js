@@ -151,6 +151,7 @@ function parseTag(html, start) {
 
   let nameStart = i
   while (i < len && /[a-zA-Z0-9]/.test(html[i])) i++
+  if (i - nameStart > 32) return null  // guard against absurdly long tag names
 
   let tagName = html.slice(nameStart, i).toLowerCase()
   if (!tagName) return null
@@ -259,7 +260,10 @@ function sanitizeTagAttributes(attrs, tagName) {
 
 /**
  * Decode HTML entities to defeat encoded attacks.
+ * Combines named entities into a single pass for efficiency.
  */
+const ENTITY_MAP = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }
+
 function decodeEntities(str) {
   return str
     .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
@@ -270,12 +274,7 @@ function decodeEntities(str) {
       let code = parseInt(dec, 10)
       return code > 0 && code < 0x10FFFF ? String.fromCodePoint(code) : ''
     })
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&apos;/g, "'")
+    .replace(/&(lt|gt|amp|quot|apos);/g, (_, name) => ENTITY_MAP[name])
 }
 
 /**

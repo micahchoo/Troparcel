@@ -79,10 +79,15 @@ class BackupManager {
       let entries = await fs.promises.readdir(this.backupDir)
       let files = entries.filter(f => f.endsWith('.json')).sort()
 
+      let toDelete = []
       while (files.length > this.options.maxBackups) {
-        let oldest = files.shift()
-        await fs.promises.unlink(path.join(this.backupDir, oldest))
-        this.logger.debug(`Pruned old backup: ${oldest}`)
+        toDelete.push(files.shift())
+      }
+      if (toDelete.length > 0) {
+        await Promise.allSettled(
+          toDelete.map(f => fs.promises.unlink(path.join(this.backupDir, f)))
+        )
+        for (let f of toDelete) this.logger.debug(`Pruned old backup: ${f}`)
       }
     } catch (err) {
       this.logger.warn('Failed to prune backups', { error: err.message })
@@ -113,12 +118,12 @@ class BackupManager {
     try {
       let photos = await this.api.getPhotos(localId)
       if (Array.isArray(photos)) {
-        for (let pid of photos) {
-          let photoId = typeof pid === 'object' ? pid.id : pid
-          try {
-            let photo = await this.api.getPhoto(photoId)
-            if (photo) snapshot.photos.push(photo)
-          } catch {}
+        let photoIds = photos.map(pid => typeof pid === 'object' ? pid.id : pid)
+        let results = await Promise.allSettled(
+          photoIds.map(id => this.api.getPhoto(id))
+        )
+        for (let r of results) {
+          if (r.status === 'fulfilled' && r.value) snapshot.photos.push(r.value)
         }
       }
     } catch {}

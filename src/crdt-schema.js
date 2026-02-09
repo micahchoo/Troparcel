@@ -47,25 +47,25 @@ function getItemAnnotations(doc, identity) {
   let annotations = doc.getMap('annotations')
   let itemMap = annotations.get(identity)
 
-  if (!itemMap) {
+  let isNew = !itemMap
+  if (isNew) {
     itemMap = new Y.Map()
-    for (let section of ITEM_SECTIONS) {
-      itemMap.set(section, new Y.Map())
-    }
-    annotations.set(identity, itemMap)
-  } else {
-    // Ensure all sections exist (forward compat for docs created before new sections)
-    for (let section of ITEM_SECTIONS) {
-      if (!itemMap.get(section)) {
-        itemMap.set(section, new Y.Map())
-      }
-    }
   }
 
   let result = {}
   for (let section of ITEM_SECTIONS) {
-    result[section] = itemMap.get(section)
+    let sectionMap = itemMap.get(section)
+    if (!sectionMap) {
+      sectionMap = new Y.Map()
+      itemMap.set(section, sectionMap)
+    }
+    result[section] = sectionMap
   }
+
+  if (isNew) {
+    annotations.set(identity, itemMap)
+  }
+
   return result
 }
 
