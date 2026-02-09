@@ -1,6 +1,9 @@
 'use strict'
 
 const crypto = require('crypto')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
 /**
  * SyncVault v2 — state tracker for the sync engine.
@@ -236,6 +239,60 @@ class SyncVault {
     let arr = Array.from(set)
     let keep = arr.slice(arr.length - maxSize)
     return new Set(keep)
+  }
+
+  // --- Persistence (cross-restart ghost note prevention) ---
+
+  /**
+   * Persist applied key sets to disk so deleted notes aren't re-created on restart.
+   * Saves to ~/.troparcel/vault/{room}.json
+   */
+  persistToFile(room) {
+    if (!room) return
+    try {
+      let dir = path.join(os.homedir(), '.troparcel', 'vault')
+      fs.mkdirSync(dir, { recursive: true })
+      let file = path.join(dir, this._sanitizeRoom(room) + '.json')
+      let data = {
+        version: 1,
+        timestamp: new Date().toISOString(),
+        appliedNoteKeys: Array.from(this.appliedNoteKeys),
+        appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
+        appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys)
+      }
+      fs.writeFileSync(file, JSON.stringify(data))
+    } catch {}
+  }
+
+  /**
+   * Load persisted applied key sets from disk.
+   * Returns true if a file was loaded, false otherwise.
+   */
+  loadFromFile(room) {
+    if (!room) return false
+    try {
+      let dir = path.join(os.homedir(), '.troparcel', 'vault')
+      let file = path.join(dir, this._sanitizeRoom(room) + '.json')
+      let raw = fs.readFileSync(file, 'utf8')
+      let data = JSON.parse(raw)
+      if (data.version !== 1) return false
+      if (Array.isArray(data.appliedNoteKeys)) {
+        for (let k of data.appliedNoteKeys) this.appliedNoteKeys.add(k)
+      }
+      if (Array.isArray(data.appliedSelectionKeys)) {
+        for (let k of data.appliedSelectionKeys) this.appliedSelectionKeys.add(k)
+      }
+      if (Array.isArray(data.appliedTranscriptionKeys)) {
+        for (let k of data.appliedTranscriptionKeys) this.appliedTranscriptionKeys.add(k)
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  _sanitizeRoom(name) {
+    return name.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 128) || 'default'
   }
 
   /**
