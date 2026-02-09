@@ -69,11 +69,14 @@ class TroparcelPlugin {
   }
 
   /**
-   * Wait for project context and Redux store before starting sync.
+   * Wait for the Redux store and project state before starting sync.
    *
-   * context.window.project is NOT populated at plugin construction time.
    * context.window.store is set after window.load() completes.
-   * We poll every 500ms up to startupDelay for both to appear.
+   * Project data lives at store.getState().project (set when PROJECT.OPENED
+   * action fires — there is NO context.window.project property).
+   *
+   * We poll every 500ms up to startupDelay for the store to appear,
+   * then check the store state for project info.
    */
   async _waitForProjectAndStart() {
     let startTime = Date.now()
@@ -82,34 +85,33 @@ class TroparcelPlugin {
 
     while (Date.now() - startTime < maxWait) {
       try {
-        let hasProject = this.context.window && this.context.window.project
-        let hasStore = this.context.window && this.context.window.store
+        let store = this.context.window && this.context.window.store
+        if (store) {
+          let state = store.getState()
+          let project = state && state.project
 
-        if (hasProject && hasStore) {
-          let elapsed = Date.now() - startTime
-          this.context.logger.info(
-            `Troparcel: project + store available after ${elapsed}ms`
-          )
+          if (project && project.path) {
+            let elapsed = Date.now() - startTime
+            this.context.logger.info(
+              `Troparcel: store + project available after ${elapsed}ms`
+            )
 
-          // Update room name from project if not explicitly set
-          if (!this.options._roomExplicit && this.context.window.project.name) {
-            this.options.room = this.context.window.project.name
+            // Update room name from project if not explicitly set
+            if (!this.options._roomExplicit && project.name) {
+              this.options.room = project.name
+            }
+
+            // Get project file path (kept for backup manager paths)
+            this.options.projectPath = project.path
+
+            break
           }
 
-          // Get project file path (kept for backup manager paths)
-          if (this.context.window.project.file) {
-            this.options.projectPath = this.context.window.project.file
-          }
-
-          break
-        }
-
-        if (hasProject && !hasStore) {
-          // Project context appeared but store not yet — keep waiting
+          // Store exists but project not loaded yet — keep waiting
           let elapsed = Date.now() - startTime
           if (elapsed > 2000 && elapsed % 2000 < interval) {
             this.context.logger.info(
-              `Troparcel: project ready, waiting for store (${elapsed}ms)`
+              `Troparcel: store ready, waiting for project state (${elapsed}ms)`
             )
           }
         }
@@ -118,14 +120,15 @@ class TroparcelPlugin {
       await new Promise(r => setTimeout(r, interval))
     }
 
-    if (!this.context.window || !this.context.window.project) {
+    let store = null
+    try {
+      store = this.context.window && this.context.window.store
+    } catch { /* ignore */ }
+
+    if (!store) {
       this.context.logger.info(
-        'Troparcel: project context not available after ' +
+        'Troparcel: store not available after ' +
         `${this.options.startupDelay}ms — starting sync with API fallback`
-      )
-    } else if (!this.context.window.store) {
-      this.context.logger.info(
-        'Troparcel: store not available — using API fallback for reads/writes'
       )
     }
 
@@ -133,12 +136,9 @@ class TroparcelPlugin {
   }
 
   mergeOptions(options) {
+    // Project name is read later from store.getState().project
+    // after the store has loaded — not available at construction time
     let projectName = ''
-    try {
-      if (this.context.window && this.context.window.project) {
-        projectName = this.context.window.project.name || ''
-      }
-    } catch { /* ignore */ }
 
     let syncMode = options.syncMode || 'auto'
     if (!VALID_SYNC_MODES.has(syncMode)) {
@@ -165,6 +165,8 @@ class TroparcelPlugin {
       syncTranscriptions: options.syncTranscriptions !== false,
       syncPhotoAdjustments: options.syncPhotoAdjustments === true || options.syncPhotoAdjustments === 'true',
       syncLists: options.syncLists === true || options.syncLists === 'true',
+      syncDeletions: options.syncDeletions === true || options.syncDeletions === 'true',
+      clearTombstones: options.clearTombstones === true || options.clearTombstones === 'true',
 
       // Timing
       startupDelay: Number(options.startupDelay) || 8000,
@@ -300,8 +302,7 @@ class TroparcelPlugin {
 
       // Verify connectivity (skip API ping when store adapter is available)
       if (!engine.adapter) {
-        let api = engine.api
-        let alive = await api.ping()
+        let alive = await engine.api.ping()
         if (!alive) {
           this.context.logger.warn('Import: Tropy API not reachable')
           if (tempEngine) engine.stop()
@@ -315,7 +316,7 @@ class TroparcelPlugin {
           let items = engine.readAllItemsFull()
           engine.localIndex = identity.buildIdentityIndex(items)
         } else {
-          let localItems = await api.getItems()
+          let localItems = await engine.api.getItems()
           if (localItems && Array.isArray(localItems)) {
             let items = []
             for (let s of localItems) {
@@ -353,7 +354,7 @@ class TroparcelPlugin {
     delete safeOptions._roomExplicit
 
     return {
-      version: '4.0.0',
+      version: '4.1.0',
       options: safeOptions,
       engine: this.engine ? this.engine.getStatus() : null,
       backgroundSync: this.engine != null

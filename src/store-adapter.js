@@ -267,6 +267,12 @@ class StoreAdapter {
    * Returns { id } of the created note.
    */
   async createNote({ photo, selection, html, language }) {
+    // Guard: note.create requires a valid parent (photo or selection)
+    if (!photo && !selection) {
+      this.logger.warn('createNote: no photo or selection — skipping')
+      return null
+    }
+
     let idsBefore = new Set(Object.keys(this._getState().notes))
 
     let payload = { text: html || '' }
@@ -462,16 +468,33 @@ class StoreAdapter {
 
   _renderDoc(doc) {
     if (!doc || !doc.content) return ''
-    return doc.content.map(n => this._renderNode(n)).join('')
+    // Handle live ProseMirror Node (doc.content is a Fragment, not an array)
+    if (typeof doc.toJSON === 'function') doc = doc.toJSON()
+    if (!doc.content) return ''
+    let content = doc.content
+    if (!Array.isArray(content)) {
+      if (Array.isArray(content.content)) content = content.content
+      else return ''
+    }
+    return content.map(n => this._renderNode(n)).join('')
   }
 
   _renderNode(node) {
     if (!node) return ''
-    let children = node.content
-      ? node.content.map(n => this._renderNode(n)).join('')
-      : ''
+    // Handle live ProseMirror Node objects (content is Fragment, type is NodeType)
+    if (typeof node.toJSON === 'function') node = node.toJSON()
+    let children = ''
+    if (node.content) {
+      let c = node.content
+      if (!Array.isArray(c)) {
+        if (Array.isArray(c.content)) c = c.content
+        else c = []
+      }
+      children = c.map(n => this._renderNode(n)).join('')
+    }
 
-    switch (node.type) {
+    let type = typeof node.type === 'string' ? node.type : (node.type && node.type.name) || ''
+    switch (type) {
       case 'paragraph':
         return `<p>${children}</p>`
       case 'blockquote':

@@ -512,7 +512,7 @@ describe('backup', () => {
       assert.ok(result.warnings[0].includes('exceeds max size'))
     })
 
-    it('warns on tombstone flood', () => {
+    it('tombstone flood is non-blocking (informational only)', () => {
       let result = bm.validateInbound('item-1', {
         tags: {
           'tag1': { deleted: true },
@@ -521,8 +521,9 @@ describe('backup', () => {
           'tag4': { color: '#000' }
         }
       })
-      assert.ok(!result.valid)
-      assert.ok(result.warnings[0].includes('Tombstone flood'))
+      // Tombstone flood no longer blocks apply — only size guards are blocking
+      assert.ok(result.valid)
+      assert.strictEqual(result.warnings.length, 0)
     })
 
     it('skips deleted entries in note size checks', () => {
@@ -814,7 +815,7 @@ describe('plugin', () => {
 
       new TroparcelPlugin({ autoSync: false }, ctx)
       assert.ok(!logs.some(m => m.includes('skipping sync')))
-      assert.ok(logs.some(m => m.includes('v3.1')))
+      assert.ok(logs.some(m => m.includes('v4.0')))
     })
   })
 
@@ -881,18 +882,16 @@ describe('plugin', () => {
       assert.equal(plugin.options.syncLists, true)
     })
 
-    it('uses project name for room if not explicit', () => {
-      let ctx = mockContext({
-        window: { project: { name: 'my-project' } }
-      })
+    it('defaults room to troparcel-default when no explicit room', () => {
+      // In v4.0, project name is read from store.getState().project
+      // during _waitForProjectAndStart(), not at mergeOptions time
+      let ctx = mockContext()
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
-      assert.equal(plugin.options.room, 'my-project')
+      assert.equal(plugin.options.room, 'troparcel-default')
     })
 
-    it('prefers explicit room over project name', () => {
-      let ctx = mockContext({
-        window: { project: { name: 'my-project' } }
-      })
+    it('uses explicit room when provided', () => {
+      let ctx = mockContext()
       let plugin = new TroparcelPlugin({
         autoSync: false,
         room: 'custom-room'
@@ -907,7 +906,7 @@ describe('plugin', () => {
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
       let status = plugin.getStatus()
 
-      assert.equal(status.version, '3.1.0')
+      assert.equal(status.version, '4.1.0')
       assert.equal(status.backgroundSync, false)
       assert.equal(status.engine, null)
     })
@@ -968,6 +967,238 @@ describe('plugin', () => {
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
       plugin.unload()
       assert.equal(plugin.engine, null)
+    })
+  })
+})
+
+// ============================================================
+//  store-adapter.js
+// ============================================================
+
+describe('store-adapter', () => {
+  const { StoreAdapter } = require('../src/store-adapter')
+
+  function mockStore(state) {
+    let listeners = []
+    return {
+      getState: () => state,
+      dispatch: (action) => {
+        action.meta = action.meta || {}
+        action.meta.seq = Date.now()
+        action.meta.now = Date.now()
+        return action
+      },
+      subscribe: (fn) => {
+        listeners.push(fn)
+        return () => {
+          listeners = listeners.filter(l => l !== fn)
+        }
+      },
+      _listeners: listeners,
+      _notify: () => listeners.forEach(fn => fn())
+    }
+  }
+
+  function mockState() {
+    return {
+      items: {
+        1: { id: 1, photos: [10], tags: [100], lists: [200], template: 'generic' },
+        2: { id: 2, photos: [11], tags: [], lists: [], template: 'letter' }
+      },
+      photos: {
+        10: { id: 10, item: 1, checksum: 'abc123', selections: [20], notes: [30], transcriptions: [] },
+        11: { id: 11, item: 2, checksum: 'def456', selections: [], notes: [], transcriptions: [] }
+      },
+      selections: {
+        20: { id: 20, photo: 10, x: 10, y: 20, width: 100, height: 50, angle: 0, notes: [31], transcriptions: [] }
+      },
+      notes: {
+        30: { id: 30, photo: 10, state: { doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Hello world' }] }] } }, text: 'Hello world' },
+        31: { id: 31, selection: 20, state: { doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Selection note', marks: [{ type: 'bold' }] }] }] } }, text: 'Selection note' }
+      },
+      metadata: {
+        1: { id: 1, 'http://purl.org/dc/elements/1.1/title': { text: 'Test Item', type: 'string' } }
+      },
+      tags: {
+        100: { id: 100, name: 'Important', color: '#ff0000' }
+      },
+      lists: {
+        200: { id: 200, name: 'Research', parent: null, children: [] }
+      },
+      activities: {},
+      transcriptions: {}
+    }
+  }
+
+  describe('getAllItems', () => {
+    it('returns all items as summaries', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let items = adapter.getAllItems()
+
+      assert.equal(items.length, 2)
+      let item1 = items.find(i => i.id === 1)
+      assert.ok(item1)
+      assert.deepEqual(item1.photos, [10])
+      assert.deepEqual(item1.tags, [100])
+    })
+  })
+
+  describe('getItemFull', () => {
+    it('returns fully enriched item', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let item = adapter.getItemFull(1)
+
+      assert.ok(item)
+      assert.equal(item['@id'], 1)
+      assert.equal(item.template, 'generic')
+      assert.equal(item.photo.length, 1)
+      assert.equal(item.photo[0].checksum, 'abc123')
+      assert.equal(item.photo[0].selection.length, 1)
+      assert.equal(item.photo[0].selection[0].x, 10)
+      assert.equal(item.tag.length, 1)
+      assert.equal(item.tag[0].name, 'Important')
+    })
+
+    it('returns null for nonexistent item', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      assert.equal(adapter.getItemFull(999), null)
+    })
+
+    it('includes metadata on item', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let item = adapter.getItemFull(1)
+
+      assert.ok(item['http://purl.org/dc/elements/1.1/title'])
+      assert.equal(item['http://purl.org/dc/elements/1.1/title']['@value'], 'Test Item')
+    })
+  })
+
+  describe('getAllTags', () => {
+    it('returns all tags', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let tags = adapter.getAllTags()
+
+      assert.equal(tags.length, 1)
+      assert.equal(tags[0].name, 'Important')
+      assert.equal(tags[0].color, '#ff0000')
+    })
+  })
+
+  describe('getAllLists', () => {
+    it('returns all lists', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let lists = adapter.getAllLists()
+
+      assert.equal(lists.length, 1)
+      assert.equal(lists[0].name, 'Research')
+    })
+  })
+
+  describe('_noteStateToHtml', () => {
+    it('converts ProseMirror state to HTML', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let state = mockState()
+      let html = adapter._noteStateToHtml(state.notes[30])
+
+      assert.equal(html, '<p>Hello world</p>')
+    })
+
+    it('converts bold marks', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let state = mockState()
+      let html = adapter._noteStateToHtml(state.notes[31])
+
+      assert.equal(html, '<p><strong>Selection note</strong></p>')
+    })
+
+    it('falls back to text when no state', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let html = adapter._noteStateToHtml({ text: 'Plain text' })
+
+      assert.equal(html, '<p>Plain text</p>')
+    })
+
+    it('returns empty for empty note', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let html = adapter._noteStateToHtml({})
+
+      assert.equal(html, '')
+    })
+  })
+
+  describe('subscribe', () => {
+    it('calls callback when state changes', () => {
+      let state = mockState()
+      let listeners = []
+      let store = {
+        getState: () => state,
+        subscribe: (fn) => {
+          listeners.push(fn)
+          return () => { listeners = listeners.filter(l => l !== fn) }
+        }
+      }
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+
+      let called = false
+      let unsub = adapter.subscribe(() => { called = true })
+
+      // Mutate state and trigger listener
+      state = { ...state, notes: { ...state.notes, 99: { id: 99 } } }
+      listeners.forEach(fn => fn())
+
+      assert.ok(called)
+      unsub()
+    })
+
+    it('does not call callback when suppressed', () => {
+      let state = mockState()
+      let listeners = []
+      let store = {
+        getState: () => state,
+        subscribe: (fn) => {
+          listeners.push(fn)
+          return () => { listeners = listeners.filter(l => l !== fn) }
+        }
+      }
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+
+      let called = false
+      adapter.subscribe(() => { called = true })
+      adapter.suppressChanges()
+
+      state = { ...state, notes: { ...state.notes, 99: { id: 99 } } }
+      listeners.forEach(fn => fn())
+
+      assert.ok(!called)
+      adapter.resumeChanges()
+    })
+  })
+
+  describe('ping', () => {
+    it('returns true when store exists', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      assert.ok(adapter.ping())
+    })
+  })
+
+  describe('_esc', () => {
+    it('escapes HTML entities', () => {
+      let store = mockStore(mockState())
+      let adapter = new StoreAdapter(store, { debug: () => {} })
+      assert.equal(adapter._esc('<script>'), '&lt;script&gt;')
+      assert.equal(adapter._esc('"hello"'), '&quot;hello&quot;')
+      assert.equal(adapter._esc('a&b'), 'a&amp;b')
     })
   })
 })

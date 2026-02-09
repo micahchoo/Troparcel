@@ -92,6 +92,7 @@ class BackupManager {
 
   /**
    * Capture the current state of a local item for backup purposes.
+   * Uses the HTTP API — prefer captureItemStateFromStore() when adapter is available.
    *
    * @param {number} localId
    * @param {string} identity
@@ -127,10 +128,33 @@ class BackupManager {
   }
 
   /**
+   * Capture item state directly from the Redux store adapter.
+   * Avoids HTTP API calls — faster and works even when API is unreachable.
+   *
+   * @param {StoreAdapter} adapter
+   * @param {number} localId
+   * @param {string} itemIdentity
+   * @returns {Object} snapshot
+   */
+  captureItemStateFromStore(adapter, localId, itemIdentity) {
+    let item = adapter.getItemFull(localId)
+    if (!item) {
+      return { identity: itemIdentity, localId, metadata: null, tags: [], photos: [] }
+    }
+    return {
+      identity: itemIdentity,
+      localId,
+      metadata: item,
+      tags: item.tag || [],
+      photos: item.photo || []
+    }
+  }
+
+  /**
    * Validate inbound CRDT data before applying it locally.
    * Returns { valid: boolean, warnings: string[] }
    */
-  validateInbound(itemIdentity, crdtItem) {
+  validateInbound(itemIdentity, crdtItem, userId) {
     let warnings = []
 
     // Size guard: notes
@@ -176,7 +200,8 @@ class BackupManager {
       }
     }
 
-    // Tombstone flood protection
+    // Tombstone flood detection — informational only (does not block apply)
+    // Accumulated tombstones from legitimate deletions are normal over time
     let totalEntries = 0
     let tombstoned = 0
     for (let section of ['tags', 'notes', 'selectionNotes', 'selections', 'transcriptions', 'lists']) {
@@ -184,15 +209,17 @@ class BackupManager {
       if (data && typeof data === 'object') {
         for (let val of Object.values(data)) {
           totalEntries++
-          if (val && val.deleted) tombstoned++
+          if (val && val.deleted && (!userId || val.author !== userId)) {
+            tombstoned++
+          }
         }
       }
     }
 
     if (totalEntries > 0 && (tombstoned / totalEntries) > this.options.tombstoneFloodThreshold) {
-      warnings.push(
-        `Tombstone flood: ${tombstoned}/${totalEntries} entries deleted ` +
-        `(${Math.round(tombstoned / totalEntries * 100)}% > ${this.options.tombstoneFloodThreshold * 100}% threshold)`
+      this.logger.debug(
+        `Tombstone ratio for ${itemIdentity.slice(0, 8)}: ${tombstoned}/${totalEntries} ` +
+        `(${Math.round(tombstoned / totalEntries * 100)}%) — not blocking`
       )
     }
 
@@ -215,13 +242,14 @@ class BackupManager {
   }
 
   /**
-   * Rollback: replay a backup file into Tropy via the API (R4).
+   * Rollback: replay a backup file into Tropy via the API or store adapter (R4).
    * Restores metadata, tags, and notes for all items in the backup.
    *
    * @param {string} backupPath - path to the backup JSON file
+   * @param {StoreAdapter} [adapter] - optional store adapter for write operations
    * @returns {Object} { restored: number, errors: string[] }
    */
-  async rollback(backupPath) {
+  async rollback(backupPath, adapter = null) {
     let data = JSON.parse(fs.readFileSync(backupPath, 'utf8'))
     let restored = 0
     let errors = []
@@ -257,30 +285,22 @@ class BackupManager {
               try {
                 let note = await this.api.getNote(noteId, 'json')
                 if (note && note.html) {
-                  await this.api.updateNote(noteId, { html: note.html })
+                  if (adapter) {
+                    await adapter.updateNote(noteId, { html: note.html })
+                  } else {
+                    // HTTP PUT for notes returns 404 — log warning
+                    this.logger.warn(`Rollback: note ${noteId} update skipped (no store adapter, HTTP PUT not supported)`)
+                  }
                 }
               } catch (err) {
                 errors.push(`note ${noteId}: ${err.message}`)
               }
             }
 
-            // Restore selections
+            // Restore selections — coordinates can't be updated via either path
             let selIds = photo.selections || []
             for (let selId of selIds) {
-              try {
-                let sel = await this.api.getSelection(selId)
-                if (sel) {
-                  await this.api.updateSelection(selId, {
-                    x: sel.x,
-                    y: sel.y,
-                    width: sel.width,
-                    height: sel.height,
-                    angle: sel.angle || 0
-                  })
-                }
-              } catch (err) {
-                errors.push(`selection ${selId}: ${err.message}`)
-              }
+              this.logger.warn(`Rollback: selection ${selId} update skipped (selection coordinate update not supported)`)
             }
           }
         }

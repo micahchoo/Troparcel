@@ -204,6 +204,20 @@ function getActiveNotes(doc, identity) {
   return result
 }
 
+/**
+ * Permanently delete a note entry from the CRDT (Y.Map.delete).
+ * Unlike removeNote (which creates a tombstone), this removes the entry entirely.
+ * Used to clean up stale content-based keys when note content changes.
+ */
+function deleteNoteEntry(doc, identity, noteKey) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) return
+  let notes = itemMap.get('notes')
+  if (!notes) return
+  notes.delete(noteKey)
+}
+
 // --- Photos ---
 
 function setPhotoMetadata(doc, identity, checksum, propertyUri, value, author) {
@@ -408,6 +422,38 @@ function getSelectionNotes(doc, identity, selKey) {
   return result
 }
 
+/**
+ * Get ALL selection notes for an item (all selection keys, including deleted).
+ * Used for stale entry cleanup.
+ */
+function getAllSelectionNotes(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) return {}
+
+  let selectionNotes = itemMap.get('selectionNotes')
+  if (!selectionNotes) return {}
+
+  let result = {}
+  selectionNotes.forEach((value, key) => {
+    result[key] = value
+  })
+  return result
+}
+
+/**
+ * Permanently delete a selection note entry from the CRDT (Y.Map.delete).
+ * Used to clean up stale content-based keys.
+ */
+function deleteSelectionNoteEntry(doc, identity, compositeKey) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) return
+  let selectionNotes = itemMap.get('selectionNotes')
+  if (!selectionNotes) return
+  selectionNotes.delete(compositeKey)
+}
+
 // --- Transcriptions ---
 
 function setTranscription(doc, identity, txKey, transcription, author) {
@@ -510,6 +556,80 @@ function getActiveLists(doc, identity) {
   return result
 }
 
+// --- Tombstone purge ---
+
+/**
+ * Remove all tombstoned entries from the CRDT document.
+ * Unlike tombstoning (which marks entries as deleted), this permanently
+ * removes them from the Y.Map. The deletion propagates to all peers.
+ *
+ * Sections that support tombstones: tags, notes, selections,
+ * selectionNotes, transcriptions, lists.
+ *
+ * @param {Y.Doc} doc
+ * @returns {{ items: number, purged: number }} count of items scanned and entries purged
+ */
+function purgeTombstones(doc) {
+  let annotations = doc.getMap('annotations')
+  let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
+  let purged = 0
+  let items = 0
+
+  annotations.forEach((itemMap, identity) => {
+    items++
+    for (let section of tombstoneSections) {
+      let map = itemMap.get(section)
+      if (!map) continue
+
+      let toDelete = []
+      map.forEach((value, key) => {
+        if (value && value.deleted) {
+          toDelete.push(key)
+        }
+      })
+
+      for (let key of toDelete) {
+        map.delete(key)
+        purged++
+      }
+    }
+  })
+
+  return { items, purged }
+}
+
+// --- Item checksums (for fuzzy identity matching across merges) ---
+
+/**
+ * Store an item's photo checksums in the CRDT.
+ * Used for fuzzy identity matching when items are merged/split.
+ */
+function setItemChecksums(doc, identity, checksums) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) {
+    itemMap = new Y.Map()
+    annotations.set(identity, itemMap)
+  }
+  let str = checksums.join(',')
+  if (itemMap.get('checksums') !== str) {
+    itemMap.set('checksums', str)
+  }
+}
+
+/**
+ * Get an item's stored photo checksums from the CRDT.
+ * Returns an array of checksum strings.
+ */
+function getItemChecksums(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) return []
+  let str = itemMap.get('checksums')
+  if (!str) return []
+  return str.split(',').filter(Boolean)
+}
+
 // --- Snapshot ---
 
 function getSnapshot(doc) {
@@ -532,14 +652,29 @@ function getSnapshot(doc) {
           let metaMap = photoMap.get('metadata')
           let meta = {}
           if (metaMap) {
-            metaMap.forEach((v, k) => { meta[k] = v })
+            metaMap.forEach((v, k) => {
+              if (v && typeof v === 'object') {
+                let { ts, author, ...content } = v
+                meta[k] = content
+              } else {
+                meta[k] = v
+              }
+            })
           }
           photosObj[checksum] = { metadata: meta }
         })
         item[section] = photosObj
       } else {
         let obj = {}
-        map.forEach((v, k) => { obj[k] = v })
+        map.forEach((v, k) => {
+          // Strip ts/author metadata so snapshot hash reflects content only
+          if (v && typeof v === 'object') {
+            let { ts, author, ...content } = v
+            obj[k] = content
+          } else {
+            obj[k] = v
+          }
+        })
         item[section] = obj
       }
     }
@@ -665,6 +800,7 @@ module.exports = {
   // Notes
   setNote,
   removeNote,
+  deleteNoteEntry,
   getNotes,
   getActiveNotes,
   // Photos
@@ -682,7 +818,9 @@ module.exports = {
   // Selection notes
   setSelectionNote,
   removeSelectionNote,
+  deleteSelectionNoteEntry,
   getSelectionNotes,
+  getAllSelectionNotes,
   // Transcriptions
   setTranscription,
   removeTranscription,
@@ -693,8 +831,13 @@ module.exports = {
   removeListMembership,
   getLists,
   getActiveLists,
+  // Item checksums (fuzzy matching)
+  setItemChecksums,
+  getItemChecksums,
   // Snapshot
   getSnapshot,
+  // Tombstone purge
+  purgeTombstones,
   // Users
   registerUser,
   deregisterUser,
