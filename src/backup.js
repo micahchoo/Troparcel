@@ -67,22 +67,21 @@ class BackupManager {
     await fs.promises.writeFile(filepath, JSON.stringify(data, null, 2))
     this.logger.info(`Backup saved: ${filepath}`, { items: itemSnapshots.length })
 
-    this.pruneOldBackups()
+    await this.pruneOldBackups()
     return filepath
   }
 
   /**
    * Remove old backups beyond the retention limit.
    */
-  pruneOldBackups() {
+  async pruneOldBackups() {
     try {
-      let files = fs.readdirSync(this.backupDir)
-        .filter(f => f.endsWith('.json'))
-        .sort()
+      let entries = await fs.promises.readdir(this.backupDir)
+      let files = entries.filter(f => f.endsWith('.json')).sort()
 
       while (files.length > this.options.maxBackups) {
         let oldest = files.shift()
-        fs.unlinkSync(path.join(this.backupDir, oldest))
+        await fs.promises.unlink(path.join(this.backupDir, oldest))
         this.logger.debug(`Pruned old backup: ${oldest}`)
       }
     } catch (err) {

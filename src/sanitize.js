@@ -291,6 +291,10 @@ function sanitizeUrl(url) {
   // Collapse whitespace within URL (defeats java\nscript: etc.)
   trimmed = trimmed.replace(/\s+/g, '')
 
+  // Block protocol-relative URLs (//evil.com) — these resolve to the page's
+  // protocol and could redirect to attacker-controlled domains
+  if (trimmed.startsWith('//')) return ''
+
   // Relative URLs are ok
   if (trimmed.startsWith('/') || trimmed.startsWith('#') || trimmed.startsWith('?')) {
     return trimmed

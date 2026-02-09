@@ -90,6 +90,7 @@ class SyncEngine {
 
     // Retry counter for failed note creates
     this._applyFailureCount = 0
+    this._failedNoteKeys = new Set()
 
     // Event queue for local changes detected during apply phase
     this._applyingRemote = false
@@ -639,10 +640,12 @@ class SyncEngine {
       try {
         // First pass: exact matches (these take priority over fuzzy matches)
         let processedLocalIds = new Set()
+        let exactMatchedIdentities = new Set()
         for (let itemIdentity of identities) {
           let local = identity.findLocalMatch(itemIdentity, this.localIndex)
           if (!local) continue
 
+          exactMatchedIdentities.add(itemIdentity)
           processedLocalIds.add(local.localId)
 
           // C3: Validate inbound CRDT data before applying
@@ -671,7 +674,7 @@ class SyncEngine {
         // Second pass: fuzzy matches for identities with no exact match,
         // skipping locals already processed by exact matches
         for (let itemIdentity of identities) {
-          if (identity.findLocalMatch(itemIdentity, this.localIndex)) continue
+          if (exactMatchedIdentities.has(itemIdentity)) continue
           let fuzzy = this._fuzzyMatchLocal(itemIdentity)
           if (!fuzzy) continue
           if (processedLocalIds.has(fuzzy.local.localId)) continue
@@ -767,12 +770,11 @@ class SyncEngine {
       // Apply remote FIRST — ensures remote changes land before push
       let appliedIdentities = new Set()
       if (this.options.syncMode === 'auto') {
-        let snapshot = schema.getSnapshot(this.doc)
+        // P5: Cache annotation count from annotations map size (cheap)
+        let annotationsMap = this.doc.getMap('annotations')
+        this.vault.updateAnnotationCount(annotationsMap.size)
 
-        // P5: Cache annotation count
-        this.vault.updateAnnotationCount(Object.keys(snapshot).length)
-
-        if (this.vault.hasCRDTChanged(snapshot)) {
+        if (this.vault.hasCRDTChanged(this.doc)) {
           this._debug('syncOnce: CRDT changed, applying remote')
           appliedIdentities = await this.applyRemoteFromCRDT()
 
@@ -825,14 +827,21 @@ class SyncEngine {
           skipHashUpdate = true
         } else {
           this.logger.warn(`Note create failures persisted after 3 retries, giving up`)
+          // Mark failed keys as applied so they don't retry on restart
+          for (let key of this._failedNoteKeys) {
+            this.vault.appliedNoteKeys.add(key)
+          }
+          this._failedNoteKeys.clear()
           this._applyFailureCount = 0
         }
       } else if (this._applyStats) {
         this._applyFailureCount = 0
+        this._failedNoteKeys.clear()
       }
       if (this.options.syncMode === 'auto' && !skipHashUpdate) {
-        let postPushSnapshot = schema.getSnapshot(this.doc)
-        this.vault.hasCRDTChanged(postPushSnapshot)
+        // Record current state as baseline so next cycle's hasCRDTChanged
+        // sees "no change" unless new remote updates arrive.
+        this.vault.hasCRDTChanged(this.doc)
       }
 
       // R7: Prune vault periodically
@@ -1046,6 +1055,7 @@ class SyncEngine {
       }
     } finally {
       this._logApplyStats()
+      this._persistVault()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
       if (this._queuedLocalChange) {

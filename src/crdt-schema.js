@@ -69,10 +69,38 @@ function getItemAnnotations(doc, identity) {
   return result
 }
 
+/**
+ * Get or create a single section's Y.Map for an item (write path).
+ * Only ensures the requested section exists — avoids checking all 9 sections.
+ *
+ * @param {Y.Doc} doc
+ * @param {string} identity - item identity hash
+ * @param {string} section - section name (e.g. 'metadata', 'tags')
+ * @returns {Y.Map} the section's Y.Map
+ */
+function _getSection(doc, identity, section) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+
+  if (!itemMap) {
+    itemMap = new Y.Map()
+    itemMap.set(section, new Y.Map())
+    annotations.set(identity, itemMap)
+    return itemMap.get(section)
+  }
+
+  let sectionMap = itemMap.get(section)
+  if (!sectionMap) {
+    sectionMap = new Y.Map()
+    itemMap.set(section, sectionMap)
+  }
+  return sectionMap
+}
+
 // --- Metadata (item-level) ---
 
 function setMetadata(doc, identity, propertyUri, value, author) {
-  let { metadata } = getItemAnnotations(doc, identity)
+  let metadata = _getSection(doc, identity, 'metadata')
   metadata.set(propertyUri, {
     text: value.text || '',
     type: value.type || 'http://www.w3.org/2001/XMLSchema#string',
@@ -100,7 +128,7 @@ function getMetadata(doc, identity) {
 // --- Tags ---
 
 function setTag(doc, identity, tag, author) {
-  let { tags } = getItemAnnotations(doc, identity)
+  let tags = _getSection(doc, identity, 'tags')
   let existing = tags.get(tag.name)
 
   // If previously tombstoned, clear it (add-wins)
@@ -116,7 +144,7 @@ function setTag(doc, identity, tag, author) {
 }
 
 function removeTag(doc, identity, tagName, author) {
-  let { tags } = getItemAnnotations(doc, identity)
+  let tags = _getSection(doc, identity, 'tags')
   let existing = tags.get(tagName)
   if (existing && !existing.deleted) {
     tags.set(tagName, {
@@ -154,7 +182,7 @@ function getDeletedTags(doc, identity) {
 // --- Notes ---
 
 function setNote(doc, identity, noteKey, note, author) {
-  let { notes } = getItemAnnotations(doc, identity)
+  let notes = _getSection(doc, identity, 'notes')
   notes.set(noteKey, {
     noteKey,
     text: note.text || '',
@@ -168,7 +196,7 @@ function setNote(doc, identity, noteKey, note, author) {
 }
 
 function removeNote(doc, identity, noteKey, author) {
-  let { notes } = getItemAnnotations(doc, identity)
+  let notes = _getSection(doc, identity, 'notes')
   let existing = notes.get(noteKey)
   if (existing && !existing.deleted) {
     notes.set(noteKey, {
@@ -221,7 +249,7 @@ function deleteNoteEntry(doc, identity, noteKey) {
 // --- Photos ---
 
 function setPhotoMetadata(doc, identity, checksum, propertyUri, value, author) {
-  let { photos } = getItemAnnotations(doc, identity)
+  let photos = _getSection(doc, identity, 'photos')
   let photoMap = photos.get(checksum)
 
   if (!photoMap) {
@@ -284,7 +312,7 @@ function getAllPhotoChecksums(doc, identity) {
 // --- Selections ---
 
 function setSelection(doc, identity, selKey, selection, author) {
-  let { selections } = getItemAnnotations(doc, identity)
+  let selections = _getSection(doc, identity, 'selections')
 
   // Use ?? instead of || so that 0 is preserved (valid for x, y, angle)
   let w = selection.width ?? selection.w
@@ -305,7 +333,7 @@ function setSelection(doc, identity, selKey, selection, author) {
 }
 
 function removeSelection(doc, identity, selKey, author) {
-  let { selections } = getItemAnnotations(doc, identity)
+  let selections = _getSection(doc, identity, 'selections')
   let existing = selections.get(selKey)
   if (existing && !existing.deleted) {
     selections.set(selKey, {
@@ -344,7 +372,7 @@ function getActiveSelections(doc, identity) {
 // --- Selection Metadata ---
 
 function setSelectionMeta(doc, identity, selKey, propertyUri, value, author) {
-  let { selectionMeta } = getItemAnnotations(doc, identity)
+  let selectionMeta = _getSection(doc, identity, 'selectionMeta')
   let key = `${selKey}:${propertyUri}`
   selectionMeta.set(key, {
     text: value.text || '',
@@ -377,7 +405,7 @@ function getSelectionMeta(doc, identity, selKey) {
 // --- Selection Notes ---
 
 function setSelectionNote(doc, identity, selKey, noteKey, note, author) {
-  let { selectionNotes } = getItemAnnotations(doc, identity)
+  let selectionNotes = _getSection(doc, identity, 'selectionNotes')
   let key = `${selKey}:${noteKey}`
   selectionNotes.set(key, {
     noteKey,
@@ -391,7 +419,7 @@ function setSelectionNote(doc, identity, selKey, noteKey, note, author) {
 }
 
 function removeSelectionNote(doc, identity, selKey, noteKey, author) {
-  let { selectionNotes } = getItemAnnotations(doc, identity)
+  let selectionNotes = _getSection(doc, identity, 'selectionNotes')
   let key = `${selKey}:${noteKey}`
   let existing = selectionNotes.get(key)
   if (existing && !existing.deleted) {
@@ -457,7 +485,7 @@ function deleteSelectionNoteEntry(doc, identity, compositeKey) {
 // --- Transcriptions ---
 
 function setTranscription(doc, identity, txKey, transcription, author) {
-  let { transcriptions } = getItemAnnotations(doc, identity)
+  let transcriptions = _getSection(doc, identity, 'transcriptions')
   transcriptions.set(txKey, {
     txKey,
     text: transcription.text || '',
@@ -470,7 +498,7 @@ function setTranscription(doc, identity, txKey, transcription, author) {
 }
 
 function removeTranscription(doc, identity, txKey, author) {
-  let { transcriptions } = getItemAnnotations(doc, identity)
+  let transcriptions = _getSection(doc, identity, 'transcriptions')
   let existing = transcriptions.get(txKey)
   if (existing && !existing.deleted) {
     transcriptions.set(txKey, {
@@ -509,7 +537,7 @@ function getActiveTranscriptions(doc, identity) {
 // --- Lists ---
 
 function setListMembership(doc, identity, listName, author) {
-  let { lists } = getItemAnnotations(doc, identity)
+  let lists = _getSection(doc, identity, 'lists')
   lists.set(listName, {
     name: listName,
     member: true,
@@ -519,7 +547,7 @@ function setListMembership(doc, identity, listName, author) {
 }
 
 function removeListMembership(doc, identity, listName, author) {
-  let { lists } = getItemAnnotations(doc, identity)
+  let lists = _getSection(doc, identity, 'lists')
   let existing = lists.get(listName)
   if (existing && !existing.deleted) {
     lists.set(listName, {

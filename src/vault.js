@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const Y = require('yjs')
 
 /**
  * SyncVault v2 — state tracker for the sync engine.
@@ -50,11 +51,29 @@ class SyncVault {
   }
 
   /**
-   * Check if the CRDT snapshot has changed since last check.
-   * Returns true if changed (or first call), false if identical.
+   * Check if the CRDT has changed since last check using its state vector.
+   * The state vector captures all Yjs clock positions and is much cheaper
+   * to compute than serializing the full snapshot.
+   *
+   * @param {Y.Doc} doc - Yjs document (or a Uint8Array state vector)
+   * @returns {boolean} true if changed (or first call), false if identical
    */
-  hasCRDTChanged(snapshot) {
-    let hash = this.hashObject(snapshot)
+  hasCRDTChanged(doc) {
+    let sv
+    if (doc instanceof Uint8Array) {
+      sv = doc
+    } else if (doc && typeof doc.store !== 'undefined') {
+      // Yjs Doc — encode its state vector
+      sv = Y.encodeStateVector(doc)
+    } else {
+      // Legacy: plain object snapshot — hash it directly
+      let hash = this.hashObject(doc)
+      if (hash === this.lastCRDTHash) return false
+      this.lastCRDTHash = hash
+      return true
+    }
+    let hash = crypto
+      .createHash('sha256').update(Buffer.from(sv)).digest('hex').slice(0, 16)
     if (hash === this.lastCRDTHash) return false
     this.lastCRDTHash = hash
     return true
@@ -73,10 +92,12 @@ class SyncVault {
 
   /**
    * Check if a local item has changed since it was last pushed.
+   * Uses a fast FNV-1a-inspired hash of JSON.stringify output
+   * instead of SHA-256 — sufficient for same-source comparison.
    * Returns true if the item should be re-pushed.
    */
   hasItemChanged(identity, item) {
-    let hash = this.hashObject(item)
+    let hash = this._fastHash(item)
     let last = this.pushedHashes.get(identity)
     return last !== hash
   }
@@ -86,7 +107,24 @@ class SyncVault {
    */
   markPushed(identity, item) {
     this._evictIfNeeded(this.pushedHashes, MAX_PUSHED_ITEMS)
-    this.pushedHashes.set(identity, this.hashObject(item))
+    this.pushedHashes.set(identity, this._fastHash(item))
+  }
+
+  /**
+   * Fast non-crypto hash for item change detection.
+   * Uses FNV-1a on JSON.stringify (without sorted keys — insertion order
+   * is stable within a single Redux state read so unsorted is fine for
+   * same-source comparisons).
+   */
+  _fastHash(obj) {
+    let str = JSON.stringify(obj)
+    // FNV-1a 32-bit
+    let hash = 0x811c9dc5
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i)
+      hash = (hash * 0x01000193) >>> 0
+    }
+    return hash.toString(36)
   }
 
   // --- Stable note identity (C1) ---
@@ -253,6 +291,7 @@ class SyncVault {
       let dir = path.join(os.homedir(), '.troparcel', 'vault')
       fs.mkdirSync(dir, { recursive: true })
       let file = path.join(dir, this._sanitizeRoom(room) + '.json')
+      let tmpFile = file + '.tmp'
       let data = {
         version: 1,
         timestamp: new Date().toISOString(),
@@ -260,7 +299,8 @@ class SyncVault {
         appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
         appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys)
       }
-      fs.writeFileSync(file, JSON.stringify(data))
+      fs.writeFileSync(tmpFile, JSON.stringify(data))
+      fs.renameSync(tmpFile, file)
     } catch {}
   }
 
