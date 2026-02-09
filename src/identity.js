@@ -121,10 +121,10 @@ function hashFallback(item) {
  * @returns {string} stable selection key
  */
 function computeSelectionKey(photoChecksum, sel) {
-  let x = Math.round(sel.x || 0)
-  let y = Math.round(sel.y || 0)
-  let w = Math.round(sel.width || sel.w || 0)
-  let h = Math.round(sel.height || sel.h || 0)
+  let x = Math.round(sel.x ?? 0)
+  let y = Math.round(sel.y ?? 0)
+  let w = Math.round(sel.width ?? sel.w ?? 0)
+  let h = Math.round(sel.height ?? sel.h ?? 0)
 
   return crypto
     .createHash('sha256')

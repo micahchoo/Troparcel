@@ -651,10 +651,10 @@ class SyncEngine {
         // skipping locals already processed by exact matches
         for (let itemIdentity of identities) {
           if (identity.findLocalMatch(itemIdentity, this.localIndex)) continue
-          let local = this._fuzzyMatchLocal(itemIdentity)
-          if (!local) continue
-          if (processedLocalIds.has(local.localId)) continue
-          processedLocalIds.add(local.localId)
+          let fuzzy = this._fuzzyMatchLocal(itemIdentity)
+          if (!fuzzy) continue
+          if (processedLocalIds.has(fuzzy.local.localId)) continue
+          processedLocalIds.add(fuzzy.local.localId)
 
           if (this.backup && validationSnapshot) {
             let crdtItem = validationSnapshot[itemIdentity]
@@ -665,7 +665,7 @@ class SyncEngine {
           }
 
           try {
-            await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
+            await this.applyRemoteAnnotations(itemIdentity, fuzzy.local, tagMap, listMap)
           } catch (err) {
             this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
               error: err.message
@@ -1045,7 +1045,7 @@ class SyncEngine {
   /**
    * Try to find a local item that matches a CRDT identity by shared photo checksums.
    * Used when exact identity matching fails (e.g., after item merges).
-   * Returns { localId, item } or null.
+   * Returns { local, localIdentity, checksumCount } or null.
    */
   _fuzzyMatchLocal(crdtIdentity) {
     if (this.localIndex.size === 0 || !this.doc) return null
@@ -1055,7 +1055,7 @@ class SyncEngine {
 
     let crdtSet = new Set(crdtChecksums)
 
-    for (let [, local] of this.localIndex) {
+    for (let [localIdentity, local] of this.localIndex) {
       let photos = local.item.photo || []
       if (!Array.isArray(photos)) photos = [photos]
       let localChecksums = new Set()
@@ -1068,7 +1068,9 @@ class SyncEngine {
       for (let cs of crdtSet) {
         if (!localChecksums.has(cs)) { allFound = false; break }
       }
-      if (allFound) return local
+      if (allFound) {
+        return { local, localIdentity, checksumCount: crdtChecksums.length }
+      }
     }
 
     return null
@@ -1840,55 +1842,25 @@ class SyncEngine {
     // Fuzzy matching: for unmatched CRDT identities, try to find local items
     // that contain ALL of the CRDT item's photo checksums (handles merged items)
     let unmatchedIdentities = identities.filter(id => !matchedIdentities.has(id))
-    if (unmatchedIdentities.length > 0) {
-      for (let crdtIdentity of unmatchedIdentities) {
-        let crdtChecksums = schema.getItemChecksums(this.doc, crdtIdentity)
-        if (crdtChecksums.length === 0) {
-          this._debug(`no checksums for unmatched CRDT item ${crdtIdentity.slice(0, 8)}`)
-          continue
-        }
+    for (let crdtIdentity of unmatchedIdentities) {
+      let fuzzy = this._fuzzyMatchLocal(crdtIdentity)
+      if (!fuzzy) {
+        this._debug(`no fuzzy match for CRDT item ${crdtIdentity.slice(0, 8)}`)
+        continue
+      }
 
-        let crdtSet = new Set(crdtChecksums)
-        let bestLocal = null
-        let bestLocalIdentity = null
-
-        for (let [localIdentity, local] of this.localIndex) {
-          let photos = local.item.photo || []
-          if (!Array.isArray(photos)) photos = [photos]
-          let localChecksums = new Set()
-          for (let p of photos) {
-            if (p.checksum) localChecksums.add(p.checksum)
-          }
-
-          // ALL CRDT checksums must be present in the local item
-          let allFound = true
-          for (let cs of crdtSet) {
-            if (!localChecksums.has(cs)) { allFound = false; break }
-          }
-          if (allFound) {
-            bestLocal = local
-            bestLocalIdentity = localIdentity
-            break
-          }
-        }
-
-        if (bestLocal) {
-          // Skip fuzzy matches to locals that already have an exact match —
-          // the merged identity's CRDT data supersedes pre-merge data
-          if (matchedLocalIds.has(bestLocal.localId)) {
-            this._debug(`fuzzy skip: CRDT ${crdtIdentity.slice(0, 8)} → local ${bestLocalIdentity.slice(0, 8)} (already has exact match)`)
-            continue
-          }
-          this._log(`fuzzy match: CRDT ${crdtIdentity.slice(0, 8)} → local ${bestLocalIdentity.slice(0, 8)} (merged item, ${crdtChecksums.length} shared photo(s))`)
-          let crdtItem = snapshot[crdtIdentity]
-          let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
-          if (validation.valid) {
-            matched.push({ itemIdentity: crdtIdentity, local: bestLocal })
-            matchedLocalIds.add(bestLocal.localId)
-          }
-        } else {
-          this._debug(`no fuzzy match for CRDT item ${crdtIdentity.slice(0, 8)}`)
-        }
+      // Skip fuzzy matches to locals that already have an exact match —
+      // the merged identity's CRDT data supersedes pre-merge data
+      if (matchedLocalIds.has(fuzzy.local.localId)) {
+        this._debug(`fuzzy skip: CRDT ${crdtIdentity.slice(0, 8)} → local ${fuzzy.localIdentity.slice(0, 8)} (already has exact match)`)
+        continue
+      }
+      this._log(`fuzzy match: CRDT ${crdtIdentity.slice(0, 8)} → local ${fuzzy.localIdentity.slice(0, 8)} (merged item, ${fuzzy.checksumCount} shared photo(s))`)
+      let crdtItem = snapshot[crdtIdentity]
+      let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
+      if (validation.valid) {
+        matched.push({ itemIdentity: crdtIdentity, local: fuzzy.local })
+        matchedLocalIds.add(fuzzy.local.localId)
       }
     }
 
@@ -2725,6 +2697,7 @@ class SyncEngine {
 
     this._applyingRemote = true
     if (this.adapter) this.adapter.suppressChanges()
+    this._resetApplyStats()
     let applied = 0
     try {
       for (let itemIdentity of validIdentities) {
@@ -2740,6 +2713,7 @@ class SyncEngine {
         }
       }
     } finally {
+      this._logApplyStats()
       this._applyingRemote = false
       if (this.adapter) this.adapter.resumeChanges()
     }

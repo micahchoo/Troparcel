@@ -331,15 +331,14 @@ class StoreAdapter {
 
     let photo = existing.photo || undefined
     let selection = existing.selection || undefined
+    let lang = language || existing.language || null
 
-    await this.deleteNote(id)
+    // Delete may succeed even if _waitForAction times out, so always
+    // attempt to recreate — prevents data loss when delete works but
+    // the activity-tracking promise rejects.
+    try { await this.deleteNote(id) } catch {}
 
-    return this.createNote({
-      photo,
-      selection,
-      html,
-      language: language || existing.language || null
-    })
+    return this.createNote({ photo, selection, html, language: lang })
   }
 
   /**
