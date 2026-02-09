@@ -34,17 +34,18 @@ class TroparcelPlugin {
       return
     }
 
-    this.context.logger.info('Troparcel v4.0 initialized', {
-      room: this.options.room,
-      server: this.options.serverUrl,
-      autoSync: this.options.autoSync,
-      syncMode: this.options.syncMode,
-      userId: this.options.userId,
-      hasToken: !!this.options.roomToken
-    })
+    this.context.logger.info(
+      `Troparcel v4.11 — server: ${this.options.serverUrl}, ` +
+      `mode: ${this.options.syncMode}, ` +
+      `user: ${this.options.userId || '(anonymous)'}`)
 
     if (this.options.autoSync) {
+      this.context.logger.info(
+        'Troparcel: auto-sync enabled, waiting for project to load...')
       this._waitForProjectAndStart()
+    } else {
+      this.context.logger.info(
+        'Troparcel: auto-sync disabled — use File > Export/Import to sync manually')
     }
   }
 
@@ -140,7 +141,7 @@ class TroparcelPlugin {
     // after the store has loaded — not available at construction time
     let projectName = ''
 
-    let syncMode = options.syncMode || 'auto'
+    let syncMode = (options.syncMode || 'auto').trim().toLowerCase()
     if (!VALID_SYNC_MODES.has(syncMode)) {
       syncMode = 'auto'
     }
@@ -201,16 +202,21 @@ class TroparcelPlugin {
 
     try {
       await this.engine.start()
-      this.context.logger.info('Background sync active', {
-        room: this.options.room,
-        syncMode: this.options.syncMode,
-        storeAvailable: !!store
-      })
+      this.context.logger.info(
+        `Troparcel: connected to room "${this.options.room}" ` +
+        `(${store ? 'store' : 'API'} mode, sync: ${this.options.syncMode})`)
     } catch (err) {
-      this.context.logger.warn('Background sync failed to start — ' +
-        'falling back to manual export/import', {
-        error: err.message
-      })
+      let msg = err.message || String(err)
+      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
+        this.context.logger.warn(
+          `Troparcel: could not reach server at ${this.options.serverUrl} — ` +
+          'is the Troparcel server running? ' +
+          'Start it with: node server/index.js')
+      } else {
+        this.context.logger.warn(
+          `Troparcel: sync failed to start — ${msg}. ` +
+          'Use File > Export/Import to sync manually.')
+      }
       await this.engine.stop()
       this.engine = null
     }
@@ -223,45 +229,45 @@ class TroparcelPlugin {
     if (this._isPrefsWindow()) return
 
     if (!data || data.length === 0) {
-      this.context.logger.warn('Export: no items selected')
+      this.context.logger.warn('Troparcel Export: no items selected — select items first, then File > Export > Troparcel')
       return
     }
 
     // Push-only and auto modes support export
     if (this.options.syncMode === 'pull') {
-      this.context.logger.warn('Export: sync mode is "pull" — local changes not shared')
+      this.context.logger.warn('Troparcel Export: sync mode is "pull" — local changes are not shared in this mode')
       return
     }
 
-    this.context.logger.info(`Export: sharing ${data.length} item(s)`, {
-      room: this.options.room
-    })
+    this.context.logger.info(`Troparcel Export: pushing ${data.length} item(s) to room "${this.options.room}"...`)
 
     try {
       if (this.engine && this.engine.state === 'connected') {
         this.engine.pushItems(data)
         this.context.logger.info(
-          `Shared ${data.length} item(s) to room "${this.options.room}" ` +
-          `(background sync active)`
-        )
+          `Troparcel Export: done — ${data.length} item(s) pushed to "${this.options.room}"`)
         return
       }
 
+      this.context.logger.info('Troparcel Export: connecting to server (no background sync active)...')
       let tempEngine = new SyncEngine(this.options, this.context.logger)
       await tempEngine.start()
       tempEngine.pushItems(data)
 
       this.context.logger.info(
-        `Shared ${data.length} item(s) to room "${this.options.room}"`
-      )
+        `Troparcel Export: done — ${data.length} item(s) pushed to "${this.options.room}"`)
 
       setTimeout(() => { tempEngine.stop() }, 5000)
 
     } catch (err) {
-      this.context.logger.error('Export failed', {
-        error: err.message,
-        room: this.options.room
-      })
+      let msg = err.message || String(err)
+      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
+        this.context.logger.error(
+          `Troparcel Export: could not reach server at ${this.options.serverUrl} — ` +
+          'is the Troparcel server running?')
+      } else {
+        this.context.logger.error(`Troparcel Export: failed — ${msg}`)
+      }
     }
   }
 
@@ -276,14 +282,11 @@ class TroparcelPlugin {
 
     // Push-only mode doesn't apply remote changes
     if (this.options.syncMode === 'push') {
-      this.context.logger.warn('Import: sync mode is "push" — remote changes not applied')
+      this.context.logger.warn('Troparcel Import: sync mode is "push" — remote changes are not applied in this mode')
       return
     }
 
-    this.context.logger.info('Import: pulling from room', {
-      room: this.options.room,
-      syncMode: this.options.syncMode
-    })
+    this.context.logger.info(`Troparcel Import: pulling changes from room "${this.options.room}"...`)
 
     if (this.engine) this.engine.pause()
 
@@ -332,17 +335,23 @@ class TroparcelPlugin {
 
       if (result) {
         this.context.logger.info(
-          `Import: applied annotations to ${result.applied} item(s) from room "${this.options.room}"`
-        )
+          `Troparcel Import: done — applied changes to ${result.applied} item(s) from "${this.options.room}"`)
+      } else {
+        this.context.logger.info(
+          'Troparcel Import: done — no pending changes to apply')
       }
 
       if (tempEngine) await engine.stop()
 
     } catch (err) {
-      this.context.logger.error('Import failed', {
-        error: err.message,
-        room: this.options.room
-      })
+      let msg = err.message || String(err)
+      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
+        this.context.logger.error(
+          `Troparcel Import: could not reach server at ${this.options.serverUrl} — ` +
+          'is the Troparcel server running?')
+      } else {
+        this.context.logger.error(`Troparcel Import: failed — ${msg}`)
+      }
     } finally {
       if (this.engine) this.engine.resume()
     }
@@ -354,7 +363,7 @@ class TroparcelPlugin {
     delete safeOptions._roomExplicit
 
     return {
-      version: '4.1.0',
+      version: '4.11.0',
       options: safeOptions,
       engine: this.engine ? this.engine.getStatus() : null,
       backgroundSync: this.engine != null

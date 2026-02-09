@@ -114,18 +114,19 @@ class SyncVault {
   hasItemChanged(identity, item) {
     let hash = this._fastHash(item)
     let last = this.pushedHashes.get(identity)
-    // Cache for reuse in markPushed
-    this._lastItemHash = hash
-    return last !== hash
+    // Return hash alongside result so caller can pass it to markPushed
+    // (avoids shared _lastItemHash state that is fragile under refactoring)
+    return { changed: last !== hash, hash }
   }
 
   /**
    * Record that an item was pushed to the CRDT.
-   * Uses cached hash from hasItemChanged when available.
+   * @param {string} identity
+   * @param {string} hash - hash from hasItemChanged result
    */
   markPushed(identity, hash) {
     this._evictIfNeeded(this.pushedHashes, MAX_PUSHED_ITEMS)
-    this.pushedHashes.set(identity, hash || this._lastItemHash)
+    this.pushedHashes.set(identity, hash)
   }
 
   /**
@@ -277,24 +278,24 @@ class SyncVault {
    * Called periodically to prevent unbounded growth.
    */
   pruneAppliedKeys() {
-    if (this.appliedNoteKeys.size > MAX_APPLIED_KEYS) {
-      this.appliedNoteKeys = this._truncateSet(this.appliedNoteKeys, MAX_APPLIED_KEYS)
-    }
-    if (this.appliedSelectionKeys.size > MAX_APPLIED_KEYS) {
-      this.appliedSelectionKeys = this._truncateSet(this.appliedSelectionKeys, MAX_APPLIED_KEYS)
-    }
-    if (this.appliedTranscriptionKeys.size > MAX_APPLIED_KEYS) {
-      this.appliedTranscriptionKeys = this._truncateSet(this.appliedTranscriptionKeys, MAX_APPLIED_KEYS)
-    }
+    this._truncateSetInPlace(this.appliedNoteKeys, MAX_APPLIED_KEYS)
+    this._truncateSetInPlace(this.appliedSelectionKeys, MAX_APPLIED_KEYS)
+    this._truncateSetInPlace(this.appliedTranscriptionKeys, MAX_APPLIED_KEYS)
   }
 
   /**
-   * Keep the newest entries in a Set by discarding the oldest half.
+   * Remove oldest entries from a Set in-place to keep it within maxSize.
+   * Preserves the original Set reference so external holders stay valid.
    */
-  _truncateSet(set, maxSize) {
-    let arr = Array.from(set)
-    let keep = arr.slice(arr.length - maxSize)
-    return new Set(keep)
+  _truncateSetInPlace(set, maxSize) {
+    if (set.size <= maxSize) return
+    let toRemove = set.size - maxSize
+    let iter = set.values()
+    for (let i = 0; i < toRemove; i++) {
+      let next = iter.next()
+      if (next.done) break
+      set.delete(next.value)
+    }
   }
 
   // --- Persistence (cross-restart ghost note prevention) ---

@@ -95,7 +95,14 @@ class SyncEngine {
     // Event queue for local changes detected during apply phase
     this._applyingRemote = false
     this._queuedLocalChange = false
+    this._syncRequested = false
     this._stopping = false
+
+    // Annotation-specific dirty flag — set by the annotations observer,
+    // cleared after a full apply in syncOnce. Replaces state-vector hashing
+    // for change detection (state vectors include heartbeat writes to the
+    // users map, which caused unnecessary apply cycles every safety-net poll).
+    this._remoteAnnotationsDirty = true  // true to force initial apply
 
     // R2: Async mutex — chains async operations to prevent concurrent access
     this._syncLock = Promise.resolve()
@@ -109,6 +116,7 @@ class SyncEngine {
 
     // C2: List name cache (listId -> listName)
     this._listNameCache = new Map()
+    this._listCacheRefreshedAt = 0
 
     // Stable userId — includes apiPort so different Tropy instances on the
     // same machine get distinct IDs (e.g. AppImage:2019 vs Flatpak:2021)
@@ -133,6 +141,13 @@ class SyncEngine {
     } else {
       this.logger.info(`[troparcel:debug] ${msg}`)
     }
+  }
+
+  _formatAge(date) {
+    let sec = Math.floor((Date.now() - date.getTime()) / 1000)
+    if (sec < 60) return `${sec}s ago`
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+    return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m ago`
   }
 
   _resetApplyStats() {
@@ -200,7 +215,7 @@ class SyncEngine {
       server: this.options.serverUrl,
       room: this.options.room,
       syncMode: this.options.syncMode
-    }, 'Sync engine v4.6 starting')
+    }, 'Sync engine v4.11 starting')
 
     try {
       this.doc = new Y.Doc()
@@ -224,15 +239,23 @@ class SyncEngine {
         }
       )
 
-      // Diagnostic: log all provider status events
+      // Connection lifecycle logging
       this.provider.on('status', (e) => {
-        this.logger.info(`WS status: ${e.status}`)
+        if (e.status === 'connected') {
+          this.logger.info(`[troparcel] connected to ${this.options.serverUrl}`)
+        } else if (e.status === 'disconnected') {
+          this.logger.info('[troparcel] disconnected from server, reconnecting...')
+        }
       })
       this.provider.on('connection-error', (e) => {
-        this.logger.warn({ error: e.message || String(e) }, 'WS connection-error')
+        this.logger.warn(
+          `[troparcel] connection error: ${e.message || String(e)} — ` +
+          'check that the Troparcel server is running')
       })
       this.provider.on('connection-close', (e) => {
-        this.logger.info({ code: e.code, reason: e.reason }, 'WS connection-close')
+        if (e.code !== 1000) {
+          this.logger.info(`[troparcel] connection closed (code: ${e.code}${e.reason ? ', ' + e.reason : ''}), reconnecting...`)
+        }
       })
 
       await this.waitForConnection()
@@ -259,22 +282,19 @@ class SyncEngine {
         )
       }
 
-      // Monitor connection status
+      // Monitor connection status for state tracking
       this._statusHandler = (event) => {
         if (event.status === 'connected') {
           this.state = 'connected'
-          this.logger.info('WebSocket connected')
+          this._log(`reconnected to room "${this.options.room}"`)
         } else if (event.status === 'disconnected') {
-          this.logger.warn('WebSocket disconnected, will retry')
+          this.logger.warn('[troparcel] lost connection, will retry automatically')
         }
       }
       this.provider.on('status', this._statusHandler)
 
       this.state = 'connected'
-      this.logger.info({
-        clientId: this.doc.clientID,
-        room: this.options.room
-      }, 'Sync engine connected')
+      this._log(`ready — room "${this.options.room}", client ${this.doc.clientID}`)
 
       // R1: Only wait for startup if not already waited by plugin
       if (!opts.skipStartupDelay) {
@@ -292,6 +312,12 @@ class SyncEngine {
       // Initial full sync (skipped for temp engines used in export/import)
       if (!opts.skipInitialSync) {
         await this.syncOnce()
+        let users = schema.getUsers(this.doc)
+        let peers = users.filter(u => u.clientID !== this.doc.clientID).length
+        this._log(
+          `initial sync complete — ${this.localIndex.size} local items indexed, ` +
+          `${this.vault.annotationCount} shared items in CRDT, ` +
+          `${peers} peer(s) online`)
       }
 
       // Start file watching
@@ -313,6 +339,21 @@ class SyncEngine {
           schema.heartbeat(this.doc, this.doc.clientID)
         }
       }, 30000)
+
+      // Periodic status log — lets users know sync is alive without DevTools
+      this._statusLogCount = 0
+      let statusInterval = this.debug ? 30000 : 300000 // 30s debug, 5min normal
+      this._statusLogTimer = setInterval(() => {
+        if (this.state !== 'connected') return
+        this._statusLogCount++
+        let users = this.doc ? schema.getUsers(this.doc) : []
+        let peers = users.filter(u => u.clientID !== this.doc?.clientID).length
+        this._log(
+          `sync active — room "${this.options.room}", ` +
+          `${peers} peer(s), ` +
+          `${this.localIndex.size} local / ${this.vault.annotationCount} shared items` +
+          (this.lastSync ? `, last sync ${this._formatAge(this.lastSync)}` : ''))
+      }, statusInterval)
 
     } catch (err) {
       this.state = 'error'
@@ -367,6 +408,11 @@ class SyncEngine {
       this.heartbeatTimer = null
     }
 
+    if (this._statusLogTimer) {
+      clearInterval(this._statusLogTimer)
+      this._statusLogTimer = null
+    }
+
     if (this._watcherHealthTimer) {
       clearInterval(this._watcherHealthTimer)
       this._watcherHealthTimer = null
@@ -416,6 +462,8 @@ class SyncEngine {
     this.vault.clear()
     this._applyingRemote = false
     this._queuedLocalChange = false
+    this._syncRequested = false
+    this._remoteAnnotationsDirty = false
     this.state = 'idle'
   }
 
@@ -516,7 +564,9 @@ class SyncEngine {
   // R9: Restart dead watcher
   _restartFileWatcher() {
     if (this.fileWatcher) {
-      try { this.fileWatcher.close() } catch {}
+      try { this.fileWatcher.close() } catch (err) {
+        this.logger.warn('Failed to close file watcher', { error: String(err.message || err) })
+      }
       this.fileWatcher = null
     }
     // Clear old health timer to prevent accumulation
@@ -586,6 +636,7 @@ class SyncEngine {
    * Handle remote CRDT changes — debounce and apply.
    */
   handleRemoteChanges(changes) {
+    this._remoteAnnotationsDirty = true
     for (let change of changes) {
       this._pendingRemoteIdentities.add(change.identity)
     }
@@ -619,7 +670,9 @@ class SyncEngine {
         allTags = this.adapter
           ? this.adapter.getAllTags()
           : await this.api.getTags()
-      } catch {}
+      } catch (err) {
+        this.logger.warn('applyPendingRemote: failed to fetch tags', { error: String(err.message || err) })
+      }
       let tagMap = new Map()
       if (allTags && Array.isArray(allTags)) {
         for (let t of allTags) tagMap.set(t.name, t)
@@ -634,7 +687,9 @@ class SyncEngine {
           if (Array.isArray(allLists)) {
             for (let l of allLists) listMap.set(l.name, l)
           }
-        } catch {}
+        } catch (err) {
+          this.logger.warn('applyPendingRemote: failed to fetch lists', { error: String(err.message || err) })
+        }
       }
 
       // Re-read items from store to get current state (localIndex may be stale)
@@ -644,6 +699,9 @@ class SyncEngine {
           this.localIndex = identity.buildIdentityIndex(freshItems)
         }
       }
+
+      // Refresh list name cache for this apply cycle
+      await this._refreshListNameCache()
 
       // Validation uses per-item snapshots (avoids full doc serialization)
 
@@ -736,9 +794,15 @@ class SyncEngine {
   async syncOnce() {
     if (this.state !== 'connected') return
     if (!this.doc) return
-    if (this._syncing) return
     if (this._paused) return
     if (this._stopping) return
+
+    if (this._syncing) {
+      // Another syncOnce is running or waiting for the lock — mark that
+      // a re-sync was requested so it runs after the current one completes
+      this._syncRequested = true
+      return
+    }
 
     // Set flag before acquiring lock to prevent concurrent slipthrough
     this._syncing = true
@@ -803,7 +867,7 @@ class SyncEngine {
         let annotationsMap = this.doc.getMap('annotations')
         this.vault.updateAnnotationCount(annotationsMap.size)
 
-        crdtChanged = this.vault.hasCRDTChanged(this.doc)
+        crdtChanged = this._remoteAnnotationsDirty
         if (crdtChanged) {
           this._debug('syncOnce: CRDT changed, applying remote')
           appliedIdentities = await this.applyRemoteFromCRDT()
@@ -811,8 +875,19 @@ class SyncEngine {
           // P2: Re-read modified items after apply
           if (appliedIdentities.size > 0) {
             if (this.adapter) {
-              // Store-first: re-read all items for push (index rebuilt below)
-              items = this.readAllItemsFull()
+              // Store-first: only re-read items that were actually applied
+              let appliedLocalIds = new Set()
+              for (let aid of appliedIdentities) {
+                let local = this.localIndex.get(aid)
+                if (local) appliedLocalIds.add(local.localId)
+              }
+              items = items.map(item => {
+                let localId = item['@id'] || item.id
+                if (appliedLocalIds.has(localId)) {
+                  return this.adapter.getItemFull(localId) || item
+                }
+                return item
+              })
             } else {
               // API fallback: re-enrich only affected summaries
               let summaries = await this.api.getItems()
@@ -845,12 +920,14 @@ class SyncEngine {
         }
       }
 
-      // Suppress store changes during push to avoid triggering overlapping syncs
-      if (this.adapter) this.adapter.suppressChanges()
-      try {
-        await this.pushLocal(items)
-      } finally {
-        if (this.adapter) this.adapter.resumeChanges()
+      // Push local changes to CRDT (skipped in 'pull' mode — only receive, never push)
+      if (this.options.syncMode !== 'pull') {
+        if (this.adapter) this.adapter.suppressChanges()
+        try {
+          await this.pushLocal(items)
+        } finally {
+          if (this.adapter) this.adapter.resumeChanges()
+        }
       }
 
       // Update CRDT hash after push so next cycle doesn't falsely re-apply
@@ -882,12 +959,10 @@ class SyncEngine {
       } else if (this._applyStats) {
         this._failedNoteKeys.clear()
       }
-      if (this.options.syncMode === 'auto' && !skipHashUpdate && !crdtChanged) {
-        // CRDT didn't change this cycle, hash is already up to date
-      } else if (this.options.syncMode === 'auto' && !skipHashUpdate) {
-        // Record current state as baseline so next cycle's hasCRDTChanged
-        // sees "no change" unless new remote updates arrive.
-        this.vault.hasCRDTChanged(this.doc)
+      if (this.options.syncMode === 'auto' && !skipHashUpdate) {
+        // Clear the annotation-dirty flag so next safety-net cycle
+        // skips apply unless the observer fires again.
+        this._remoteAnnotationsDirty = false
       }
 
       // R7: Prune vault periodically
@@ -925,9 +1000,12 @@ class SyncEngine {
       this._syncing = false
       release()
 
-      if (this._queuedLocalChange) {
-        this._queuedLocalChange = false
-        this._debug('replaying queued local change (debounced)')
+      // Replay any sync triggers that arrived while we were running/waiting
+      let needsReplay = this._queuedLocalChange || this._syncRequested
+      this._queuedLocalChange = false
+      this._syncRequested = false
+      if (needsReplay) {
+        this._debug('replaying queued sync trigger (debounced)')
         if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
         this._localDebounceTimer = setTimeout(() => {
           this._localDebounceTimer = null
@@ -951,6 +1029,8 @@ class SyncEngine {
     if (crdtChecksums.length === 0) return null
 
     let crdtSet = new Set(crdtChecksums)
+    let bestMatch = null
+    let bestRatio = 0
 
     for (let [localIdentity, local] of this.localIndex) {
       let photos = local.item.photo || []
@@ -969,11 +1049,16 @@ class SyncEngine {
       // to reduce false positives when items share a single common photo
       if (allFound && localChecksums.size > 0 &&
           crdtChecksums.length >= Math.ceil(localChecksums.size * 0.5)) {
-        return { local, localIdentity, checksumCount: crdtChecksums.length }
+        // Pick the best match: highest overlap ratio (CRDT checksums / local photos)
+        let ratio = crdtChecksums.length / localChecksums.size
+        if (ratio > bestRatio) {
+          bestRatio = ratio
+          bestMatch = { local, localIdentity, checksumCount: crdtChecksums.length }
+        }
       }
     }
 
-    return null
+    return bestMatch
   }
 
   // --- Apply remote → local (orchestration) ---
@@ -1010,7 +1095,9 @@ class SyncEngine {
         if (Array.isArray(allLists)) {
           for (let l of allLists) listMap.set(l.name || String(l.id), l)
         }
-      } catch {}
+      } catch (err) {
+        this.logger.warn('applyRemoteFromCRDT: failed to fetch lists', { error: String(err.message || err) })
+      }
     }
 
     this._applyingRemote = true
@@ -1082,7 +1169,9 @@ class SyncEngine {
             ? this.backup.captureItemStateFromStore(this.adapter, local.localId, itemIdentity)
             : await this.backup.captureItemState(local.localId, itemIdentity)
           backupItems.push(state)
-        } catch {}
+        } catch (err) {
+          this.logger.warn(`applyRemoteFromCRDT: backup capture failed for ${itemIdentity.slice(0, 8)}`, { error: String(err.message || err) })
+        }
       }
       if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
         await this.backup.saveSnapshot(backupItems)
@@ -1159,7 +1248,9 @@ class SyncEngine {
         if (Array.isArray(allLists)) {
           for (let l of allLists) listMap.set(l.name || String(l.id), l)
         }
-      } catch {}
+      } catch (err) {
+        this.logger.warn('applyOnDemand: failed to fetch lists', { error: String(err.message || err) })
+      }
     }
 
     for (let itemIdentity of allIdentities) {
@@ -1213,7 +1304,9 @@ class SyncEngine {
           ? this.backup.captureItemStateFromStore(this.adapter, local.localId, itemIdentity)
           : await this.backup.captureItemState(local.localId, itemIdentity)
         backupItems.push(state)
-      } catch {}
+      } catch (err) {
+        this.logger.warn(`applyOnDemand: backup capture failed for ${itemIdentity.slice(0, 8)}`, { error: String(err.message || err) })
+      }
     }
     if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
       await this.backup.saveSnapshot(backupItems)

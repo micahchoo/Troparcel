@@ -170,11 +170,14 @@ function computeNoteKey(note, photoChecksum) {
   let text = note.text || ''
   let html = note.html || ''
   let parent = photoChecksum || note.photo || note.selection || 'orphan'
+  let content = html || text
 
-  // Use first 200 chars of content to avoid huge hashes but still differentiate
-  let content = (html || text).slice(0, 200)
+  // Include prefix for differentiation + full content hash to avoid
+  // collisions between notes that share the same first 200 chars
+  let prefix = content.slice(0, 200)
+  let fullHash = content.length > 200 ? fnv1a(content, 8) : ''
 
-  return fnv1a(`note:${parent}:${content}`)
+  return fnv1a(`note:${parent}:${prefix}:${fullHash}`)
 }
 
 /**

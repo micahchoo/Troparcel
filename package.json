@@ -1,10 +1,12 @@
 {
   "name": "troparcel",
   "productName": "Troparcel",
-  "version": "4.1.0",
-  "description": "Annotation overlay collaboration layer for Tropy — sync notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs",
+  "version": "4.11.0",
+  "description": "Real-time collaboration for Tropy — requires a Troparcel server. Syncs notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs. See homepage for setup guide.",
   "author": "Micah",
   "license": "AGPL-3.0",
+  "homepage": "https://github.com/BIIIF/troparcel#quick-start",
+  "repository": "https://github.com/BIIIF/troparcel",
   "icon": "icon.svg",
   "main": "index.js",
   "scripts": {
@@ -21,15 +23,15 @@
   "options": [
     {
       "field": "serverUrl",
-      "label": "Server URL (ws://host:port)",
+      "label": "Server URL — ws://host:port of your Troparcel server",
       "type": "string",
       "default": "ws://localhost:2468",
       "placeholder": "ws://localhost:2468",
-      "hint": "WebSocket URL of the Troparcel collaboration server."
+      "hint": "WebSocket URL of the Troparcel collaboration server. You must run the server separately."
     },
     {
       "field": "room",
-      "label": "Room Name (all users must match)",
+      "label": "Room — all collaborators must use the same name",
       "type": "string",
       "default": "",
       "placeholder": "blank = project name",
@@ -37,7 +39,7 @@
     },
     {
       "field": "userId",
-      "label": "Your Display Name",
+      "label": "Your Name — shown to collaborators on your annotations",
       "type": "string",
       "default": "",
       "placeholder": "alice",
@@ -45,15 +47,15 @@
     },
     {
       "field": "roomToken",
-      "label": "Room Token (shared secret, all must match)",
+      "label": "Room Token — shared secret, all collaborators must match",
       "type": "string",
       "default": "",
-      "placeholder": "optional",
+      "placeholder": "optional shared secret",
       "hint": "Shared secret for room authentication. All participants must use the same token."
     },
     {
       "field": "syncMode",
-      "label": "Sync Mode: auto | review | push | pull",
+      "label": "Sync Mode — auto / review / push / pull",
       "type": "string",
       "default": "auto",
       "placeholder": "auto",
@@ -64,11 +66,11 @@
       "label": "Auto-sync in background",
       "type": "boolean",
       "default": true,
-      "hint": "Automatically sync annotations in the background. Disable to only sync via File > Export/Import."
+      "hint": "Start syncing automatically when Tropy opens. When off, use File > Export (push) and File > Import (pull) to sync manually."
     },
     {
       "field": "syncMetadata",
-      "label": "Sync Metadata (title, date, fields)",
+      "label": "Sync Metadata",
       "type": "boolean",
       "default": true,
       "hint": "Sync item metadata (title, date, description, custom fields) between collaborators."
@@ -82,7 +84,7 @@
     },
     {
       "field": "syncNotes",
-      "label": "Sync Notes (annotations)",
+      "label": "Sync Notes",
       "type": "boolean",
       "default": true,
       "hint": "Sync notes (annotations) between collaborators."
@@ -103,108 +105,108 @@
     },
     {
       "field": "syncPhotoAdjustments",
-      "label": "Sync Photo Adjustments (brightness, contrast...)",
+      "label": "Sync Photo Adjustments",
       "type": "boolean",
       "default": false,
-      "hint": "Sync photo metadata (brightness, contrast, saturation, angle, mirror, negative) between collaborators."
+      "hint": "Sync brightness, contrast, saturation, angle, mirror, and negative settings between collaborators."
     },
     {
       "field": "syncLists",
       "label": "Sync List Membership",
       "type": "boolean",
       "default": false,
-      "hint": "Sync list membership between collaborators. Items will be added/removed from lists based on other users' changes."
+      "hint": "Add/remove items from lists based on other users' changes. Lists are matched by name."
     },
     {
       "field": "syncDeletions",
-      "label": "Propagate Deletions to other users",
+      "label": "Propagate Deletions",
       "type": "boolean",
       "default": false,
-      "hint": "Propagate deletions (tags, notes, selections, transcriptions, lists) to other collaborators via CRDT tombstones. When disabled, deletions are local only."
+      "hint": "Send your deletions (tags, notes, selections, etc.) to other collaborators. When off, deletions stay local only."
     },
     {
-      "field": "clearTombstones",
-      "label": "Clear Tombstones on next restart (then disable)",
+      "field": "debug",
+      "label": "Debug Logging",
       "type": "boolean",
       "default": false,
-      "hint": "Purge all accumulated tombstones (deletion markers) from the CRDT on next startup. Enable this, restart Tropy to clean up, then disable it."
+      "hint": "Show verbose sync details in the developer console (View > Toggle Developer Tools)."
     },
     {
       "field": "apiPort",
-      "label": "API Port (2019=latest, 2029=stable)",
+      "label": "[Advanced] API Port — 2019 for latest, 2029 for stable",
       "type": "number",
       "default": 2019,
-      "hint": "Port of Tropy's local HTTP API (2019 for latest, 2029 for stable)."
+      "hint": "Port of Tropy's local HTTP API. Only change if you use Tropy stable (2029) instead of latest (2019)."
     },
     {
       "field": "startupDelay",
-      "label": "Startup Delay ms",
+      "label": "[Advanced] Startup Delay ms — wait for Tropy to initialize",
       "type": "number",
       "default": 8000,
-      "hint": "Milliseconds to wait for Tropy to finish initialization before starting sync."
+      "hint": "Milliseconds to wait for Tropy to finish loading before starting sync."
     },
     {
       "field": "localDebounce",
-      "label": "Local Debounce ms (batch edits)",
+      "label": "[Advanced] Local Debounce ms — batch rapid edits",
       "type": "number",
       "default": 2000,
-      "hint": "Milliseconds to wait after detecting a local change before pushing to the CRDT."
+      "hint": "Delay after a local edit before pushing to the server. Batches rapid edits."
     },
     {
       "field": "remoteDebounce",
-      "label": "Remote Debounce ms",
+      "label": "[Advanced] Remote Debounce ms",
       "type": "number",
       "default": 500,
-      "hint": "Milliseconds to wait after receiving a remote change before applying locally."
+      "hint": "Delay after receiving a remote change before applying locally."
     },
     {
       "field": "safetyNetInterval",
-      "label": "Full Sync Interval sec (0=off)",
+      "label": "[Advanced] Full Sync Interval sec — 0 to disable",
       "type": "number",
       "default": 120,
-      "hint": "Periodic full sync interval in seconds, as a safety net. Set to 0 to disable."
+      "hint": "Periodic full sync interval as a safety net. Set to 0 to disable."
     },
     {
       "field": "writeDelay",
-      "label": "Write Delay ms (increase if DB locks)",
+      "label": "[Advanced] Write Delay ms — increase if you see DB lock errors",
       "type": "number",
       "default": 100,
-      "hint": "Milliseconds between API write operations. Increase if you see lock errors."
+      "hint": "Delay between write operations. Increase if you see SQLITE_BUSY errors."
     },
     {
       "field": "maxBackups",
-      "label": "Max Backups",
+      "label": "[Advanced] Max Backups",
       "type": "number",
       "default": 10,
-      "hint": "Maximum number of backup snapshots to keep per room."
+      "hint": "Maximum backup snapshots to keep per room."
     },
     {
       "field": "maxNoteSize",
-      "label": "Max Note Size bytes (1048576=1MB)",
+      "label": "[Advanced] Max Note Size bytes — default 1MB",
       "type": "number",
       "default": 1048576,
       "hint": "Maximum size for notes and transcriptions from remote sources."
     },
     {
       "field": "maxMetadataSize",
-      "label": "Max Metadata Size bytes (65536=64KB)",
+      "label": "[Advanced] Max Metadata Size bytes — default 64KB",
       "type": "number",
       "default": 65536,
       "hint": "Maximum size for individual metadata values from remote sources."
     },
     {
       "field": "tombstoneFloodThreshold",
-      "label": "Flood Threshold 0-1 (warn if exceeded)",
+      "label": "[Advanced] Tombstone Flood Threshold 0-1",
       "type": "number",
       "default": 0.5,
-      "hint": "If more than this fraction of an item's data is tombstoned in a single sync, a warning is logged."
+      "hint": "Warn if more than this fraction of an item's data is tombstoned in one sync."
     },
     {
-      "field": "debug",
-      "label": "Debug Logging (developer console)",
+      "field": "clearTombstones",
+      "label": "[Advanced] Clear Tombstones — purge on next restart, then disable this",
       "type": "boolean",
       "default": false,
-      "hint": "Enable verbose debug logging for troubleshooting sync issues."
+      "hint": "One-shot: purges all deletion markers from the CRDT on next startup. Remember to disable this afterward."
     }
   ],
   "keywords": [

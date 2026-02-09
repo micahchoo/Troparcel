@@ -15,7 +15,7 @@
 // Tags ProseMirror supports for basic rich text
 const SAFE_TAGS = new Set([
   'p', 'br', 'em', 'i', 'strong', 'b', 'u', 's',
-  'a', 'ul', 'ol', 'li', 'blockquote',
+  'a', 'ul', 'ol', 'li', 'blockquote', 'hr',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'code', 'pre', 'sup', 'sub', 'span', 'div'
 ])
@@ -31,7 +31,14 @@ const DANGEROUS_TAGS = new Set([
 // Attributes allowed on specific tags
 const SAFE_ATTRS = {
   'a': new Set(['href', 'title']),
-  '*': new Set(['class'])
+  '*': new Set(['class', 'style'])
+}
+
+// CSS properties and allowed values — strict allowlist for style attributes.
+// Only Tropy-relevant formatting passes through; all other CSS is stripped.
+const SAFE_STYLES = {
+  'text-decoration': new Set(['underline', 'overline', 'line-through', 'none']),
+  'text-align': new Set(['left', 'right', 'center', 'justify', 'end', 'start'])
 }
 
 // Protocols allowed in href values
@@ -252,6 +259,13 @@ function sanitizeTagAttributes(attrs, tagName) {
       if (!decodedValue) continue
     }
 
+    if (name === 'style') {
+      let safeStyle = sanitizeStyle(decodedValue)
+      if (!safeStyle) continue
+      result += ` style="${escapeAttr(safeStyle)}"`
+      continue
+    }
+
     result += ` ${name}="${escapeAttr(decodedValue)}"`
   }
 
@@ -277,6 +291,29 @@ function decodeEntities(str) {
       }
       return ENTITY_MAP[named]
     })
+}
+
+/**
+ * Sanitize a CSS style string — only allow safe property-value pairs.
+ * Prevents CSS-based attacks (expression(), url(), behavior:, etc.)
+ * while preserving Tropy's text-decoration and text-align formatting.
+ */
+function sanitizeStyle(styleStr) {
+  if (!styleStr) return ''
+  let safe = []
+  for (let part of styleStr.split(';')) {
+    let trimmed = part.trim()
+    if (!trimmed) continue
+    let colonIdx = trimmed.indexOf(':')
+    if (colonIdx < 0) continue
+    let prop = trimmed.slice(0, colonIdx).trim().toLowerCase()
+    let val = trimmed.slice(colonIdx + 1).trim().toLowerCase()
+    let allowed = SAFE_STYLES[prop]
+    if (allowed && allowed.has(val)) {
+      safe.push(`${prop}: ${val}`)
+    }
+  }
+  return safe.join('; ')
 }
 
 /**
@@ -320,6 +357,7 @@ function escapeAttr(str) {
   return str
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 }

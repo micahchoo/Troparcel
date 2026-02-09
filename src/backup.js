@@ -107,11 +107,17 @@ class BackupManager {
 
     try {
       snapshot.metadata = await this.api.getMetadata(localId)
-    } catch { snapshot.metadata = null }
+    } catch (err) {
+      this.logger.warn(`captureItemState: failed to get metadata for ${localId}`, { error: String(err.message || err) })
+      snapshot.metadata = null
+    }
 
     try {
       snapshot.tags = await this.api.getItemTags(localId)
-    } catch { snapshot.tags = [] }
+    } catch (err) {
+      this.logger.warn(`captureItemState: failed to get tags for ${localId}`, { error: String(err.message || err) })
+      snapshot.tags = []
+    }
 
     // Get photos with notes and selections
     snapshot.photos = []
@@ -126,7 +132,9 @@ class BackupManager {
           if (r.status === 'fulfilled' && r.value) snapshot.photos.push(r.value)
         }
       }
-    } catch {}
+    } catch (err) {
+      this.logger.warn(`captureItemState: failed to get photos for ${localId}`, { error: String(err.message || err) })
+    }
 
     return snapshot
   }
@@ -265,7 +273,7 @@ class BackupManager {
    * @returns {Object} { restored: number, errors: string[] }
    */
   async rollback(backupPath, adapter = null) {
-    let data = JSON.parse(fs.readFileSync(backupPath, 'utf8'))
+    let data = JSON.parse(await fs.promises.readFile(backupPath, 'utf8'))
     let restored = 0
     let errors = []
 

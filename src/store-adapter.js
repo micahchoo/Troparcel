@@ -271,11 +271,22 @@ class StoreAdapter {
     })
     await this._waitForAction(action)
 
-    let idsAfter = Object.keys(this._getState().selections)
+    let state = this._getState()
+    let idsAfter = Object.keys(state.selections)
+    // Filter new IDs by matching parent photo to handle concurrent UI creations
+    let candidates = []
     for (let id of idsAfter) {
       if (!idsBefore.has(id)) {
-        return { id: Number(id), '@id': Number(id) }
+        let sel = state.selections[id]
+        if (sel && sel.photo === photo) {
+          candidates.push(id)
+        }
       }
+    }
+    // If multiple candidates match, prefer the last one (most recently created)
+    if (candidates.length > 0) {
+      let id = candidates[candidates.length - 1]
+      return { id: Number(id), '@id': Number(id) }
     }
     return null
   }
@@ -302,11 +313,29 @@ class StoreAdapter {
     let action = this.store.dispatch({
       type: 'note.create',
       payload,
-      meta: { cmd: 'project' }
+      meta: { cmd: 'project', history: 'add' }
     })
     await this._waitForAction(action)
 
-    let idsAfter = Object.keys(this._getState().notes)
+    let state = this._getState()
+    let idsAfter = Object.keys(state.notes)
+    // Filter new IDs by matching parent (photo/selection) to handle concurrent UI creations
+    let candidates = []
+    for (let id of idsAfter) {
+      if (!idsBefore.has(id)) {
+        let note = state.notes[id]
+        if (note) {
+          let parentMatch = (photo && note.photo === photo) ||
+                            (selection && note.selection === selection)
+          if (parentMatch) candidates.push(id)
+        }
+      }
+    }
+    if (candidates.length > 0) {
+      let id = candidates[candidates.length - 1]
+      return { id: Number(id), '@id': Number(id) }
+    }
+    // Fallback: return any new ID if no parent match (shouldn't happen normally)
     for (let id of idsAfter) {
       if (!idsBefore.has(id)) {
         return { id: Number(id), '@id': Number(id) }
@@ -359,6 +388,10 @@ class StoreAdapter {
         result = await this.createNote({ photo, selection, html: originalHtml, language: lang })
       } catch (restoreErr) {
         this.logger.warn(`updateNote: restore also failed for note ${id}`, { error: restoreErr.message })
+        throw new Error(`updateNote: note ${id} deleted but both create and restore failed`)
+      }
+      if (!result) {
+        throw new Error(`updateNote: note ${id} deleted but both create and restore returned null`)
       }
     }
     return result
@@ -370,8 +403,8 @@ class StoreAdapter {
   async deleteNote(id) {
     let action = this.store.dispatch({
       type: 'note.delete',
-      payload: { id },
-      meta: { cmd: 'project' }
+      payload: [id],
+      meta: { cmd: 'project', history: 'add' }
     })
     await this._waitForAction(action)
   }
@@ -408,7 +441,7 @@ class StoreAdapter {
    * Returns an unsubscribe function.
    */
   subscribe(callback) {
-    let prevState = this._getState()
+    this._prevState = this._getState()
     let slices = [
       'items', 'photos', 'selections', 'notes',
       'metadata', 'tags', 'lists'
@@ -420,18 +453,18 @@ class StoreAdapter {
       let state = this._getState()
       let changed = false
       for (let slice of slices) {
-        if (state[slice] !== prevState[slice]) {
+        if (state[slice] !== this._prevState[slice]) {
           changed = true
           break
         }
       }
-      prevState = state
+      this._prevState = state
 
       if (changed) {
         try {
           callback()
         } catch (err) {
-          this.logger.warn(`subscribe callback error: ${err.message}`)
+          this.logger.warn(`subscribe callback error: ${String(err.message || err)}`)
         }
       }
     })
@@ -448,6 +481,9 @@ class StoreAdapter {
    * Resume change detection (call after applying remote changes).
    */
   resumeChanges() {
+    // Reset prevState so our own suppressed-phase changes don't trigger
+    // the subscriber as "new" on the next external state change
+    this._prevState = this._getState()
     this._suppressChangeDetection = false
   }
 
@@ -465,14 +501,20 @@ class StoreAdapter {
     let seq = action.meta.seq
 
     return new Promise((resolve, reject) => {
+      let settled = false
+
       let timer = setTimeout(() => {
+        if (settled) return
+        settled = true
         unsub()
         reject(new Error(`waitForAction: ${action.type} seq=${seq} timed out after ${timeout}ms`))
       }, timeout)
 
       let unsub = this.store.subscribe(() => {
+        if (settled) return
         let state = this._getState()
         if (!state.activities || !state.activities[seq]) {
+          settled = true
           clearTimeout(timer)
           unsub()
           resolve()
@@ -480,11 +522,14 @@ class StoreAdapter {
       })
 
       // Already done?
-      let state = this._getState()
-      if (!state.activities || !state.activities[seq]) {
-        clearTimeout(timer)
-        unsub()
-        resolve()
+      if (!settled) {
+        let state = this._getState()
+        if (!state.activities || !state.activities[seq]) {
+          settled = true
+          clearTimeout(timer)
+          unsub()
+          resolve()
+        }
       }
     })
   }
@@ -537,8 +582,15 @@ class StoreAdapter {
 
     let type = typeof node.type === 'string' ? node.type : (node.type && node.type.name) || ''
     switch (type) {
-      case 'paragraph':
+      case 'paragraph': {
+        // Tropy: 'left' → no style, 'right' → 'text-align: end', others → direct
+        let align = node.attrs && node.attrs.align
+        if (align && align !== 'left') {
+          let ta = align === 'right' ? 'end' : align
+          return `<p style="text-align: ${ta}">${children}</p>`
+        }
         return `<p>${children}</p>`
+      }
       case 'blockquote':
         return `<blockquote>${children}</blockquote>`
       case 'ordered_list':
@@ -551,13 +603,18 @@ class StoreAdapter {
         let l = (node.attrs && node.attrs.level) || 1
         return `<h${l}>${children}</h${l}>`
       }
+      case 'horizontal_rule':
+        return '<hr>'
+      case 'code_block':
+        return `<pre><code>${children}</code></pre>`
       case 'hard_break':
-        return '<br>'
+        return '<span class="line-break"><br></span>'
       case 'text': {
         let t = this._esc(node.text || '')
         if (node.marks) {
           for (let m of node.marks) {
-            switch (m.type) {
+            let mtype = typeof m.type === 'string' ? m.type : (m.type && m.type.name) || ''
+            switch (mtype) {
               case 'bold':
               case 'strong':
                 t = `<strong>${t}</strong>`; break
@@ -573,9 +630,11 @@ class StoreAdapter {
               case 'sub':
                 t = `<sub>${t}</sub>`; break
               case 'strikethrough':
-                t = `<s>${t}</s>`; break
+                t = `<span style="text-decoration: line-through">${t}</span>`; break
               case 'underline':
-                t = `<u>${t}</u>`; break
+                t = `<span style="text-decoration: underline">${t}</span>`; break
+              case 'overline':
+                t = `<span style="text-decoration: overline">${t}</span>`; break
             }
           }
         }
