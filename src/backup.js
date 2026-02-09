@@ -9,7 +9,7 @@ const os = require('os')
  *
  * - Pre-apply snapshots: saves affected items as JSON before applying
  * - Inbound validation: size guards, tombstone flood, empty overwrite
- * - Rollback: replays a backup snapshot via the Tropy API
+ * - Rollback: replays a backup snapshot via the Tropy API (all data types)
  */
 
 const DEFAULT_OPTIONS = {
@@ -26,6 +26,7 @@ class BackupManager {
     this.logger = logger
     this.options = { ...DEFAULT_OPTIONS, ...options }
     this.backupDir = path.join(os.homedir(), '.troparcel', 'backups', this.sanitizeDir(room))
+    this._fileCounter = 0
   }
 
   /**
@@ -44,6 +45,7 @@ class BackupManager {
 
   /**
    * Save a pre-apply snapshot of items that are about to be modified.
+   * Uses millisecond timestamps + counter to prevent collisions (R8).
    *
    * @param {Object[]} itemSnapshots - array of { identity, localId, metadata, tags, notes, selections, transcriptions }
    * @returns {string} path to the backup file
@@ -51,13 +53,14 @@ class BackupManager {
   saveSnapshot(itemSnapshots) {
     this.ensureDir()
     let ts = new Date().toISOString().replace(/[:.]/g, '-')
-    let filename = `${ts}.json`
+    this._fileCounter++
+    let filename = `${ts}-${String(this._fileCounter).padStart(4, '0')}.json`
     let filepath = path.join(this.backupDir, filename)
 
     let data = {
       room: this.room,
       timestamp: new Date().toISOString(),
-      version: '3.0',
+      version: '3.1',
       items: itemSnapshots
     }
 
@@ -212,7 +215,8 @@ class BackupManager {
   }
 
   /**
-   * Rollback: replay a backup file into Tropy via the API.
+   * Rollback: replay a backup file into Tropy via the API (R4).
+   * Restores metadata, tags, and notes for all items in the backup.
    *
    * @param {string} backupPath - path to the backup JSON file
    * @returns {Object} { restored: number, errors: string[] }
@@ -226,8 +230,61 @@ class BackupManager {
       try {
         // Restore metadata
         if (item.metadata) {
-          await this.api.saveMetadata(item.localId, item.metadata)
+          try {
+            await this.api.saveMetadata(item.localId, item.metadata)
+          } catch (err) {
+            errors.push(`metadata for ${item.localId}: ${err.message}`)
+          }
         }
+
+        // Restore tags
+        if (item.tags && Array.isArray(item.tags)) {
+          try {
+            let tagIds = item.tags.map(t => t.id || t.tag_id).filter(Boolean)
+            if (tagIds.length > 0) {
+              await this.api.addTagsToItem(item.localId, tagIds)
+            }
+          } catch (err) {
+            errors.push(`tags for ${item.localId}: ${err.message}`)
+          }
+        }
+
+        // Restore notes from photos
+        if (item.photos && Array.isArray(item.photos)) {
+          for (let photo of item.photos) {
+            let noteIds = photo.notes || []
+            for (let noteId of noteIds) {
+              try {
+                let note = await this.api.getNote(noteId, 'json')
+                if (note && note.html) {
+                  await this.api.updateNote(noteId, { html: note.html })
+                }
+              } catch (err) {
+                errors.push(`note ${noteId}: ${err.message}`)
+              }
+            }
+
+            // Restore selections
+            let selIds = photo.selections || []
+            for (let selId of selIds) {
+              try {
+                let sel = await this.api.getSelection(selId)
+                if (sel) {
+                  await this.api.updateSelection(selId, {
+                    x: sel.x,
+                    y: sel.y,
+                    width: sel.width,
+                    height: sel.height,
+                    angle: sel.angle || 0
+                  })
+                }
+              } catch (err) {
+                errors.push(`selection ${selId}: ${err.message}`)
+              }
+            }
+          }
+        }
+
         restored++
       } catch (err) {
         errors.push(`Failed to restore item ${item.localId}: ${err.message}`)

@@ -291,12 +291,16 @@ class ApiClient {
    * @param {Object} params - { data: JSON-LD items, list: list id }
    */
   async importItems(params) {
+    // S7: Hard block on file paths — accepting file paths from CRDT data
+    // would allow a malicious collaborator to trigger arbitrary local file
+    // reads via Tropy's import mechanism.
+    if (params.file) {
+      throw new Error('File path import is blocked for security — use data parameter with JSON-LD')
+    }
+
     let body = new URLSearchParams()
     if (params.data) body.set('data', JSON.stringify(params.data))
     if (params.list) body.set('list', params.list)
-    // Note: params.file deliberately omitted — accepting file paths from
-    // CRDT data would allow a malicious collaborator to trigger arbitrary
-    // local file reads via Tropy's import mechanism.
 
     return this.request('POST', '/project/import', body.toString(), {
       'Content-Type': 'application/x-www-form-urlencoded'

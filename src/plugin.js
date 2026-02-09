@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * Troparcel v3.0 — Annotation Overlay Collaboration Layer for Tropy
+ * Troparcel v4.0 — Store-First Annotation Overlay Collaboration Layer for Tropy
  *
  * Syncs notes, tags, metadata, selections, transcriptions, and lists
  * between Tropy instances through CRDTs (Yjs). Items are matched
@@ -9,16 +9,17 @@
  * own photos locally while sharing interpretations through a
  * lightweight WebSocket relay.
  *
- * Two sync modes:
- *   - "auto" — near-real-time: local changes pushed on DB file change,
- *     remote changes applied immediately (debounced)
- *   - "review" — local changes pushed automatically, but remote changes
- *     only applied when the user triggers Import from the File menu
+ * Sync modes:
+ *   - "auto"   — push and apply changes in near-real-time
+ *   - "review" — push automatically, apply only on Import
+ *   - "push"   — only send local changes, never apply remote
+ *   - "pull"   — only receive remote changes, never push local
  */
 
 const { SyncEngine } = require('./sync-engine')
 const identity = require('./identity')
-const schema = require('./crdt-schema')
+
+const VALID_SYNC_MODES = new Set(['auto', 'review', 'push', 'pull'])
 
 class TroparcelPlugin {
   constructor(options, context) {
@@ -26,7 +27,14 @@ class TroparcelPlugin {
     this.options = this.mergeOptions(options)
     this.engine = null
 
-    this.context.logger.info('Troparcel v3.0 initialized', {
+    // Prefs window detection — instant check, no delay needed.
+    // The prefs window has a pino logger with name='prefs' in its bindings.
+    if (this._isPrefsWindow()) {
+      this.context.logger.info('Troparcel: skipping sync in prefs window')
+      return
+    }
+
+    this.context.logger.info('Troparcel v4.0 initialized', {
       room: this.options.room,
       server: this.options.serverUrl,
       autoSync: this.options.autoSync,
@@ -36,8 +44,92 @@ class TroparcelPlugin {
     })
 
     if (this.options.autoSync) {
-      this.startBackgroundSync()
+      this._waitForProjectAndStart()
     }
+  }
+
+  /**
+   * Detect if we're running in Tropy's preferences window.
+   * The prefs window can reach the localhost API but should never sync.
+   */
+  _isPrefsWindow() {
+    try {
+      let logger = this.context.logger
+      // Pino logger stores bindings as a JSON string in chindings
+      if (logger.chindings && logger.chindings.includes('"name":"prefs"')) {
+        return true
+      }
+      // Alternative: check bindings() method
+      if (typeof logger.bindings === 'function') {
+        let b = logger.bindings()
+        if (b && b.name === 'prefs') return true
+      }
+    } catch { /* ignore */ }
+    return false
+  }
+
+  /**
+   * Wait for project context and Redux store before starting sync.
+   *
+   * context.window.project is NOT populated at plugin construction time.
+   * context.window.store is set after window.load() completes.
+   * We poll every 500ms up to startupDelay for both to appear.
+   */
+  async _waitForProjectAndStart() {
+    let startTime = Date.now()
+    let maxWait = this.options.startupDelay
+    let interval = 500
+
+    while (Date.now() - startTime < maxWait) {
+      try {
+        let hasProject = this.context.window && this.context.window.project
+        let hasStore = this.context.window && this.context.window.store
+
+        if (hasProject && hasStore) {
+          let elapsed = Date.now() - startTime
+          this.context.logger.info(
+            `Troparcel: project + store available after ${elapsed}ms`
+          )
+
+          // Update room name from project if not explicitly set
+          if (!this.options._roomExplicit && this.context.window.project.name) {
+            this.options.room = this.context.window.project.name
+          }
+
+          // Get project file path (kept for backup manager paths)
+          if (this.context.window.project.file) {
+            this.options.projectPath = this.context.window.project.file
+          }
+
+          break
+        }
+
+        if (hasProject && !hasStore) {
+          // Project context appeared but store not yet — keep waiting
+          let elapsed = Date.now() - startTime
+          if (elapsed > 2000 && elapsed % 2000 < interval) {
+            this.context.logger.info(
+              `Troparcel: project ready, waiting for store (${elapsed}ms)`
+            )
+          }
+        }
+      } catch { /* ignore */ }
+
+      await new Promise(r => setTimeout(r, interval))
+    }
+
+    if (!this.context.window || !this.context.window.project) {
+      this.context.logger.info(
+        'Troparcel: project context not available after ' +
+        `${this.options.startupDelay}ms — starting sync with API fallback`
+      )
+    } else if (!this.context.window.store) {
+      this.context.logger.info(
+        'Troparcel: store not available — using API fallback for reads/writes'
+      )
+    }
+
+    await this.startBackgroundSync()
   }
 
   mergeOptions(options) {
@@ -47,6 +139,13 @@ class TroparcelPlugin {
         projectName = this.context.window.project.name || ''
       }
     } catch { /* ignore */ }
+
+    let syncMode = options.syncMode || 'auto'
+    if (!VALID_SYNC_MODES.has(syncMode)) {
+      syncMode = 'auto'
+    }
+
+    let roomExplicit = !!options.room
 
     return {
       // Connection
@@ -58,11 +157,16 @@ class TroparcelPlugin {
 
       // Sync behavior
       autoSync: options.autoSync !== false,
-      syncMode: options.syncMode || 'auto',
+      syncMode,
+      syncMetadata: options.syncMetadata !== false,
+      syncTags: options.syncTags !== false,
+      syncNotes: options.syncNotes !== false,
+      syncSelections: options.syncSelections !== false,
+      syncTranscriptions: options.syncTranscriptions !== false,
       syncPhotoAdjustments: options.syncPhotoAdjustments === true || options.syncPhotoAdjustments === 'true',
       syncLists: options.syncLists === true || options.syncLists === 'true',
 
-      // Timing (all configurable)
+      // Timing
       startupDelay: Number(options.startupDelay) || 8000,
       localDebounce: Number(options.localDebounce) || 2000,
       remoteDebounce: Number(options.remoteDebounce) || 500,
@@ -76,20 +180,29 @@ class TroparcelPlugin {
       tombstoneFloodThreshold: Number(options.tombstoneFloodThreshold) || 0.5,
 
       // Debug
-      debug: options.debug === true || options.debug === 'true'
+      debug: options.debug === true || options.debug === 'true',
+
+      // Internal
+      _roomExplicit: roomExplicit
     }
   }
 
   async startBackgroundSync() {
     if (this.engine) return
 
-    this.engine = new SyncEngine(this.options, this.context.logger)
+    let store = null
+    try {
+      store = this.context.window && this.context.window.store
+    } catch { /* ignore */ }
+
+    this.engine = new SyncEngine(this.options, this.context.logger, store)
 
     try {
       await this.engine.start()
       this.context.logger.info('Background sync active', {
         room: this.options.room,
-        syncMode: this.options.syncMode
+        syncMode: this.options.syncMode,
+        storeAvailable: !!store
       })
     } catch (err) {
       this.context.logger.warn('Background sync failed to start — ' +
@@ -105,8 +218,16 @@ class TroparcelPlugin {
    * Export hook — share selected items to the collaboration room.
    */
   async export(data) {
+    if (this._isPrefsWindow()) return
+
     if (!data || data.length === 0) {
       this.context.logger.warn('Export: no items selected')
+      return
+    }
+
+    // Push-only and auto modes support export
+    if (this.options.syncMode === 'pull') {
+      this.context.logger.warn('Export: sync mode is "pull" — local changes not shared')
       return
     }
 
@@ -149,6 +270,14 @@ class TroparcelPlugin {
    * In auto mode, forces a full re-sync from the CRDT.
    */
   async import(payload) {
+    if (this._isPrefsWindow()) return
+
+    // Push-only mode doesn't apply remote changes
+    if (this.options.syncMode === 'push') {
+      this.context.logger.warn('Import: sync mode is "push" — remote changes not applied')
+      return
+    }
+
     this.context.logger.info('Import: pulling from room', {
       room: this.options.room,
       syncMode: this.options.syncMode
@@ -169,23 +298,31 @@ class TroparcelPlugin {
         tempEngine = true
       }
 
-      let api = engine.api
-      let alive = await api.ping()
-      if (!alive) {
-        this.context.logger.warn('Import: Tropy API not reachable')
-        if (tempEngine) engine.stop()
-        return
+      // Verify connectivity (skip API ping when store adapter is available)
+      if (!engine.adapter) {
+        let api = engine.api
+        let alive = await api.ping()
+        if (!alive) {
+          this.context.logger.warn('Import: Tropy API not reachable')
+          if (tempEngine) engine.stop()
+          return
+        }
       }
 
       // Build local index if not already populated
       if (engine.localIndex.size === 0) {
-        let localItems = await api.getItems()
-        if (localItems && Array.isArray(localItems)) {
-          let items = []
-          for (let s of localItems) {
-            try { items.push(await engine.enrichItem(s)) } catch {}
-          }
+        if (engine.adapter) {
+          let items = engine.readAllItemsFull()
           engine.localIndex = identity.buildIdentityIndex(items)
+        } else {
+          let localItems = await api.getItems()
+          if (localItems && Array.isArray(localItems)) {
+            let items = []
+            for (let s of localItems) {
+              try { items.push(await engine.enrichItem(s)) } catch {}
+            }
+            engine.localIndex = identity.buildIdentityIndex(items)
+          }
         }
       }
 
@@ -213,9 +350,10 @@ class TroparcelPlugin {
   getStatus() {
     let safeOptions = { ...this.options }
     if (safeOptions.roomToken) safeOptions.roomToken = '***'
+    delete safeOptions._roomExplicit
 
     return {
-      version: '3.0.0',
+      version: '4.0.0',
       options: safeOptions,
       engine: this.engine ? this.engine.getStatus() : null,
       backgroundSync: this.engine != null

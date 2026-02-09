@@ -1,7 +1,7 @@
 {
   "name": "troparcel",
   "productName": "Troparcel",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "description": "Annotation overlay collaboration layer for Tropy — sync notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs",
   "author": "Micah",
   "license": "AGPL-3.0",
@@ -12,7 +12,7 @@
     "pack": "node esbuild.config.mjs && zip -r troparcel.zip package.json index.js icon.svg",
     "watch": "node esbuild.config.mjs --watch",
     "server": "node server/index.js",
-    "test": "echo \"No tests yet\" && exit 0"
+    "test": "node --test test/index.test.js"
   },
   "hooks": {
     "export": true,
@@ -44,6 +44,14 @@
       "hint": "Your display name for attribution. Other collaborators will see this on your annotations."
     },
     {
+      "field": "roomToken",
+      "label": "Room Token",
+      "type": "string",
+      "default": "",
+      "placeholder": "shared-secret",
+      "hint": "Shared secret for room authentication. All participants must use the same token."
+    },
+    {
       "field": "autoSync",
       "label": "Auto Sync",
       "type": "boolean",
@@ -56,7 +64,42 @@
       "type": "string",
       "default": "auto",
       "placeholder": "auto",
-      "hint": "How remote changes are handled. 'auto' applies changes as they arrive. 'review' accumulates changes and only applies them when you trigger Import from the File menu."
+      "hint": "'auto' — push and apply in real-time. 'review' — push automatically, apply only on Import. 'push' — only send local changes. 'pull' — only receive remote changes."
+    },
+    {
+      "field": "syncMetadata",
+      "label": "Sync Metadata",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync item metadata (title, date, description, custom fields) between collaborators."
+    },
+    {
+      "field": "syncTags",
+      "label": "Sync Tags",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync tag assignments between collaborators."
+    },
+    {
+      "field": "syncNotes",
+      "label": "Sync Notes",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync notes (annotations) between collaborators."
+    },
+    {
+      "field": "syncSelections",
+      "label": "Sync Selections",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync photo region selections between collaborators."
+    },
+    {
+      "field": "syncTranscriptions",
+      "label": "Sync Transcriptions",
+      "type": "boolean",
+      "default": true,
+      "hint": "Sync transcription text between collaborators."
     },
     {
       "field": "syncPhotoAdjustments",
@@ -80,19 +123,11 @@
       "hint": "Port of Tropy's local HTTP API (2019 for latest, 2029 for stable)."
     },
     {
-      "field": "roomToken",
-      "label": "Room Token",
-      "type": "string",
-      "default": "",
-      "placeholder": "shared-secret",
-      "hint": "Shared secret for room authentication. All participants must use the same token."
-    },
-    {
       "field": "startupDelay",
       "label": "Startup Delay (ms)",
       "type": "number",
       "default": 8000,
-      "hint": "Milliseconds to wait after connecting before first sync. Allows Tropy's startup operations (FTS, migrations) to finish. Increase if you see SQLITE_BUSY errors on startup."
+      "hint": "Milliseconds to wait for Tropy to finish initialization before starting sync. Plugin polls for project context during this window."
     },
     {
       "field": "localDebounce",
