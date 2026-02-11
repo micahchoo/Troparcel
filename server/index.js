@@ -3,7 +3,7 @@
 'use strict'
 
 /**
- * Troparcel Collaboration Server v3.1
+ * Troparcel Collaboration Server v4.0
  *
  * Yjs CRDT sync server with LevelDB persistence and monitoring.
  *
@@ -11,6 +11,7 @@
  * y-leveldb for persistent CRDT state, and adds:
  *   - Room-token authentication (timing-safe comparison)
  *   - Per-IP connection rate limiting
+ *   - Periodic LevelDB compaction (6h) with time-based tombstone purge
  *   - Health/status REST endpoints
  *   - SSE live activity streams
  *   - HTML monitor dashboard
@@ -30,6 +31,8 @@
  *   MONITOR_TOKEN     - Auth token for monitor endpoints
  *   MAX_ACTIVITY_LOG  - Ring buffer size for activity events (default: 200)
  *   MIN_TOKEN_LENGTH  - Minimum token length for security (default: 16)
+ *   COMPACTION_HOURS  - Hours between LevelDB compaction runs (default: 6)
+ *   TOMBSTONE_MAX_DAYS - Days to keep tombstones before purging (default: 30)
  */
 
 const crypto = require('crypto')
@@ -50,6 +53,8 @@ const MONITOR_ORIGIN = process.env.MONITOR_ORIGIN || ''
 const MONITOR_TOKEN = process.env.MONITOR_TOKEN || ''
 const MAX_ACTIVITY_LOG = parseInt(process.env.MAX_ACTIVITY_LOG, 10) || 200
 const MIN_TOKEN_LENGTH = parseInt(process.env.MIN_TOKEN_LENGTH, 10) || 16
+const COMPACTION_HOURS = parseInt(process.env.COMPACTION_HOURS, 10) || 6
+const TOMBSTONE_MAX_DAYS = parseInt(process.env.TOMBSTONE_MAX_DAYS, 10) || 30
 
 // --- Auth token parsing ---
 
@@ -312,7 +317,7 @@ function handleConnection(ws, req) {
 
 // --- HTTP request handler ---
 
-function handleHttp(req, res) {
+async function handleHttp(req, res) {
   let url
   try {
     url = new URL(req.url, `http://${req.headers.host}`)
@@ -325,7 +330,7 @@ function handleHttp(req, res) {
   if (MONITOR_ORIGIN) {
     res.setHeader('Access-Control-Allow-Origin', MONITOR_ORIGIN)
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Content-Type', 'application/json')
 
   if (req.method === 'OPTIONS') {
@@ -346,7 +351,7 @@ function handleHttp(req, res) {
     jsonReply(res, {
       status: 'running',
       port: PORT,
-      version: 'v3.1-yjs',
+      version: 'v4.0-yjs',
       uptime: process.uptime(),
       rooms: roomMeta.size,
       connections: totalConnections(),
@@ -422,6 +427,26 @@ function handleHttp(req, res) {
     return
   }
 
+  // POST /api/rooms/:name/compact — manual compaction
+  let compactMatch = urlPath.match(/^\/api\/rooms\/(.+)\/compact$/)
+  if (compactMatch && req.method === 'POST') {
+    if (!checkMonitorAuth(req, res)) return
+    let roomName = sanitizeRoomName(decodeURIComponent(compactMatch[1]))
+    try {
+      let result = await compactAndPurge(roomName)
+      jsonReply(res, {
+        status: 'compacted', room: roomName,
+        purged: result.purged,
+        uuidsPurged: result.uuidsPurged,
+        aliasesPurged: result.aliasesPurged
+      })
+    } catch (e) {
+      res.writeHead(500)
+      jsonReply(res, { error: 'Compaction failed', message: e.message })
+    }
+    return
+  }
+
   // Room detail API: /api/rooms/:name
   if (urlPath.startsWith('/api/rooms/')) {
     if (!checkMonitorAuth(req, res)) return
@@ -485,7 +510,7 @@ function monitorHtml() {
   return `<!DOCTYPE html>
 <html>
 <head>
-  <title>Troparcel Server v3.1</title>
+  <title>Troparcel Server v4.0</title>
   <meta charset="utf-8">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -506,7 +531,7 @@ function monitorHtml() {
   </style>
 </head>
 <body>
-  <h1>Troparcel Server <span class="badge">v3.1 Yjs</span></h1>
+  <h1>Troparcel Server <span class="badge">v4.0 Yjs</span></h1>
   <div class="grid">
     <div class="card"><h3>Status</h3><div class="value" id="status"><span class="status on"></span>Running</div></div>
     <div class="card"><h3>Rooms</h3><div class="value" id="room-count">-</div></div>
@@ -706,6 +731,132 @@ function roomDetailHtml(name) {
 </html>`
 }
 
+// --- LevelDB compaction + tombstone purge ---
+
+async function compactAndPurge(docName, maxAgeMs) {
+  if (maxAgeMs == null) maxAgeMs = TOMBSTONE_MAX_DAYS * 24 * 60 * 60 * 1000
+  let cutoff = Date.now() - maxAgeMs
+
+  // Load doc from LevelDB
+  let doc = await ldb.getYDoc(docName)
+  let annotations = doc.getMap('annotations')
+  let purged = 0
+  let uuidsPurged = 0
+  let aliasesPurged = 0
+  let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
+
+  doc.transact(() => {
+    annotations.forEach((itemMap, identity) => {
+      for (let section of tombstoneSections) {
+        let map = itemMap.get(section)
+        if (!map || typeof map.forEach !== 'function') continue
+        let toDelete = []
+        map.forEach((value, key) => {
+          if (value && value.deleted && value.deletedAt && value.deletedAt < cutoff) {
+            toDelete.push(key)
+          }
+        })
+        for (let key of toDelete) {
+          map.delete(key)
+          purged++
+        }
+      }
+
+      // Prune orphaned UUID registry entries
+      let uuids = itemMap.get('uuids')
+      if (uuids && typeof uuids.forEach === 'function') {
+        let liveUUIDs = new Set()
+
+        let notes = itemMap.get('notes')
+        if (notes && typeof notes.forEach === 'function') {
+          notes.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let selections = itemMap.get('selections')
+        if (selections && typeof selections.forEach === 'function') {
+          selections.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let selectionNotes = itemMap.get('selectionNotes')
+        if (selectionNotes && typeof selectionNotes.forEach === 'function') {
+          selectionNotes.forEach((_, k) => {
+            let sep = k.indexOf(':')
+            if (sep > 0) {
+              liveUUIDs.add(k.slice(0, sep))
+              liveUUIDs.add(k.slice(sep + 1))
+            }
+          })
+        }
+
+        let transcriptions = itemMap.get('transcriptions')
+        if (transcriptions && typeof transcriptions.forEach === 'function') {
+          transcriptions.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let lists = itemMap.get('lists')
+        if (lists && typeof lists.forEach === 'function') {
+          lists.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let orphaned = []
+        uuids.forEach((_, k) => {
+          if (!liveUUIDs.has(k)) orphaned.push(k)
+        })
+        for (let k of orphaned) {
+          uuids.delete(k)
+          uuidsPurged++
+        }
+      }
+
+      // Purge expired aliases
+      let aliases = itemMap.get('aliases')
+      if (aliases && typeof aliases.forEach === 'function') {
+        let toDelete = []
+        aliases.forEach((value, key) => {
+          let createdAt = (value && typeof value === 'object') ? value.createdAt : 0
+          if (!createdAt || createdAt < cutoff) {
+            toDelete.push(key)
+          }
+        })
+        for (let key of toDelete) {
+          aliases.delete(key)
+          aliasesPurged++
+        }
+      }
+    })
+  })
+
+  // Flush compacted state (merges all incremental updates into one)
+  await ldb.flushDocument(docName)
+
+  return { purged, uuidsPurged, aliasesPurged, docName }
+}
+
+async function runCompaction() {
+  try {
+    let docNames = await ldb.getAllDocNames()
+    console.log(`[compaction] Starting compaction for ${docNames.length} room(s)`)
+    for (let name of docNames) {
+      try {
+        let result = await compactAndPurge(name)
+        let parts = []
+        if (result.purged > 0) parts.push(`${result.purged} tombstone(s)`)
+        if (result.uuidsPurged > 0) parts.push(`${result.uuidsPurged} orphaned UUID(s)`)
+        if (result.aliasesPurged > 0) parts.push(`${result.aliasesPurged} expired alias(es)`)
+        if (parts.length > 0) {
+          console.log(`[compaction] Room "${name}": purged ${parts.join(', ')}`)
+        } else {
+          console.log(`[compaction] Room "${name}": compacted (nothing to purge)`)
+        }
+      } catch (e) {
+        console.error(`[compaction] Failed for "${name}":`, e.message)
+      }
+    }
+  } catch (e) {
+    console.error('[compaction] Failed to list rooms:', e.message)
+  }
+}
+
 // --- Server startup ---
 
 const server = http.createServer(handleHttp)
@@ -714,7 +865,7 @@ const wss = new WebSocket.Server({ server })
 wss.on('connection', handleConnection)
 
 server.listen(PORT, HOST, () => {
-  console.log(`Troparcel server v3.1 (Yjs + LevelDB) listening on ${HOST}:${PORT}`)
+  console.log(`Troparcel server v4.0 (Yjs + LevelDB) listening on ${HOST}:${PORT}`)
   console.log(`  WebSocket: ws://${HOST}:${PORT}/<room-name>?token=<token>`)
   console.log(`  Monitor:   http://${HOST}:${PORT}/monitor`)
   console.log(`  Health:    http://${HOST}:${PORT}/health`)
@@ -725,7 +876,21 @@ server.listen(PORT, HOST, () => {
   }
   if (MONITOR_TOKEN) {
     console.log(`  Monitor:   protected by MONITOR_TOKEN`)
+  } else {
+    console.log(`  Monitor:   WARNING — MONITOR_TOKEN not set, monitor endpoints are open`)
   }
+  console.log(`  Compact:   every ${COMPACTION_HOURS}h, tombstones older than ${TOMBSTONE_MAX_DAYS}d`)
+  console.log(`  ⚠ Tombstone retention: deletions older than ${TOMBSTONE_MAX_DAYS}d are purged.`)
+  console.log(`    Clients offline longer than ${TOMBSTONE_MAX_DAYS}d may resurrect deleted items.`)
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    console.log(`  ⚠ TLS: This server does not provide TLS. For remote collaboration,`)
+    console.log(`    deploy behind a reverse proxy (nginx/caddy) with HTTPS/WSS.`)
+    console.log(`    Without TLS, room tokens are sent in cleartext.`)
+  }
+
+  // Start periodic compaction
+  let compactionIntervalMs = COMPACTION_HOURS * 60 * 60 * 1000
+  setInterval(() => { runCompaction() }, compactionIntervalMs)
 })
 
 // Graceful shutdown

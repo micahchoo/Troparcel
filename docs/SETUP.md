@@ -5,14 +5,14 @@ This guide walks through three common collaboration scenarios step by step. No p
 **Before you start**, make sure every collaborator has:
 - [Tropy](https://tropy.org) installed (version 1.15 or later)
 - The same set of photos imported into their own Tropy project
-- [Node.js](https://nodejs.org) installed (version 18 or later) — needed to run the server
+- [Node.js](https://nodejs.org) installed (version 20 or later) — needed to run the server
 - Tropy's **developer API** enabled (see below)
 
 The photos must be identical files (same bytes) so that Troparcel can match items across projects by their checksums. If your team works from a shared folder, a USB drive, or a download link, you're all set.
 
 ### Enable Tropy's developer API
 
-Troparcel reads and writes annotations through Tropy's built-in HTTP API, which runs on port **2019** by default. This API must be enabled for the plugin to work.
+Troparcel primarily reads and writes through Tropy's Redux store (store-first architecture), but falls back to the HTTP API for some operations (metadata save, tag ops, transcription create). The API runs on port **2019** by default.
 
 To check if it's running, open your browser to `http://localhost:2019/` while Tropy is open with a project loaded. You should see a JSON response with project information. If you get a connection error, the API may not be enabled — check Tropy's preferences or documentation for how to turn it on.
 
@@ -447,5 +447,6 @@ The tunnel stays open as long as the SSH session is running. If you close the te
 
 ### How to start fresh
 - Stop both Tropy instances and the server.
-- Delete the `data/` folder in the server directory (this is the LevelDB state).
+- Delete the `data/` folder in the server directory (this is the LevelDB CRDT state).
+- Optionally delete vault files at `~/.troparcel/vault/` on each participant's machine to reset UUID mappings.
 - Restart the server and both Tropy instances.

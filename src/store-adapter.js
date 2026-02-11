@@ -9,22 +9,67 @@
  * store.dispatch() for writes where the HTTP API has no routes
  * (selections, note updates, list item management).
  *
- * The Redux state is normalised:
- *   state.items[id]      → { id, photos:[], tags:[], lists:[], template }
- *   state.photos[id]     → { id, item, checksum, selections:[], notes:[], transcriptions:[] }
- *   state.selections[id] → { id, photo, x, y, width, height, angle, notes:[], transcriptions:[] }
- *   state.notes[id]      → { id, photo, selection, state (ProseMirror), text, language }
- *   state.metadata[sid]  → { id, [propUri]: value }
- *   state.tags[id]       → { id, name, color }
- *   state.lists[id]      → { id, name, parent, children:[] }
+ * ⚠ TROPY INTERNALS DEPENDENCY ⚠
+ * This adapter accesses undocumented Redux internals. If Tropy changes
+ * its state shape or action types, state shape validation (_validateStateShape)
+ * will log a warning and the engine falls back to the HTTP API.
+ *
+ * Redux state slices READ:
+ *   state.items[id]           → { id, photos:[], tags:[], lists:[], template }
+ *   state.photos[id]          → { id, item, checksum, selections:[], notes:[], transcriptions:[] }
+ *   state.selections[id]      → { id, photo, x, y, width, height, angle, notes:[], transcriptions:[] }
+ *   state.notes[id]           → { id, photo, selection, state (ProseMirror JSON), text, language }
+ *   state.metadata[sid]       → { id, [propUri]: { text, type } }
+ *   state.tags[id]            → { id, name, color }
+ *   state.lists[id]           → { id, name, parent, children:[] }
+ *   state.activities[seq]     → presence = action in flight (cleared on completion)
+ *   state.transcriptions[id]  → { id, text, data, ... }
+ *
+ * Redux actions DISPATCHED:
+ *   selection.create  → { photo, x, y, width, height, angle }, meta: { cmd: 'project' }
+ *   note.create       → { photo?, selection?, text (HTML) },   meta: { cmd: 'project', history: 'add' }
+ *   note.delete       → [id],                                  meta: { cmd: 'project', history: 'add' }
+ *   list.item.add     → { id: listId, items: [itemId] },       meta: { cmd: 'project', history: 'add', search: true }
+ *   list.item.remove  → { id: listId, items: [itemId] },       meta: { cmd: 'project', history: 'add', search: true }
+ *
+ * Action completion is detected by watching state.activities[action.meta.seq]
+ * — when the seq key disappears, the command has finished processing.
  */
 class StoreAdapter {
+  static EXPECTED_SLICES = [
+    'items', 'photos', 'selections', 'notes',
+    'metadata', 'tags', 'lists'
+  ]
+
   constructor(store, logger) {
     this.store = store
     this.logger = logger
 
     // Suppress store.subscribe callback during our own writes
     this._suppressChangeDetection = false
+
+    this._validateStateShape()
+  }
+
+  /**
+   * Check that the Redux state contains the expected top-level slices.
+   * Logs a warning for any missing slices — the adapter will still work
+   * (reads return empty, writes fall back to HTTP API) but sync may be
+   * incomplete.
+   */
+  _validateStateShape() {
+    try {
+      let state = this._getState()
+      let missing = StoreAdapter.EXPECTED_SLICES.filter(s => !(s in state))
+      if (missing.length > 0) {
+        this.logger.warn(
+          `StoreAdapter: Redux state missing expected slices: ${missing.join(', ')}. ` +
+          'Tropy version may be incompatible — some sync features may not work.'
+        )
+      }
+    } catch (err) {
+      this.logger.warn(`StoreAdapter: failed to validate state shape: ${err.message}`)
+    }
   }
 
   _getState() {

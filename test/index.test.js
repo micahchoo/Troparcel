@@ -101,6 +101,273 @@ describe('sanitize', () => {
     })
   })
 
+  // --------------------------------------------------------
+  //  Adversarial XSS vectors (OWASP cheat sheet + mutation XSS)
+  // --------------------------------------------------------
+  describe('sanitizeHtml — XSS vectors', () => {
+
+    // --- Script injection variants ---
+
+    it('strips script with mixed case', () => {
+      let result = sanitizeHtml('<ScRiPt>alert(1)</ScRiPt>')
+      assert.ok(!result.includes('alert'))
+      assert.ok(!result.toLowerCase().includes('script'))
+    })
+
+    it('strips script with spaces in tag', () => {
+      let result = sanitizeHtml('<script >alert(1)</script >')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips script with tab in tag name', () => {
+      let result = sanitizeHtml('<script\t>alert(1)</script>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips script with newline in tag name', () => {
+      let result = sanitizeHtml('<script\n>alert(1)</script>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips unclosed script tag (strips rest of document)', () => {
+      let result = sanitizeHtml('<script>alert(1)')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips SVG with onload', () => {
+      let result = sanitizeHtml('<svg onload="alert(1)"><p>ok</p></svg>')
+      assert.ok(!result.includes('alert'))
+      assert.ok(!result.includes('onload'))
+    })
+
+    it('strips math tag', () => {
+      let result = sanitizeHtml('<math><maction actiontype="statusline#http://evil.com">ok</maction></math>')
+      assert.ok(!result.includes('math'))
+      assert.ok(!result.includes('maction'))
+    })
+
+    it('strips template tag', () => {
+      let result = sanitizeHtml('<template><script>alert(1)</script></template>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips object/embed tags', () => {
+      let r1 = sanitizeHtml('<object data="data:text/html,<script>alert(1)</script>"></object>')
+      let r2 = sanitizeHtml('<embed src="javascript:alert(1)">')
+      assert.ok(!r1.includes('object'))
+      assert.ok(!r2.includes('embed'))
+    })
+
+    // --- Event handler variants ---
+
+    it('strips all on* event handlers', () => {
+      let handlers = [
+        'onclick', 'onerror', 'onload', 'onmouseover', 'onfocus',
+        'onblur', 'onsubmit', 'onmouseenter', 'oninput', 'onchange'
+      ]
+      for (let h of handlers) {
+        let result = sanitizeHtml(`<p ${h}="alert(1)">ok</p>`)
+        assert.ok(!result.includes(h), `${h} should be stripped`)
+      }
+    })
+
+    it('strips event handler with entity-encoded name', () => {
+      // on&#x63;lick → onclick after entity decode
+      let result = sanitizeHtml('<p on&#x63;lick="alert(1)">ok</p>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    // --- Protocol bypass attempts ---
+
+    it('blocks javascript: with tab characters', () => {
+      let result = sanitizeHtml('<a href="java\tscript:alert(1)">link</a>')
+      assert.ok(!result.includes('javascript'))
+    })
+
+    it('blocks javascript: with newline characters', () => {
+      let result = sanitizeHtml('<a href="java\nscript:alert(1)">link</a>')
+      assert.ok(!result.includes('javascript'))
+    })
+
+    it('blocks javascript: with carriage return', () => {
+      let result = sanitizeHtml('<a href="java\rscript:alert(1)">link</a>')
+      assert.ok(!result.includes('javascript'))
+    })
+
+    it('blocks javascript: with null bytes', () => {
+      let result = sanitizeHtml('<a href="java\x00script:alert(1)">link</a>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('blocks vbscript: protocol', () => {
+      let result = sanitizeHtml('<a href="vbscript:alert(1)">link</a>')
+      assert.ok(!result.includes('vbscript'))
+    })
+
+    it('blocks data: protocol', () => {
+      let result = sanitizeHtml('<a href="data:text/html,<script>alert(1)</script>">link</a>')
+      assert.ok(!result.includes('data:'))
+    })
+
+    it('blocks protocol-relative URLs', () => {
+      let result = sanitizeHtml('<a href="//evil.com/steal">link</a>')
+      assert.ok(!result.includes('evil.com'))
+    })
+
+    it('blocks decimal entity-encoded javascript:', () => {
+      // &#106;avascript:
+      let result = sanitizeHtml('<a href="&#106;avascript:alert(1)">link</a>')
+      assert.ok(!result.includes('javascript'))
+    })
+
+    it('blocks hex entity-encoded javascript: (full)', () => {
+      // &#x6A;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3A;
+      let result = sanitizeHtml('<a href="&#x6A;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3A;alert(1)">link</a>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    // --- CSS attack vectors ---
+
+    it('strips CSS expression()', () => {
+      let result = sanitizeHtml('<p style="width: expression(alert(1))">ok</p>')
+      assert.ok(!result.includes('expression'))
+    })
+
+    it('strips CSS url() in style', () => {
+      let result = sanitizeHtml('<p style="background: url(javascript:alert(1))">ok</p>')
+      assert.ok(!result.includes('javascript'))
+      assert.ok(!result.includes('background'))
+    })
+
+    it('strips -moz-binding CSS', () => {
+      let result = sanitizeHtml('<p style="-moz-binding: url(evil.xml#xss)">ok</p>')
+      assert.ok(!result.includes('binding'))
+    })
+
+    it('strips behavior CSS property', () => {
+      let result = sanitizeHtml('<p style="behavior: url(xss.htc)">ok</p>')
+      assert.ok(!result.includes('behavior'))
+    })
+
+    it('strips position/z-index UI redress', () => {
+      let result = sanitizeHtml('<div style="position: fixed; z-index: 9999; top: 0; left: 0">overlay</div>')
+      assert.ok(!result.includes('position'))
+      assert.ok(!result.includes('z-index'))
+    })
+
+    it('allows only safe CSS values for text-decoration', () => {
+      let ok = sanitizeHtml('<span style="text-decoration: underline">ok</span>')
+      assert.ok(ok.includes('underline'))
+
+      let bad = sanitizeHtml('<span style="text-decoration: underline; background: red">bad</span>')
+      assert.ok(!bad.includes('background'))
+      assert.ok(bad.includes('underline'))
+    })
+
+    it('allows only safe CSS values for text-align', () => {
+      let ok = sanitizeHtml('<p style="text-align: center">ok</p>')
+      assert.ok(ok.includes('center'))
+
+      // Reject non-allowlisted text-align value
+      let bad = sanitizeHtml('<p style="text-align: expression(alert(1))">bad</p>')
+      assert.ok(!bad.includes('expression'))
+    })
+
+    // --- Malformed HTML ---
+
+    it('handles unclosed tags safely', () => {
+      let result = sanitizeHtml('<p>Hello<script')
+      assert.ok(!result.toLowerCase().includes('script'))
+      assert.ok(result.includes('Hello'))
+    })
+
+    it('handles tags with no closing >', () => {
+      let result = sanitizeHtml('<p>ok</p><img src=x onerror=alert(1)')
+      assert.ok(!result.includes('onerror'))
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('handles deeply nested tags', () => {
+      let deep = '<p>'.repeat(100) + 'text' + '</p>'.repeat(100)
+      let result = sanitizeHtml(deep)
+      assert.ok(result.includes('text'))
+    })
+
+    it('escapes bare < that is not a valid tag', () => {
+      let result = sanitizeHtml('1 < 2 and 3 > 1')
+      assert.ok(result.includes('&lt;'))
+    })
+
+    it('handles attribute injection via unquoted values', () => {
+      let result = sanitizeHtml('<p class=foo onclick=alert(1)>ok</p>')
+      assert.ok(!result.includes('onclick'))
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('handles tag name exceeding 32-char limit', () => {
+      let longTag = 'a'.repeat(40)
+      let result = sanitizeHtml(`<${longTag}>text</${longTag}>`)
+      // Should be treated as malformed and escaped
+      assert.ok(!result.includes(`<${longTag}>`))
+    })
+
+    // --- Dangerous tag content stripping ---
+
+    it('strips noscript content', () => {
+      let result = sanitizeHtml('<noscript><img src=x onerror=alert(1)></noscript>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips xmp content', () => {
+      let result = sanitizeHtml('<xmp><script>alert(1)</script></xmp>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    it('strips plaintext tag content', () => {
+      let result = sanitizeHtml('<plaintext><script>alert(1)</script>')
+      assert.ok(!result.includes('alert'))
+    })
+
+    // --- Tropy-specific safe content preservation ---
+
+    it('preserves Tropy note structure through sanitization', () => {
+      let troparcelNote = [
+        '<p>Descriptive paragraph</p>',
+        '<blockquote><p><em>troparcel:n_abc123:alice</em></p></blockquote>',
+        '<p style="text-align: end">Right-aligned</p>',
+        '<ul><li>Item 1</li><li>Item 2</li></ul>',
+        '<ol><li>First</li><li>Second</li></ol>',
+        '<p><strong>Bold</strong> and <em>italic</em></p>',
+        '<p><span style="text-decoration: underline">Underlined</span></p>',
+        '<p><span style="text-decoration: line-through">Struck</span></p>',
+        '<p><a href="https://example.com">Link</a></p>',
+        '<p><sup>Super</sup> and <sub>Sub</sub></p>',
+        '<span class="line-break"><br></span>',
+        '<h1>Heading</h1>',
+        '<hr>',
+        '<pre><code>let x = 1</code></pre>'
+      ].join('')
+
+      let result = sanitizeHtml(troparcelNote)
+      assert.ok(result.includes('<blockquote>'))
+      assert.ok(result.includes('<em>'))
+      assert.ok(result.includes('text-align: end'))
+      assert.ok(result.includes('<ul>'))
+      assert.ok(result.includes('<ol>'))
+      assert.ok(result.includes('<strong>'))
+      assert.ok(result.includes('text-decoration: underline'))
+      assert.ok(result.includes('text-decoration: line-through'))
+      assert.ok(result.includes('href'))
+      assert.ok(result.includes('<sup>'))
+      assert.ok(result.includes('<sub>'))
+      assert.ok(result.includes('line-break'))
+      assert.ok(result.includes('<h1>'))
+      assert.ok(result.includes('<hr>'))
+      assert.ok(result.includes('<pre>'))
+      assert.ok(result.includes('<code>'))
+    })
+  })
+
   describe('escapeHtml', () => {
     it('returns empty string for null/undefined', () => {
       assert.equal(escapeHtml(null), '')
@@ -565,6 +832,40 @@ describe('backup', () => {
       let backups = bm.listBackups()
       assert.ok(Array.isArray(backups))
       assert.equal(backups.length, 0)
+    })
+  })
+
+  describe('saveSnapshot size limit', () => {
+    it('returns null and warns when snapshot exceeds maxBackupSize', async () => {
+      let warnings = []
+      let bm = new BackupManager('test', null, {
+        info: () => {}, debug: () => {},
+        warn: (msg) => warnings.push(msg)
+      }, { maxBackupSize: 100 })  // 100 bytes — any real snapshot exceeds this
+
+      let result = await bm.saveSnapshot([
+        { identity: 'abc', localId: 1, metadata: { title: 'x'.repeat(200) } }
+      ])
+      assert.equal(result, null)
+      assert.ok(warnings.some(m => m.includes('Backup skipped')))
+    })
+
+    it('saves normally when under size limit', async () => {
+      let infos = []
+      let bm = new BackupManager('size-test-room', null, {
+        info: (msg) => infos.push(msg),
+        debug: () => {}, warn: () => {}
+      }, { maxBackupSize: 10 * 1024 * 1024 })
+
+      let result = await bm.saveSnapshot([
+        { identity: 'abc', localId: 1, metadata: { title: 'ok' } }
+      ])
+      assert.ok(result)
+      assert.ok(infos.some(m => m.includes('Backup saved')))
+
+      // Clean up: delete the test backup
+      const fs = require('fs')
+      try { await fs.promises.unlink(result) } catch {}
     })
   })
 })
@@ -1199,6 +1500,28 @@ describe('store-adapter', () => {
       assert.equal(adapter._esc('<script>'), '&lt;script&gt;')
       assert.equal(adapter._esc('"hello"'), '&quot;hello&quot;')
       assert.equal(adapter._esc('a&b'), 'a&amp;b')
+    })
+  })
+
+  describe('_validateStateShape', () => {
+    it('does not warn when all slices present', () => {
+      let warnings = []
+      let store = mockStore(mockState())
+      new StoreAdapter(store, { debug: () => {}, warn: (msg) => warnings.push(msg) })
+      assert.equal(warnings.length, 0)
+    })
+
+    it('warns when slices are missing', () => {
+      let warnings = []
+      let store = mockStore({ items: {}, photos: {} })  // missing 5 slices
+      new StoreAdapter(store, { debug: () => {}, warn: (msg) => warnings.push(msg) })
+      assert.equal(warnings.length, 1)
+      assert.ok(warnings[0].includes('missing expected slices'))
+      assert.ok(warnings[0].includes('selections'))
+      assert.ok(warnings[0].includes('notes'))
+      assert.ok(warnings[0].includes('metadata'))
+      assert.ok(warnings[0].includes('tags'))
+      assert.ok(warnings[0].includes('lists'))
     })
   })
 })

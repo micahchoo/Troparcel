@@ -1,47 +1,122 @@
 'use strict'
 
 const Y = require('yjs')
+const { YKeyValue } = require('y-utility/y-keyvalue')
 
 /**
- * CRDT Schema v3 — defines how collaborative annotations are structured
+ * CRDT Schema v4 — defines how collaborative annotations are structured
  * inside a Yjs document.
  *
- * Breaking change from v2: all per-item collections are now Y.Maps
- * (instead of Y.Arrays) for proper update/delete support via tombstones.
+ * Breaking change from v3:
+ *   - Notes, selections, transcriptions, lists keyed by UUID (not content-addressed)
+ *   - Metadata stored via YKeyValue (Y.Array) — no historical value retention
+ *   - pushSeq (monotonic per-author counter) replaces wall-clock ts
+ *   - User presence via Awareness protocol (no Y.Map "users")
+ *   - UUID registry per item for vault recovery
+ *   - Alias map for re-imported items
+ *   - Schema version stamp in room map
+ *   - deletedAt field on tombstones for time-based purging
  *
  * Document layout:
  *
  *   Y.Doc
- *   ├── Y.Map "annotations"                keyed by item identity hash
+ *   ├── Y.Map "annotations"                  keyed by item identity hash
  *   │   └── Y.Map per item
- *   │       ├── Y.Map "metadata"           {[propUri]: {text, type, lang, author, ts}}
- *   │       ├── Y.Map "tags"               {[tagName]: {color, author, ts, deleted?}}
- *   │       ├── Y.Map "notes"              {[noteKey]: {html, text, lang, photo, sel, author, ts, deleted?}}
- *   │       ├── Y.Map "photos"             {[checksum]: Y.Map with "metadata" sub-map}
- *   │       ├── Y.Map "selections"         {[selKey]: {x, y, w, h, angle, photo, author, ts, deleted?}}
- *   │       ├── Y.Map "selectionMeta"      {[selKey:propUri]: {text, type, lang, author, ts}}
- *   │       ├── Y.Map "selectionNotes"     {[selKey:noteKey]: {html, text, lang, author, ts, deleted?}}
- *   │       ├── Y.Map "transcriptions"     {[txKey]: {text, data, photo, sel, author, ts, deleted?}}
- *   │       └── Y.Map "lists"              {[listName]: {member, author, ts, deleted?}}
- *   ├── Y.Map "users"
- *   └── Y.Map "room"
+ *   │       ├── Y.Array "metadata" (YKeyValue)   {[propUri]: {text, type, lang, author, pushSeq}}
+ *   │       ├── Y.Map "tags"                     {[tagName]: {color, author, pushSeq, deleted?}}
+ *   │       ├── Y.Map "notes"                    {[uuid]: {html, text, lang, photo, sel, author, pushSeq, deleted?}}
+ *   │       ├── Y.Map "photos"                   {[checksum]: Y.Map with Y.Array "metadata" (YKeyValue)}
+ *   │       ├── Y.Map "selections"               {[uuid]: {x, y, w, h, angle, photo, author, pushSeq, deleted?}}
+ *   │       ├── Y.Array "selectionMeta" (YKeyValue) {[selUUID:propUri]: {text, type, lang, author, pushSeq}}
+ *   │       ├── Y.Map "selectionNotes"           {[selUUID:noteUUID]: {html, text, lang, author, pushSeq, deleted?}}
+ *   │       ├── Y.Map "transcriptions"           {[uuid]: {text, data, photo, sel, author, pushSeq, deleted?}}
+ *   │       ├── Y.Map "lists"                    {[uuid]: {name, member, author, pushSeq, deleted?}}
+ *   │       ├── Y.Map "uuids"                    {[uuid]: {type, localRef, author}}
+ *   │       ├── Y.Map "aliases"                  {[oldIdentity]: targetIdentity}
+ *   │       └── "checksums"                      string (comma-separated)
+ *   ├── Y.Map "room"                             {schemaVersion: 4}
+ *   └── (Awareness protocol for presence — NOT persisted in Y.Doc)
  *
- * Tombstones: deleted entries are marked { deleted: true, author, ts }
- * rather than removed from the map. A subsequent add clears the tombstone.
+ * pushSeq: Monotonic per-author counter stored in every entry for diagnostic
+ * ordering and future catch-up. NOT used for conflict resolution — see
+ * vault.hasLocalEdit() for the logic-based approach.
+ *
+ * Tombstones: deleted entries carry { deleted: true, author, pushSeq, deletedAt }
+ * where deletedAt is wall-clock (only for GC purging, not conflict resolution).
  */
 
 const ITEM_SECTIONS = [
   'metadata', 'tags', 'notes', 'photos', 'selections',
-  'selectionMeta', 'selectionNotes', 'transcriptions', 'lists'
+  'selectionMeta', 'selectionNotes', 'transcriptions', 'lists',
+  'uuids', 'aliases'
 ]
+
+// Sections that use YKeyValue (Y.Array) instead of Y.Map
+const YKV_SECTIONS = ['metadata', 'selectionMeta']
+
+// Tag keys are normalized to lowercase to avoid collisions with Tropy's
+// COLLATE NOCASE unique constraint. Display case is preserved in the value's
+// `name` field.
+function _normalizeTagKey(name) {
+  return name.toLowerCase()
+}
+
+// --- YKeyValue cache ---
+// Constructing YKeyValue scans the array; cache to avoid repeated scans.
+const _kvCache = new WeakMap()
+
+function _cachedYKV(yarray) {
+  let cached = _kvCache.get(yarray)
+  if (cached) return cached
+  let ykv = new YKeyValue(yarray)
+  _kvCache.set(yarray, ykv)
+  return ykv
+}
+
+// --- Internal helpers ---
+
+function _getItemMap(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  return annotations.get(identity) || null
+}
+
+function _ensureItemMap(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  let itemMap = annotations.get(identity)
+  if (!itemMap) {
+    itemMap = new Y.Map()
+    annotations.set(identity, itemMap)
+  }
+  return itemMap
+}
+
+/**
+ * Get or create a section within an item map.
+ * YKV_SECTIONS use Y.Array (for YKeyValue), others use Y.Map.
+ */
+function _getSection(doc, identity, section) {
+  let itemMap = _ensureItemMap(doc, identity)
+
+  if (YKV_SECTIONS.includes(section)) {
+    let arr = itemMap.get(section)
+    if (!arr || !(arr instanceof Y.Array)) {
+      arr = new Y.Array()
+      itemMap.set(section, arr)
+    }
+    return _cachedYKV(arr)
+  }
+
+  let sectionMap = itemMap.get(section)
+  if (!sectionMap) {
+    sectionMap = new Y.Map()
+    itemMap.set(section, sectionMap)
+  }
+  return sectionMap
+}
 
 /**
  * Get or create the annotations map for an item.
- * Lazily initializes the nested Y.Map structure.
- *
- * @param {Y.Doc} doc
- * @param {string} identity - item identity hash
- * @returns {Object} map of section name → Y.Map
+ * Lazily initializes the nested structure.
  */
 function getItemAnnotations(doc, identity) {
   let annotations = doc.getMap('annotations')
@@ -54,12 +129,21 @@ function getItemAnnotations(doc, identity) {
 
   let result = {}
   for (let section of ITEM_SECTIONS) {
-    let sectionMap = itemMap.get(section)
-    if (!sectionMap) {
-      sectionMap = new Y.Map()
-      itemMap.set(section, sectionMap)
+    if (YKV_SECTIONS.includes(section)) {
+      let arr = itemMap.get(section)
+      if (!arr || !(arr instanceof Y.Array)) {
+        arr = new Y.Array()
+        itemMap.set(section, arr)
+      }
+      result[section] = _cachedYKV(arr)
+    } else {
+      let sectionMap = itemMap.get(section)
+      if (!sectionMap) {
+        sectionMap = new Y.Map()
+        itemMap.set(section, sectionMap)
+      }
+      result[section] = sectionMap
     }
-    result[section] = sectionMap
   }
 
   if (isNew) {
@@ -69,103 +153,73 @@ function getItemAnnotations(doc, identity) {
   return result
 }
 
-/**
- * Get or create a single section's Y.Map for an item (write path).
- * Only ensures the requested section exists — avoids checking all 9 sections.
- *
- * @param {Y.Doc} doc
- * @param {string} identity - item identity hash
- * @param {string} section - section name (e.g. 'metadata', 'tags')
- * @returns {Y.Map} the section's Y.Map
- */
-function _getSection(doc, identity, section) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+// --- Metadata (item-level, YKeyValue) ---
 
-  if (!itemMap) {
-    itemMap = new Y.Map()
-    itemMap.set(section, new Y.Map())
-    annotations.set(identity, itemMap)
-    return itemMap.get(section)
-  }
-
-  let sectionMap = itemMap.get(section)
-  if (!sectionMap) {
-    sectionMap = new Y.Map()
-    itemMap.set(section, sectionMap)
-  }
-  return sectionMap
-}
-
-// --- Metadata (item-level) ---
-
-function setMetadata(doc, identity, propertyUri, value, author) {
-  let metadata = _getSection(doc, identity, 'metadata')
-  metadata.set(propertyUri, {
+function setMetadata(doc, identity, propertyUri, value, author, pushSeq) {
+  let ykv = _getSection(doc, identity, 'metadata')
+  ykv.set(propertyUri, {
     text: value.text || '',
     type: value.type || 'http://www.w3.org/2001/XMLSchema#string',
     language: value.language || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
 }
 
 function getMetadata(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
-  let metadata = itemMap.get('metadata')
-  if (!metadata) return {}
+  let arr = itemMap.get('metadata')
+  if (!arr || !(arr instanceof Y.Array)) return {}
 
+  let ykv = _cachedYKV(arr)
   let result = {}
-  metadata.forEach((value, key) => {
-    result[key] = value
-  })
+  ykv.map.forEach((val, key) => { result[key] = val })
   return result
 }
 
 // --- Tags ---
 
-function setTag(doc, identity, tag, author) {
+function setTag(doc, identity, tag, author, pushSeq) {
   let tags = _getSection(doc, identity, 'tags')
-  let existing = tags.get(tag.name)
+  let key = _normalizeTagKey(tag.name)
+  let existing = tags.get(key)
 
-  // If previously tombstoned, clear it (add-wins)
-  // Or if new/updated, set it
   if (!existing || existing.deleted || tag.color !== existing.color) {
-    tags.set(tag.name, {
+    tags.set(key, {
       name: tag.name,
       color: tag.color || null,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0
     })
   }
 }
 
-function removeTag(doc, identity, tagName, author) {
+function removeTag(doc, identity, tagName, author, pushSeq) {
   let tags = _getSection(doc, identity, 'tags')
-  let existing = tags.get(tagName)
+  let key = _normalizeTagKey(tagName)
+  let existing = tags.get(key)
   if (existing && !existing.deleted) {
-    tags.set(tagName, {
+    tags.set(key, {
       ...existing,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
 function getTags(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return []
 
   let tags = itemMap.get('tags')
   if (!tags) return []
 
   let result = []
-  tags.forEach((value, key) => {
+  tags.forEach((value) => {
     result.push(value)
   })
   return result
@@ -179,38 +233,39 @@ function getDeletedTags(doc, identity) {
   return getTags(doc, identity).filter(t => t.deleted)
 }
 
-// --- Notes ---
+// --- Notes (UUID-keyed) ---
 
-function setNote(doc, identity, noteKey, note, author) {
+function setNote(doc, identity, uuid, note, author, pushSeq) {
   let notes = _getSection(doc, identity, 'notes')
-  notes.set(noteKey, {
-    noteKey,
+  notes.set(uuid, {
+    uuid,
     text: note.text || '',
     html: note.html || '',
     language: note.language || null,
     photo: note.photo || null,
     selection: note.selection || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
+  _registerUUID(doc, identity, uuid, 'note', note.photo || note.selection)
 }
 
-function removeNote(doc, identity, noteKey, author) {
+function removeNote(doc, identity, uuid, author, pushSeq) {
   let notes = _getSection(doc, identity, 'notes')
-  let existing = notes.get(noteKey)
+  let existing = notes.get(uuid)
   if (existing && !existing.deleted) {
-    notes.set(noteKey, {
+    notes.set(uuid, {
       ...existing,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
 function getNotes(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let notes = itemMap.get('notes')
@@ -234,48 +289,46 @@ function getActiveNotes(doc, identity) {
 
 /**
  * Permanently delete a note entry from the CRDT (Y.Map.delete).
- * Unlike removeNote (which creates a tombstone), this removes the entry entirely.
- * Used to clean up stale content-based keys when note content changes.
+ * Used to clean up stale entries.
  */
 function deleteNoteEntry(doc, identity, noteKey) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return
   let notes = itemMap.get('notes')
   if (!notes) return
   notes.delete(noteKey)
 }
 
-// --- Photos ---
+// --- Photos (checksum-keyed with YKeyValue metadata) ---
 
-function setPhotoMetadata(doc, identity, checksum, propertyUri, value, author) {
+function setPhotoMetadata(doc, identity, checksum, propertyUri, value, author, pushSeq) {
   let photos = _getSection(doc, identity, 'photos')
   let photoMap = photos.get(checksum)
 
   if (!photoMap) {
     photoMap = new Y.Map()
-    photoMap.set('metadata', new Y.Map())
+    photoMap.set('metadata', new Y.Array())
     photos.set(checksum, photoMap)
   }
 
-  let metadata = photoMap.get('metadata')
-  if (!metadata) {
-    metadata = new Y.Map()
-    photoMap.set('metadata', metadata)
+  let arr = photoMap.get('metadata')
+  if (!arr || !(arr instanceof Y.Array)) {
+    arr = new Y.Array()
+    photoMap.set('metadata', arr)
   }
 
-  metadata.set(propertyUri, {
+  let ykv = _cachedYKV(arr)
+  ykv.set(propertyUri, {
     text: value.text || '',
     type: value.type || 'http://www.w3.org/2001/XMLSchema#string',
     language: value.language || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
 }
 
 function getPhotoMetadata(doc, identity, checksum) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let photos = itemMap.get('photos')
@@ -284,19 +337,17 @@ function getPhotoMetadata(doc, identity, checksum) {
   let photoMap = photos.get(checksum)
   if (!photoMap) return {}
 
-  let metadata = photoMap.get('metadata')
-  if (!metadata) return {}
+  let arr = photoMap.get('metadata')
+  if (!arr || !(arr instanceof Y.Array)) return {}
 
+  let ykv = _cachedYKV(arr)
   let result = {}
-  metadata.forEach((value, key) => {
-    result[key] = value
-  })
+  ykv.map.forEach((val, key) => { result[key] = val })
   return result
 }
 
 function getAllPhotoChecksums(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return []
 
   let photos = itemMap.get('photos')
@@ -309,21 +360,20 @@ function getAllPhotoChecksums(doc, identity) {
   return result
 }
 
-// --- Selections ---
+// --- Selections (UUID-keyed) ---
 
-function setSelection(doc, identity, selKey, selection, author) {
+function setSelection(doc, identity, uuid, selection, author, pushSeq) {
   let selections = _getSection(doc, identity, 'selections')
 
-  // Use ?? instead of || so that 0 is preserved (valid for x, y, angle)
   let x = selection.x ?? 0
   let y = selection.y ?? 0
   let w = selection.width ?? selection.w
   let h = selection.height ?? selection.h
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return  // invalid coordinates
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
   if (w == null || h == null || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return
 
-  selections.set(selKey, {
-    selKey,
+  selections.set(uuid, {
+    uuid,
     x,
     y,
     w,
@@ -331,26 +381,27 @@ function setSelection(doc, identity, selKey, selection, author) {
     angle: selection.angle ?? 0,
     photo: selection.photo || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
+  _registerUUID(doc, identity, uuid, 'selection', selection.photo)
 }
 
-function removeSelection(doc, identity, selKey, author) {
+function removeSelection(doc, identity, uuid, author, pushSeq) {
   let selections = _getSection(doc, identity, 'selections')
-  let existing = selections.get(selKey)
+  let existing = selections.get(uuid)
   if (existing && !existing.deleted) {
-    selections.set(selKey, {
+    selections.set(uuid, {
       ...existing,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
 function getSelections(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let selections = itemMap.get('selections')
@@ -372,31 +423,31 @@ function getActiveSelections(doc, identity) {
   return result
 }
 
-// --- Selection Metadata ---
+// --- Selection Metadata (YKeyValue, composite key: selUUID:propUri) ---
 
-function setSelectionMeta(doc, identity, selKey, propertyUri, value, author) {
-  let selectionMeta = _getSection(doc, identity, 'selectionMeta')
-  let key = `${selKey}:${propertyUri}`
-  selectionMeta.set(key, {
+function setSelectionMeta(doc, identity, selUUID, propertyUri, value, author, pushSeq) {
+  let ykv = _getSection(doc, identity, 'selectionMeta')
+  let key = `${selUUID}:${propertyUri}`
+  ykv.set(key, {
     text: value.text || '',
     type: value.type || 'http://www.w3.org/2001/XMLSchema#string',
     language: value.language || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
 }
 
-function getSelectionMeta(doc, identity, selKey) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+function getSelectionMeta(doc, identity, selUUID) {
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
-  let selectionMeta = itemMap.get('selectionMeta')
-  if (!selectionMeta) return {}
+  let arr = itemMap.get('selectionMeta')
+  if (!arr || !(arr instanceof Y.Array)) return {}
 
-  let prefix = `${selKey}:`
+  let ykv = _cachedYKV(arr)
+  let prefix = `${selUUID}:`
   let result = {}
-  selectionMeta.forEach((value, key) => {
+  ykv.map.forEach((value, key) => {
     if (key.startsWith(prefix)) {
       let propUri = key.slice(prefix.length)
       result[propUri] = value
@@ -405,45 +456,46 @@ function getSelectionMeta(doc, identity, selKey) {
   return result
 }
 
-// --- Selection Notes ---
+// --- Selection Notes (UUID-keyed, composite key: selUUID:noteUUID) ---
 
-function setSelectionNote(doc, identity, selKey, noteKey, note, author) {
+function setSelectionNote(doc, identity, selUUID, noteUUID, note, author, pushSeq) {
   let selectionNotes = _getSection(doc, identity, 'selectionNotes')
-  let key = `${selKey}:${noteKey}`
+  let key = `${selUUID}:${noteUUID}`
   selectionNotes.set(key, {
-    noteKey,
-    selKey,
+    noteUUID,
+    selUUID,
     text: note.text || '',
     html: note.html || '',
     language: note.language || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
+  _registerUUID(doc, identity, noteUUID, 'selectionNote', selUUID)
 }
 
-function removeSelectionNote(doc, identity, selKey, noteKey, author) {
+function removeSelectionNote(doc, identity, selUUID, noteUUID, author, pushSeq) {
   let selectionNotes = _getSection(doc, identity, 'selectionNotes')
-  let key = `${selKey}:${noteKey}`
+  let key = `${selUUID}:${noteUUID}`
   let existing = selectionNotes.get(key)
   if (existing && !existing.deleted) {
     selectionNotes.set(key, {
       ...existing,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
-function getSelectionNotes(doc, identity, selKey) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+function getSelectionNotes(doc, identity, selUUID) {
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let selectionNotes = itemMap.get('selectionNotes')
   if (!selectionNotes) return {}
 
-  let prefix = `${selKey}:`
+  let prefix = `${selUUID}:`
   let result = {}
   selectionNotes.forEach((value, key) => {
     if (key.startsWith(prefix)) {
@@ -453,13 +505,8 @@ function getSelectionNotes(doc, identity, selKey) {
   return result
 }
 
-/**
- * Get ALL selection notes for an item (all selection keys, including deleted).
- * Used for stale entry cleanup.
- */
 function getAllSelectionNotes(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let selectionNotes = itemMap.get('selectionNotes')
@@ -472,50 +519,46 @@ function getAllSelectionNotes(doc, identity) {
   return result
 }
 
-/**
- * Permanently delete a selection note entry from the CRDT (Y.Map.delete).
- * Used to clean up stale content-based keys.
- */
 function deleteSelectionNoteEntry(doc, identity, compositeKey) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return
   let selectionNotes = itemMap.get('selectionNotes')
   if (!selectionNotes) return
   selectionNotes.delete(compositeKey)
 }
 
-// --- Transcriptions ---
+// --- Transcriptions (UUID-keyed) ---
 
-function setTranscription(doc, identity, txKey, transcription, author) {
+function setTranscription(doc, identity, uuid, transcription, author, pushSeq) {
   let transcriptions = _getSection(doc, identity, 'transcriptions')
-  transcriptions.set(txKey, {
-    txKey,
+  transcriptions.set(uuid, {
+    uuid,
     text: transcription.text || '',
     data: transcription.data || null,
     photo: transcription.photo || null,
     selection: transcription.selection || null,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
+  _registerUUID(doc, identity, uuid, 'transcription', transcription.photo || transcription.selection)
 }
 
-function removeTranscription(doc, identity, txKey, author) {
+function removeTranscription(doc, identity, uuid, author, pushSeq) {
   let transcriptions = _getSection(doc, identity, 'transcriptions')
-  let existing = transcriptions.get(txKey)
+  let existing = transcriptions.get(uuid)
   if (existing && !existing.deleted) {
-    transcriptions.set(txKey, {
+    transcriptions.set(uuid, {
       ...existing,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
 function getTranscriptions(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let transcriptions = itemMap.get('transcriptions')
@@ -537,35 +580,37 @@ function getActiveTranscriptions(doc, identity) {
   return result
 }
 
-// --- Lists ---
+// --- Lists (UUID-keyed with name field) ---
 
-function setListMembership(doc, identity, listName, author) {
+function setListMembership(doc, identity, listUUID, listName, author, pushSeq) {
   let lists = _getSection(doc, identity, 'lists')
-  lists.set(listName, {
+  lists.set(listUUID, {
+    uuid: listUUID,
     name: listName,
     member: true,
     author,
-    ts: Date.now()
+    pushSeq: pushSeq || 0
   })
+  _registerUUID(doc, identity, listUUID, 'list', listName)
 }
 
-function removeListMembership(doc, identity, listName, author) {
+function removeListMembership(doc, identity, listUUID, author, pushSeq) {
   let lists = _getSection(doc, identity, 'lists')
-  let existing = lists.get(listName)
+  let existing = lists.get(listUUID)
   if (existing && !existing.deleted) {
-    lists.set(listName, {
+    lists.set(listUUID, {
       ...existing,
       member: false,
       deleted: true,
       author,
-      ts: Date.now()
+      pushSeq: pushSeq || 0,
+      deletedAt: Date.now()
     })
   }
 }
 
 function getLists(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return {}
 
   let lists = itemMap.get('lists')
@@ -587,26 +632,78 @@ function getActiveLists(doc, identity) {
   return result
 }
 
+// --- UUID Registry ---
+
+function _registerUUID(doc, identity, uuid, type, localRef) {
+  let uuids = _getSection(doc, identity, 'uuids')
+  if (!uuids.has(uuid)) {
+    uuids.set(uuid, { type, localRef: localRef || null, author: null })
+  }
+}
+
+function getUUIDRegistry(doc, identity) {
+  let itemMap = _getItemMap(doc, identity)
+  if (!itemMap) return {}
+  let uuids = itemMap.get('uuids')
+  if (!uuids) return {}
+  let result = {}
+  uuids.forEach((v, k) => { result[k] = v })
+  return result
+}
+
+// --- Alias Map ---
+
+function setAlias(doc, oldIdentity, newIdentity) {
+  let itemMap = _getItemMap(doc, newIdentity)
+  if (!itemMap) {
+    // Item may not exist yet — ensure it does
+    itemMap = _ensureItemMap(doc, newIdentity)
+  }
+
+  let aliases = itemMap.get('aliases')
+  if (!aliases) {
+    aliases = new Y.Map()
+    itemMap.set('aliases', aliases)
+  }
+  aliases.set(oldIdentity, { target: newIdentity, createdAt: Date.now() })
+}
+
+function resolveAlias(doc, identity) {
+  let annotations = doc.getMap('annotations')
+  // Check if any item's aliases map contains this identity
+  let resolved = null
+  annotations.forEach((itemMap, itemIdentity) => {
+    if (resolved) return
+    let aliases = itemMap.get('aliases')
+    if (aliases) {
+      let entry = aliases.get(identity)
+      if (entry) {
+        // Backward compat: handle both old string-only and new object format
+        resolved = typeof entry === 'string' ? entry : entry.target
+      }
+    }
+  })
+  return resolved
+}
+
 // --- Tombstone purge ---
 
 /**
- * Remove all tombstoned entries from the CRDT document.
- * Unlike tombstoning (which marks entries as deleted), this permanently
- * removes them from the Y.Map. The deletion propagates to all peers.
- *
- * Sections that support tombstones: tags, notes, selections,
- * selectionNotes, transcriptions, lists.
- *
- * @param {Y.Doc} doc
- * @returns {{ items: number, purged: number }} count of items scanned and entries purged
+ * Remove tombstoned entries older than maxAgeMs from the CRDT document.
+ * Uses deletedAt field (wall-clock) for time-based purging.
+ * Falls back to unconditional purge when deletedAt is missing.
  */
-function purgeTombstones(doc) {
+function purgeTombstones(doc, maxAgeMs) {
   let annotations = doc.getMap('annotations')
   let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
   let purged = 0
+  let uuidsPurged = 0
+  let aliasesPurged = 0
   let items = 0
 
-  annotations.forEach((itemMap, identity) => {
+  let cutoff = maxAgeMs ? Date.now() - maxAgeMs : null
+
+  annotations.forEach((itemMap) => {
     items++
     for (let section of tombstoneSections) {
       let map = itemMap.get(section)
@@ -615,7 +712,9 @@ function purgeTombstones(doc) {
       let toDelete = []
       map.forEach((value, key) => {
         if (value && value.deleted) {
-          toDelete.push(key)
+          if (!cutoff || !value.deletedAt || value.deletedAt < cutoff) {
+            toDelete.push(key)
+          }
         }
       })
 
@@ -624,74 +723,138 @@ function purgeTombstones(doc) {
         purged++
       }
     }
+
+    // Prune orphaned UUID registry entries — collect live UUIDs from all sections
+    let uuids = itemMap.get('uuids')
+    if (uuids && typeof uuids.forEach === 'function') {
+      let liveUUIDs = new Set()
+
+      let notes = itemMap.get('notes')
+      if (notes) notes.forEach((_, k) => liveUUIDs.add(k))
+
+      let selections = itemMap.get('selections')
+      if (selections) selections.forEach((_, k) => liveUUIDs.add(k))
+
+      let selectionNotes = itemMap.get('selectionNotes')
+      if (selectionNotes) {
+        selectionNotes.forEach((_, k) => {
+          // Composite key: selUUID:noteUUID — both parts are live
+          let sep = k.indexOf(':')
+          if (sep > 0) {
+            liveUUIDs.add(k.slice(0, sep))
+            liveUUIDs.add(k.slice(sep + 1))
+          }
+        })
+      }
+
+      let transcriptions = itemMap.get('transcriptions')
+      if (transcriptions) transcriptions.forEach((_, k) => liveUUIDs.add(k))
+
+      let lists = itemMap.get('lists')
+      if (lists) lists.forEach((_, k) => liveUUIDs.add(k))
+
+      let orphaned = []
+      uuids.forEach((_, k) => {
+        if (!liveUUIDs.has(k)) orphaned.push(k)
+      })
+      for (let k of orphaned) {
+        uuids.delete(k)
+        uuidsPurged++
+      }
+    }
+
+    // Purge expired aliases
+    let aliases = itemMap.get('aliases')
+    if (aliases && typeof aliases.forEach === 'function') {
+      let toDelete = []
+      aliases.forEach((value, key) => {
+        let createdAt = (value && typeof value === 'object') ? value.createdAt : 0
+        if (!cutoff || !createdAt || createdAt < cutoff) {
+          toDelete.push(key)
+        }
+      })
+      for (let key of toDelete) {
+        aliases.delete(key)
+        aliasesPurged++
+      }
+    }
   })
 
-  return { items, purged }
+  return { items, purged, uuidsPurged, aliasesPurged }
 }
 
-// --- Item checksums (for fuzzy identity matching across merges) ---
+// --- Item checksums (fuzzy identity matching) ---
 
-/**
- * Store an item's photo checksums in the CRDT.
- * Used for fuzzy identity matching when items are merged/split.
- */
 function setItemChecksums(doc, identity, checksums) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
-  if (!itemMap) {
-    itemMap = new Y.Map()
-    annotations.set(identity, itemMap)
-  }
+  let itemMap = _ensureItemMap(doc, identity)
   let str = checksums.join(',')
   if (itemMap.get('checksums') !== str) {
     itemMap.set('checksums', str)
   }
 }
 
-/**
- * Get an item's stored photo checksums from the CRDT.
- * Returns an array of checksum strings.
- */
 function getItemChecksums(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return []
   let str = itemMap.get('checksums')
   if (!str) return []
   return str.split(',').filter(Boolean)
 }
 
+// --- Schema version ---
+
+function checkSchemaVersion(doc) {
+  let room = doc.getMap('room')
+  let version = room.get('schemaVersion')
+  return { version: version || null, compatible: !version || version === 4 }
+}
+
+function setSchemaVersion(doc) {
+  doc.getMap('room').set('schemaVersion', 4)
+}
+
 // --- Snapshot ---
 
-/**
- * Get a snapshot of a single item from the CRDT, preserving author/ts.
- * Used for validation where author info is needed.
- */
 function getItemSnapshot(doc, identity) {
-  let annotations = doc.getMap('annotations')
-  let itemMap = annotations.get(identity)
+  let itemMap = _getItemMap(doc, identity)
   if (!itemMap) return null
 
   let item = {}
   for (let section of ITEM_SECTIONS) {
-    let map = itemMap.get(section)
-    if (!map) {
-      item[section] = {}
-      continue
-    }
-
-    if (section === 'photos') {
+    if (YKV_SECTIONS.includes(section)) {
+      let arr = itemMap.get(section)
+      if (!arr || !(arr instanceof Y.Array)) {
+        item[section] = {}
+        continue
+      }
+      let ykv = _cachedYKV(arr)
+      let obj = {}
+      ykv.map.forEach((v, k) => { obj[k] = v })
+      item[section] = obj
+    } else if (section === 'photos') {
+      let photosMap = itemMap.get(section)
       let photosObj = {}
-      map.forEach((photoMap, checksum) => {
-        let metaMap = photoMap.get('metadata')
-        let meta = {}
-        if (metaMap) {
-          metaMap.forEach((v, k) => { meta[k] = v })
-        }
-        photosObj[checksum] = { metadata: meta }
-      })
+      if (photosMap) {
+        photosMap.forEach((photoMap, checksum) => {
+          let arr = photoMap.get('metadata')
+          let meta = {}
+          if (arr && arr instanceof Y.Array) {
+            let ykv = _cachedYKV(arr)
+            ykv.map.forEach((v, k) => { meta[k] = v })
+          } else if (arr) {
+            // Fallback: plain Y.Map (shouldn't happen in v4 but be safe)
+            arr.forEach((v, k) => { meta[k] = v })
+          }
+          photosObj[checksum] = { metadata: meta }
+        })
+      }
       item[section] = photosObj
     } else {
+      let map = itemMap.get(section)
+      if (!map) {
+        item[section] = {}
+        continue
+      }
       let obj = {}
       map.forEach((v, k) => { obj[k] = v })
       item[section] = obj
@@ -700,9 +863,6 @@ function getItemSnapshot(doc, identity) {
   return item
 }
 
-/**
- * Get all item identities in the CRDT.
- */
 function getIdentities(doc) {
   let annotations = doc.getMap('annotations')
   let result = []
@@ -712,7 +872,7 @@ function getIdentities(doc) {
 
 function _stripMeta(v) {
   if (v && typeof v === 'object') {
-    let { ts, author, ...content } = v
+    let { pushSeq, author, ts, ...content } = v
     return content
   }
   return v
@@ -725,24 +885,39 @@ function getSnapshot(doc) {
   annotations.forEach((itemMap, identity) => {
     let item = {}
     for (let section of ITEM_SECTIONS) {
-      let map = itemMap.get(section)
-      if (!map) {
-        item[section] = {}
-        continue
-      }
-
-      if (section === 'photos') {
+      if (YKV_SECTIONS.includes(section)) {
+        let arr = itemMap.get(section)
+        if (!arr || !(arr instanceof Y.Array)) {
+          item[section] = {}
+          continue
+        }
+        let ykv = _cachedYKV(arr)
+        let obj = {}
+        ykv.map.forEach((v, k) => { obj[k] = _stripMeta(v) })
+        item[section] = obj
+      } else if (section === 'photos') {
+        let photosMap = itemMap.get(section)
         let photosObj = {}
-        map.forEach((photoMap, checksum) => {
-          let metaMap = photoMap.get('metadata')
-          let meta = {}
-          if (metaMap) {
-            metaMap.forEach((v, k) => { meta[k] = _stripMeta(v) })
-          }
-          photosObj[checksum] = { metadata: meta }
-        })
+        if (photosMap) {
+          photosMap.forEach((photoMap, checksum) => {
+            let arr = photoMap.get('metadata')
+            let meta = {}
+            if (arr && arr instanceof Y.Array) {
+              let ykv = _cachedYKV(arr)
+              ykv.map.forEach((v, k) => { meta[k] = _stripMeta(v) })
+            } else if (arr) {
+              arr.forEach((v, k) => { meta[k] = _stripMeta(v) })
+            }
+            photosObj[checksum] = { metadata: meta }
+          })
+        }
         item[section] = photosObj
       } else {
+        let map = itemMap.get(section)
+        if (!map) {
+          item[section] = {}
+          continue
+        }
         let obj = {}
         map.forEach((v, k) => { obj[k] = _stripMeta(v) })
         item[section] = obj
@@ -751,40 +926,6 @@ function getSnapshot(doc) {
     result[identity] = item
   })
 
-  return result
-}
-
-// --- Users ---
-
-function registerUser(doc, clientId, userId) {
-  let users = doc.getMap('users')
-  users.set(String(clientId), {
-    userId: userId || `user-${clientId}`,
-    name: userId || `user-${clientId}`,
-    joinedAt: Date.now(),
-    lastSeen: Date.now()
-  })
-}
-
-function deregisterUser(doc, clientId) {
-  let users = doc.getMap('users')
-  users.delete(String(clientId))
-}
-
-function heartbeat(doc, clientId) {
-  let users = doc.getMap('users')
-  let user = users.get(String(clientId))
-  if (user) {
-    users.set(String(clientId), { ...user, lastSeen: Date.now() })
-  }
-}
-
-function getUsers(doc) {
-  let users = doc.getMap('users')
-  let result = []
-  users.forEach((user, clientId) => {
-    result.push({ clientId, ...user })
-  })
   return result
 }
 
@@ -858,7 +999,7 @@ function observeAnnotationsDeep(doc, callback, skipOrigin) {
 module.exports = {
   ITEM_SECTIONS,
   getItemAnnotations,
-  // Metadata
+  // Metadata (YKeyValue)
   setMetadata,
   getMetadata,
   // Tags
@@ -867,54 +1008,57 @@ module.exports = {
   getTags,
   getActiveTags,
   getDeletedTags,
-  // Notes
+  // Notes (UUID-keyed)
   setNote,
   removeNote,
   deleteNoteEntry,
   getNotes,
   getActiveNotes,
-  // Photos
+  // Photos (YKeyValue metadata)
   setPhotoMetadata,
   getPhotoMetadata,
   getAllPhotoChecksums,
-  // Selections
+  // Selections (UUID-keyed)
   setSelection,
   removeSelection,
   getSelections,
   getActiveSelections,
-  // Selection metadata
+  // Selection metadata (YKeyValue)
   setSelectionMeta,
   getSelectionMeta,
-  // Selection notes
+  // Selection notes (UUID-keyed)
   setSelectionNote,
   removeSelectionNote,
   deleteSelectionNoteEntry,
   getSelectionNotes,
   getAllSelectionNotes,
-  // Transcriptions
+  // Transcriptions (UUID-keyed)
   setTranscription,
   removeTranscription,
   getTranscriptions,
   getActiveTranscriptions,
-  // Lists
+  // Lists (UUID-keyed)
   setListMembership,
   removeListMembership,
   getLists,
   getActiveLists,
+  // UUID registry
+  getUUIDRegistry,
+  // Aliases
+  setAlias,
+  resolveAlias,
   // Item checksums (fuzzy matching)
   setItemChecksums,
   getItemChecksums,
+  // Schema version
+  checkSchemaVersion,
+  setSchemaVersion,
   // Snapshot
   getSnapshot,
   getItemSnapshot,
   getIdentities,
   // Tombstone purge
   purgeTombstones,
-  // Users
-  registerUser,
-  deregisterUser,
-  heartbeat,
-  getUsers,
   // Room
   setRoomConfig,
   getRoomConfig,
