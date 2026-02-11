@@ -64,7 +64,9 @@ class SyncVault {
     // Dirty flag — set when applied keys change, cleared after persist
     this._dirty = false
 
-    // v4: Push sequence counter (monotonic per-author)
+    // v4: Push sequence counter (monotonic per-author).
+    // Diagnostic-only: stored in every CRDT entry for ordering/debugging.
+    // NOT used for conflict resolution — see hasLocalEdit() below.
     this.pushSeq = 0
 
     // v4: Logic-based conflict tracking
@@ -74,6 +76,14 @@ class SyncVault {
 
     // v4: Locally-dismissed remote deletions
     this.dismissedKeys = new Set()
+
+    // v4: Track notes that have been retracted (tombstone applied)
+    // Prevents re-retraction on every apply cycle
+    this.retractedNoteKeys = new Set()
+
+    // v4: Track content hash of last-applied note content per CRDT key.
+    // Used to detect local edits before overwriting with remote content.
+    this.appliedNoteHashes = new Map()  // crdtKey -> FNV-1a hash of applied HTML
   }
 
   markDirty() {
@@ -88,6 +98,13 @@ class SyncVault {
 
   /**
    * Get next monotonic push sequence number.
+   *
+   * pushSeq is a per-author counter stored in every CRDT entry. It provides
+   * diagnostic ordering (which entries were pushed first) and enables future
+   * catch-up logic (e.g., "give me everything since pushSeq N").
+   *
+   * It is NOT used for conflict resolution — that's handled by hasLocalEdit()
+   * which compares value hashes to detect whether a field was locally modified.
    */
   nextPushSeq() {
     return ++this.pushSeq
@@ -259,6 +276,29 @@ class SyncVault {
     return this.crdtKeyToListName.get(uuid) || null
   }
 
+  // --- Applied note content tracking (v4) ---
+
+  /**
+   * Record the content hash of a note that was just applied (created or updated).
+   * Used by hasLocalNoteEdit() to detect user edits between apply cycles.
+   */
+  markNoteApplied(crdtKey, html) {
+    this._evictIfNeeded(this.appliedNoteHashes, MAX_ID_MAPPINGS)
+    this.appliedNoteHashes.set(crdtKey, this._fastHash(html))
+    this._dirty = true
+  }
+
+  /**
+   * Check if a note was locally edited since last apply.
+   * Returns true if the current local content differs from what we last applied.
+   * Returns false (allow overwrite) if never tracked (first apply).
+   */
+  hasLocalNoteEdit(crdtKey, currentHtml) {
+    let lastApplied = this.appliedNoteHashes.get(crdtKey)
+    if (!lastApplied) return false  // Never tracked — allow overwrite (first apply)
+    return lastApplied !== this._fastHash(currentHtml)
+  }
+
   // --- CRDT-fallback UUID recovery (v4) ---
 
   recoverFromCRDT(doc, identity, schema) {
@@ -363,12 +403,13 @@ class SyncVault {
 
   // --- Persistence ---
 
-  async persistToFile(room) {
+  async persistToFile(room, userId) {
     if (!room) return
     try {
       let dir = path.join(os.homedir(), '.troparcel', 'vault')
       await fs.promises.mkdir(dir, { recursive: true })
-      let file = path.join(dir, this._sanitizeRoom(room) + '.json')
+      let suffix = userId ? '_' + this._sanitizeRoom(userId) : ''
+      let file = path.join(dir, this._sanitizeRoom(room) + suffix + '.json')
       let tmpFile = file + '.tmp'
       let data = {
         version: 4,
@@ -382,7 +423,9 @@ class SyncVault {
         txMappings: Array.from(this.crdtKeyToTxId.entries()).map(([k, v]) => [k, v]),
         selMappings: Array.from(this.crdtKeyToSelId.entries()).map(([k, v]) => [k, v]),
         listMappings: Array.from(this.crdtKeyToListName.entries()).map(([k, v]) => [k, v]),
-        dismissedKeys: Array.from(this.dismissedKeys)
+        dismissedKeys: Array.from(this.dismissedKeys),
+        retractedNoteKeys: Array.from(this.retractedNoteKeys),
+        appliedNoteHashes: Array.from(this.appliedNoteHashes.entries())
         // pushedFieldValues intentionally NOT persisted — rebuilt on first push cycle
       }
       await fs.promises.writeFile(tmpFile, JSON.stringify(data))
@@ -393,12 +436,24 @@ class SyncVault {
     }
   }
 
-  loadFromFile(room) {
+  loadFromFile(room, userId) {
     if (!room) return false
     try {
       let dir = path.join(os.homedir(), '.troparcel', 'vault')
-      let file = path.join(dir, this._sanitizeRoom(room) + '.json')
-      let raw = fs.readFileSync(file, 'utf8')
+      let suffix = userId ? '_' + this._sanitizeRoom(userId) : ''
+      let file = path.join(dir, this._sanitizeRoom(room) + suffix + '.json')
+      let raw
+      try {
+        raw = fs.readFileSync(file, 'utf8')
+      } catch {
+        // Fall back to legacy shared vault file (pre-v5.0)
+        if (suffix) {
+          let legacyFile = path.join(dir, this._sanitizeRoom(room) + '.json')
+          raw = fs.readFileSync(legacyFile, 'utf8')
+        } else {
+          throw new Error('no vault file')
+        }
+      }
       let data = JSON.parse(raw)
       // Accept all vault versions (1-4) — missing fields default to empty
       if (data.version !== 1 && data.version !== 2 && data.version !== 3 && data.version !== 4) return false
@@ -460,6 +515,14 @@ class SyncVault {
       if (Array.isArray(data.dismissedKeys)) {
         for (let k of data.dismissedKeys) this.dismissedKeys.add(k)
       }
+      // v4: Restore retracted note keys
+      if (Array.isArray(data.retractedNoteKeys)) {
+        for (let k of data.retractedNoteKeys) this.retractedNoteKeys.add(k)
+      }
+      // v4: Restore applied note content hashes
+      if (Array.isArray(data.appliedNoteHashes)) {
+        for (let [k, v] of data.appliedNoteHashes) this.appliedNoteHashes.set(k, v)
+      }
       return true
     } catch {
       return false
@@ -489,6 +552,8 @@ class SyncVault {
     this.failedNoteKeys.clear()
     this.pushedFieldValues.clear()
     this.dismissedKeys.clear()
+    this.retractedNoteKeys.clear()
+    this.appliedNoteHashes.clear()
     this.pushSeq = 0
   }
 }

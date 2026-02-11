@@ -110,7 +110,15 @@ module.exports = {
         if (localText === (value.text || '')) continue
         // Logic-based: skip if we have a local edit for this field
         let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
-        if (this.vault.hasLocalEdit(itemIdentity, prop, valueHash)) continue
+        if (this.vault.hasLocalEdit(itemIdentity, prop, valueHash)) {
+          this._logConflict('metadata-apply', itemIdentity, prop, {
+            localValue: localText?.slice(0, 50),
+            remoteValue: (value.text || '').slice(0, 50),
+            remoteAuthor: value.author,
+            resolution: 'local-wins'
+          })
+          continue
+        }
       }
 
       batch[prop] = { text: value.text, type: value.type }
@@ -123,9 +131,9 @@ module.exports = {
         if (this._applyStats) this._applyStats.metadataUpdated += batchKeys.length
         this._debug(`metadata: ${batchKeys.length} field(s) on item ${localId}`)
       } catch (err) {
-        this.logger.warn(`Failed to save metadata batch on ${localId}`, {
+        this.logger.warn({
           error: err.message
-        })
+        }, `Failed to save metadata batch on ${localId}`)
       }
     }
   },
@@ -133,45 +141,45 @@ module.exports = {
   async applyTags(itemIdentity, localId, userId, tagMap, localItem) {
     if (!this.options.syncTags) return
 
-    // Build set of tag names already on this item
+    // Build set of tag names already on this item (lowercase for case-insensitive matching)
     let localTagNames = new Set()
     let localTags = localItem.tag || []
     for (let t of localTags) {
-      if (t && t.name) localTagNames.add(t.name)
+      if (t && t.name) localTagNames.add(t.name.toLowerCase())
     }
 
     let activeTags = schema.getActiveTags(this.doc, itemIdentity)
     for (let tag of activeTags) {
       if (tag.author === userId) continue
 
-      // Diff: skip if item already has this tag
-      if (localTagNames.has(tag.name)) continue
+      // Diff: skip if item already has this tag (case-insensitive)
+      if (localTagNames.has(tag.name.toLowerCase())) continue
 
-      let existing = tagMap.get(tag.name)
+      let existing = tagMap.get(tag.name.toLowerCase())
       if (!existing) {
         try {
           let created = await this.api.createTag(tag.name, tag.color, [localId])
-          localTagNames.add(tag.name)
+          localTagNames.add(tag.name.toLowerCase())
           // Update tagMap so subsequent items in this batch can use addTagsToItem
           if (created && (created.id || created.tag_id)) {
-            tagMap.set(tag.name, created)
+            tagMap.set(tag.name.toLowerCase(), created)
           }
           if (this._applyStats) this._applyStats.tagsAdded++
           this._debug(`tag created: "${tag.name}" on item ${localId}`)
           continue
         } catch (err) {
-          this.logger.warn(`Failed to create tag "${tag.name}"`, { error: err.message })
+          this.logger.warn({ error: err.message }, `Failed to create tag "${tag.name}"`)
           continue
         }
       }
 
       try {
         await this.api.addTagsToItem(localId, [existing.id || existing.tag_id])
-        localTagNames.add(tag.name)
+        localTagNames.add(tag.name.toLowerCase())
         if (this._applyStats) this._applyStats.tagsAdded++
         this._debug(`tag added: "${tag.name}" on item ${localId}`)
       } catch (err) {
-        this.logger.warn(`Failed to add tag "${tag.name}" to item ${localId}`, { error: err.message })
+        this.logger.warn({ error: err.message }, `Failed to add tag "${tag.name}" to item ${localId}`)
       }
     }
 
@@ -181,18 +189,18 @@ module.exports = {
     for (let tag of deletedTags) {
       if (tag.author === userId) continue
 
-      // Diff: skip if item doesn't have this tag anyway
-      if (!localTagNames.has(tag.name)) continue
+      // Diff: skip if item doesn't have this tag anyway (case-insensitive)
+      if (!localTagNames.has(tag.name.toLowerCase())) continue
 
-      // Check if user dismissed this deletion
-      if (this.vault.dismissedKeys.has(`tag:${tag.name}:${itemIdentity}`)) continue
+      // Check if user dismissed this deletion (use lowercase key)
+      if (this.vault.dismissedKeys.has(`tag:${tag.name.toLowerCase()}:${itemIdentity}`)) continue
 
-      let existing = tagMap.get(tag.name)
+      let existing = tagMap.get(tag.name.toLowerCase())
       if (existing) {
         try {
           await this.api.removeTagsFromItem(localId, [existing.id || existing.tag_id])
         } catch (err) {
-          this.logger.warn(`Failed to remove tag "${tag.name}" from item ${localId}`, { error: err.message })
+          this.logger.warn({ error: err.message }, `Failed to remove tag "${tag.name}" from item ${localId}`)
         }
       }
     }
@@ -207,16 +215,22 @@ module.exports = {
       if (n && n.text) {
         set.add(n.text.trim())
         let stripped = n.text
+          // Legacy top-of-note identifiers
           .replace(/^troparcel:\s*[^\n]*\n?/, '')
           .replace(/^\[(?:troparcel:)?[^\]]{1,80}\]\s*/, '')
+          // v5.0+: bottom-of-note identifier (plain text form)
+          .replace(/\n?\[troparcel:[^\]]*\]\s*$/, '')
           .trim()
         if (stripped) set.add(stripped)
       }
       if (n && n.html) {
         set.add(n.html.trim())
         let strippedHtml = n.html
+          // Legacy top-of-note identifiers
           .replace(/^<blockquote><p><em>troparcel:[^<]*<\/em><\/p><\/blockquote>/, '')
           .replace(/^<p><strong>\[[^\]]*\]<\/strong><\/p>/, '')
+          // v5.0+: bottom-of-note identifier
+          .replace(/<p><sub>\[troparcel:[^\]]*\]<\/sub><\/p>\s*$/, '')
           .trim()
         if (strippedHtml) set.add(strippedHtml)
       }
@@ -225,45 +239,121 @@ module.exports = {
   },
 
   /**
-   * Apply a single remote note: sanitize, dedup, update-or-create.
+   * Apply a single remote note: sanitize, find-by-UUID, update-or-create.
    * Shared by applyNotes and applySelectionNotes.
+   *
+   * The CRDT UUID is embedded in a visible footer at the bottom of each
+   * synced note so we can always find the local note by scanning content.
+   * Vault ID mappings are a fast-path hint; the UUID in the footer is the
+   * source of truth for matching remote→local.
+   *
+   * Why a visible footer (not invisible metadata):
+   *   - HTML comments (<!-- -->) are stripped by our sanitizer (security)
+   *   - data-* attributes are blocked by our sanitizer (XSS prevention)
+   *   - ProseMirror's DOMParser ignores unknown attributes and elements
+   *   - Tropy's editor schema has no custom attrs that survive roundtrip
+   *   - The only content that reliably survives: text inside safe tags
+   *
+   * The footer uses <sub> to minimize visual impact while staying within
+   * ProseMirror's supported node types. Users are told it's safe to delete
+   * (the vault mapping takes over once established).
    */
+  _makeFooter(noteKey, authorLabel) {
+    return `<p><sub>[troparcel:${noteKey} from ${authorLabel} — safe to delete, do not edit]</sub></p>`
+  },
+
+  _extractNoteKey(html) {
+    let m = html && html.match(/\[troparcel:([\w:-]+)\s/)
+    return m ? m[1] : null
+  },
+
+  /**
+   * Scan all local notes to find one whose content embeds the given CRDT UUID.
+   * Returns the local note ID or null.
+   */
+  _findLocalNoteByUUID(noteKey) {
+    if (!this.adapter) return null
+    let state = this.adapter._getState()
+    for (let [id, note] of Object.entries(state.notes)) {
+      if (!note) continue
+      // Check plain text first (fast)
+      if (note.text && note.text.includes(`troparcel:${noteKey}`)) return Number(id)
+      // Check ProseMirror state for the UUID string
+      let json = note.state && JSON.stringify(note.state)
+      if (json && json.includes(`troparcel:${noteKey}`)) return Number(id)
+    }
+    return null
+  },
+
   async _applyRemoteNote(noteKey, note, parent, existingTexts, userId, label) {
     let safeHtml = note.html
       ? sanitizeHtml(note.html)
       : `<p>${escapeHtml(note.text)}</p>`
 
     let authorLabel = escapeHtml(note.author || 'unknown')
-    safeHtml = `<blockquote><p><em>troparcel: ${authorLabel}</em></p></blockquote>${safeHtml}`
+    safeHtml = `${safeHtml}${this._makeFooter(noteKey, authorLabel)}`
 
-    // Content-based dedup — match exact HTML to avoid cross-domain false positives
-    if (existingTexts.has(safeHtml.trim())) {
-      this.vault.appliedNoteKeys.add(noteKey)
-      if (this._applyStats) this._applyStats.notesDeduped++
-      return false
+    // Find existing local note by UUID (embedded in footer)
+    let existingLocalId = this._findLocalNoteByUUID(noteKey)
+
+    // Fast-path: vault hint (may be stale, but check anyway)
+    if (!existingLocalId) {
+      let vaultId = this.vault.getLocalNoteId(noteKey)
+      if (vaultId && this.adapter) {
+        let state = this.adapter._getState()
+        if (state.notes[vaultId]) existingLocalId = vaultId
+      }
     }
 
-    // C1: Check if we've already applied this note (update instead of re-create)
-    let existingLocalId = this.vault.getLocalNoteId(noteKey)
     if (existingLocalId) {
+      // Check if user has locally edited the note since last apply
+      if (this.adapter) {
+        let state = this.adapter._getState()
+        let localNote = state.notes[existingLocalId]
+        if (localNote) {
+          let localHtml = this.adapter._noteStateToHtml(localNote)
+          if (this.vault.hasLocalNoteEdit(noteKey, localHtml)) {
+            this._logConflict('note-apply', noteKey, `note:${noteKey}`, {
+              localLength: localHtml.length,
+              remoteLength: safeHtml.length,
+              remoteAuthor: note.author,
+              resolution: 'local-wins'
+            })
+            this.vault.appliedNoteKeys.add(noteKey)
+            if (this._applyStats) this._applyStats.notesSkipped = (this._applyStats.notesSkipped || 0) + 1
+            return false
+          }
+        }
+      }
+
+      // Update existing note in place
       try {
         if (this.adapter) {
           let result = await this.adapter.updateNote(existingLocalId, { html: safeHtml })
           if (result && (result.id || result['@id'])) {
+            let newId = result.id || result['@id']
+            this.vault.mapAppliedNote(noteKey, newId)
             this.vault.appliedNoteKeys.add(noteKey)
-            this.vault.mapAppliedNote(noteKey, result.id || result['@id'])
+            this.vault.markNoteApplied(noteKey, safeHtml)
           }
         } else {
           await this.api.updateNote(existingLocalId, { html: safeHtml })
           this.vault.appliedNoteKeys.add(noteKey)
+          this.vault.markNoteApplied(noteKey, safeHtml)
         }
         if (this._applyStats) this._applyStats.notesUpdated++
         this._debug(`${label} updated: ${noteKey.slice(0, 8)}`)
         return true
       } catch (err) {
-        // Note might have been deleted locally — fall through to create
-        this.logger.warn(`${label} update failed for ${noteKey.slice(0, 8)}, falling through to create`, { error: String(err.message || err) })
+        this.logger.warn({ error: String(err.message || err) }, `${label} update failed for ${noteKey.slice(0, 8)}, falling through to create`)
       }
+    }
+
+    // Content-based dedup fallback — avoid creating duplicate if footer was stripped
+    if (existingTexts.has(safeHtml.trim())) {
+      this.vault.appliedNoteKeys.add(noteKey)
+      if (this._applyStats) this._applyStats.notesDeduped++
+      return false
     }
 
     try {
@@ -282,6 +372,7 @@ module.exports = {
       if (created && (created.id || created['@id'])) {
         this.vault.mapAppliedNote(noteKey, created.id || created['@id'])
         this.vault.appliedNoteKeys.add(noteKey)
+        this.vault.markNoteApplied(noteKey, safeHtml)
         existingTexts.add(safeHtml.trim())
         if (this._applyStats) this._applyStats.notesCreated++
         this._debug(`${label} created: ${noteKey.slice(0, 8)} by ${note.author}`)
@@ -293,9 +384,9 @@ module.exports = {
         this._failedNoteKeys.add(noteKey)
       }
     } catch (err) {
-      this.logger.warn(`Failed to create ${label}`, {
+      this.logger.warn({
         error: err.message, ...parent, noteKey: noteKey.slice(0, 8)
-      })
+      }, `Failed to create ${label}`)
       if (this._applyStats) this._applyStats.notesFailed++
       this._failedNoteKeys.add(noteKey)
     }
@@ -332,20 +423,27 @@ module.exports = {
     for (let [noteKey, note] of Object.entries(remoteNotes)) {
       if (note.author === userId) continue
       if (!note.html && !note.text) continue
-      if (this.vault.appliedNoteKeys.has(noteKey)) {
-        // Verify the mapped local note still exists (user may have deleted it)
-        let mappedId = this.vault.getLocalNoteId(noteKey)
-        if (mappedId && this.adapter) {
-          let state = this.adapter._getState()
-          if (!state.notes[mappedId]) {
-            // Local note was deleted — allow re-apply from remote
-            this.vault.appliedNoteKeys.delete(noteKey)
-            this._debug(`note ${noteKey.slice(0, 8)}: local note ${mappedId} deleted, allowing re-apply`)
-          } else {
+
+      // UUID scan: check if a local note already has this UUID in its footer.
+      // If found, _applyRemoteNote will update it in place (no duplicate).
+      // If not found, _applyRemoteNote will create a new note.
+      // This replaces content-hash tracking — the UUID in the footer is
+      // the single source of truth for matching CRDT notes to local notes.
+      let localNoteId = this._findLocalNoteByUUID(noteKey)
+      if (localNoteId) {
+        // Note exists locally — check if CRDT content actually changed
+        let state = this.adapter ? this.adapter._getState() : null
+        let localNote = state && state.notes[localNoteId]
+        if (localNote) {
+          let localText = localNote.text || ''
+          let remoteText = note.text || ''
+          let remoteHtml = note.html || ''
+          // Quick check: if the remote content is already in the local note, skip
+          if (localText.includes(remoteText) && remoteText.length > 0 &&
+              !localText.includes('[retracted')) {
+            this.vault.appliedNoteKeys.add(noteKey)
             continue
           }
-        } else {
-          continue
         }
       }
 
@@ -377,34 +475,58 @@ module.exports = {
     for (let [noteKey, note] of Object.entries(tombstonedNotes)) {
       if (note.author === userId) continue
       if (this.vault.dismissedKeys.has(noteKey)) continue
-      let existingLocalId = this.vault.getLocalNoteId(noteKey)
+      if (this.vault.retractedNoteKeys.has(noteKey)) continue
+
+      // Find local note by UUID in footer, fall back to vault mapping
+      let existingLocalId = this._findLocalNoteByUUID(noteKey)
+      if (!existingLocalId) existingLocalId = this.vault.getLocalNoteId(noteKey)
       if (!existingLocalId) continue
+
+      // Verify local note still exists
+      if (this.adapter) {
+        let state = this.adapter._getState()
+        if (!state.notes[existingLocalId]) {
+          this.vault.retractedNoteKeys.add(noteKey)
+          this.vault.markDirty()
+          this._debug(`note ${noteKey.slice(0, 8)}: local note ${existingLocalId} already deleted, marking retracted`)
+          continue
+        }
+      }
 
       let authorLabel = escapeHtml(note.author || 'unknown')
       let contentHtml = note.html
         ? sanitizeHtml(note.html)
         : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
-      let retractedHtml = `<blockquote><p><em>troparcel: ${authorLabel} [retracted]</em></p></blockquote>${this._applyStrikethrough(contentHtml)}`
+      let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${noteKey} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
 
       try {
         let retracted = false
         if (this.adapter) {
           let result = await this.adapter.updateNote(existingLocalId, { html: retractedHtml })
           if (result && (result.id || result['@id'])) {
-            this.vault.mapAppliedNote(noteKey, result.id || result['@id'])
+            let newId = result.id || result['@id']
+            // Verify old note was actually deleted (updateNote does delete+create)
+            if (String(newId) !== String(existingLocalId)) {
+              let state = this.adapter._getState()
+              if (state.notes[existingLocalId]) {
+                try { await this.adapter.deleteNote(existingLocalId) } catch {}
+              }
+            }
+            this.vault.mapAppliedNote(noteKey, newId)
             retracted = true
           }
         } else {
           this._debug(`note retraction skipped (no adapter) for ${noteKey.slice(0, 8)}`)
-          this.vault.appliedNoteKeys.add(noteKey)
+          this.vault.retractedNoteKeys.add(noteKey)
         }
         if (retracted) {
-          this.vault.appliedNoteKeys.add(noteKey)
+          this.vault.retractedNoteKeys.add(noteKey)
+          this.vault.markDirty()
           if (this._applyStats) this._applyStats.notesRetracted++
           this._debug(`note retracted: ${noteKey.slice(0, 8)} by ${note.author}`)
         }
       } catch (err) {
-        this.logger.warn(`Failed to retract note ${noteKey.slice(0, 8)}`, { error: String(err.message || err) })
+        this.logger.warn({ error: String(err.message || err) }, `Failed to retract note ${noteKey.slice(0, 8)}`)
       }
     }
   },
@@ -436,7 +558,15 @@ module.exports = {
           if (localText === (value.text || '')) continue
           // Logic-based: skip if we have a local edit
           let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
-          if (this.vault.hasLocalEdit(itemIdentity, `photo:${checksum}:${prop}`, valueHash)) continue
+          if (this.vault.hasLocalEdit(itemIdentity, `photo:${checksum}:${prop}`, valueHash)) {
+            this._logConflict('photo-meta-apply', itemIdentity, `photo:${checksum}:${prop}`, {
+              localValue: localText?.slice(0, 50),
+              remoteValue: (value.text || '').slice(0, 50),
+              remoteAuthor: value.author,
+              resolution: 'local-wins'
+            })
+            continue
+          }
         }
 
         batch[prop] = { text: value.text, type: value.type }
@@ -448,7 +578,7 @@ module.exports = {
           await this.api.saveMetadata(localPhotoId, batch)
           if (this._applyStats) this._applyStats.metadataUpdated += photoBatchKeys.length
         } catch (err) {
-          this.logger.warn(`Failed to save photo metadata batch`, { error: err.message })
+          this.logger.warn({ error: err.message }, `Failed to save photo metadata batch`)
         }
       }
     }
@@ -531,9 +661,9 @@ module.exports = {
           if (this._applyStats) this._applyStats.selectionsCreated++
           this._debug(`selection created: ${selUUID.slice(0, 8)} on photo ${localPhotoId}`)
         } catch (err) {
-          this.logger.warn(`Failed to create selection on photo ${localPhotoId}`, {
+          this.logger.warn({
             error: err.message
-          })
+          }, `Failed to create selection on photo ${localPhotoId}`)
         }
       } else {
         // Match existing local selection by fingerprint
@@ -600,19 +730,20 @@ module.exports = {
         for (let [compositeKey, note] of Object.entries(remoteNotes)) {
           if (note.author === userId) continue
           if (!note.html && !note.text) continue
-          if (this.vault.appliedNoteKeys.has(compositeKey)) {
-            // Verify the mapped local note still exists
-            let mappedId = this.vault.getLocalNoteId(compositeKey)
-            if (mappedId && this.adapter) {
-              let state = this.adapter._getState()
-              if (!state.notes[mappedId]) {
-                this.vault.appliedNoteKeys.delete(compositeKey)
-                this._debug(`sel note ${compositeKey.slice(0, 8)}: local note ${mappedId} deleted, allowing re-apply`)
-              } else {
+
+          // UUID scan: find local note by embedded UUID
+          let localSelNoteId = this._findLocalNoteByUUID(compositeKey)
+          if (localSelNoteId) {
+            let state = this.adapter ? this.adapter._getState() : null
+            let localNote = state && state.notes[localSelNoteId]
+            if (localNote) {
+              let localText = localNote.text || ''
+              let remoteText = note.text || ''
+              if (localText.includes(remoteText) && remoteText.length > 0 &&
+                  !localText.includes('[retracted')) {
+                this.vault.appliedNoteKeys.add(compositeKey)
                 continue
               }
-            } else {
-              continue
             }
           }
 
@@ -630,34 +761,55 @@ module.exports = {
         for (let [compositeKey, note] of selTombstones) {
           if (note.author === userId) continue
           if (this.vault.dismissedKeys.has(compositeKey)) continue
-          let existingLocalId = this.vault.getLocalNoteId(compositeKey)
+          if (this.vault.retractedNoteKeys.has(compositeKey)) continue
+
+          let existingLocalId = this._findLocalNoteByUUID(compositeKey)
+          if (!existingLocalId) existingLocalId = this.vault.getLocalNoteId(compositeKey)
           if (!existingLocalId) continue
+
+          if (this.adapter) {
+            let state = this.adapter._getState()
+            if (!state.notes[existingLocalId]) {
+              this.vault.retractedNoteKeys.add(compositeKey)
+              this.vault.markDirty()
+              this._debug(`sel note ${compositeKey.slice(0, 8)}: local note ${existingLocalId} already deleted, marking retracted`)
+              continue
+            }
+          }
 
           let authorLabel = escapeHtml(note.author || 'unknown')
           let contentHtml = note.html
             ? sanitizeHtml(note.html)
             : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
-          let retractedHtml = `<blockquote><p><em>troparcel: ${authorLabel} [retracted]</em></p></blockquote>${this._applyStrikethrough(contentHtml)}`
+          let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${compositeKey} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
 
           try {
             let retracted = false
             if (this.adapter) {
               let result = await this.adapter.updateNote(existingLocalId, { html: retractedHtml })
               if (result && (result.id || result['@id'])) {
-                this.vault.mapAppliedNote(compositeKey, result.id || result['@id'])
+                let newId = result.id || result['@id']
+                if (String(newId) !== String(existingLocalId)) {
+                  let state = this.adapter._getState()
+                  if (state.notes[existingLocalId]) {
+                    try { await this.adapter.deleteNote(existingLocalId) } catch {}
+                  }
+                }
+                this.vault.mapAppliedNote(compositeKey, newId)
                 retracted = true
               }
             } else {
               this._debug(`sel note retraction skipped (no adapter) for ${compositeKey.slice(0, 8)}`)
-              this.vault.appliedNoteKeys.add(compositeKey)
+              this.vault.retractedNoteKeys.add(compositeKey)
             }
             if (retracted) {
-              this.vault.appliedNoteKeys.add(compositeKey)
+              this.vault.retractedNoteKeys.add(compositeKey)
+              this.vault.markDirty()
               if (this._applyStats) this._applyStats.notesRetracted++
               this._debug(`sel note retracted: ${compositeKey.slice(0, 8)} by ${note.author}`)
             }
           } catch (err) {
-            this.logger.warn(`Failed to retract sel note ${compositeKey.slice(0, 8)}`, { error: String(err.message || err) })
+            this.logger.warn({ error: String(err.message || err) }, `Failed to retract sel note ${compositeKey.slice(0, 8)}`)
           }
         }
       }
@@ -704,7 +856,15 @@ module.exports = {
             if (localText === (value.text || '')) continue
             // Logic-based: skip if we have a local edit
             let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
-            if (this.vault.hasLocalEdit(itemIdentity, `selmeta:${selUUID}:${prop}`, valueHash)) continue
+            if (this.vault.hasLocalEdit(itemIdentity, `selmeta:${selUUID}:${prop}`, valueHash)) {
+              this._logConflict('sel-meta-apply', itemIdentity, `selmeta:${selUUID}:${prop}`, {
+                localValue: localText?.slice(0, 50),
+                remoteValue: (value.text || '').slice(0, 50),
+                remoteAuthor: value.author,
+                resolution: 'local-wins'
+              })
+              continue
+            }
           }
 
           batch[prop] = { text: value.text, type: value.type }
@@ -716,7 +876,7 @@ module.exports = {
             await this.api.saveMetadata(localSelId, batch)
             if (this._applyStats) this._applyStats.metadataUpdated += selBatchKeys.length
           } catch (err) {
-            this.logger.warn(`Failed to save selection metadata`, { error: err.message })
+            this.logger.warn({ error: err.message }, `Failed to save selection metadata`)
           }
         }
       }
@@ -769,7 +929,7 @@ module.exports = {
           try { originalTx = await this.api.getTranscription(existingLocalId) } catch {}
 
           try { await this.api.deleteTranscription(existingLocalId) } catch (delErr) {
-            this.logger.warn(`Failed to delete transcription ${existingLocalId}`, { error: String(delErr.message || delErr) })
+            this.logger.warn({ error: String(delErr.message || delErr) }, `Failed to delete transcription ${existingLocalId}`)
           }
           let created = await this.api.createTranscription({
             text: tx.text,
@@ -793,12 +953,12 @@ module.exports = {
                 this.vault.mapAppliedTranscription(txKey, restored.id || restored['@id'])
               }
             } catch (restoreErr) {
-              this.logger.warn(`Transcription restore also failed for ${txKey.slice(0, 8)}`, { error: String(restoreErr.message || restoreErr) })
+              this.logger.warn({ error: String(restoreErr.message || restoreErr) }, `Transcription restore also failed for ${txKey.slice(0, 8)}`)
             }
           }
           continue
         } catch (err) {
-          this.logger.warn(`Failed to update transcription ${txKey.slice(0, 8)}`, { error: String(err.message || err) })
+          this.logger.warn({ error: String(err.message || err) }, `Failed to update transcription ${txKey.slice(0, 8)}`)
         }
       }
 
@@ -816,9 +976,9 @@ module.exports = {
           this._debug(`transcription created: ${txKey.slice(0, 8)} by ${tx.author}`)
         }
       } catch (err) {
-        this.logger.warn(`Failed to create transcription`, {
+        this.logger.warn({
           error: err.message
-        })
+        }, `Failed to create transcription`)
       }
     }
   },
@@ -857,7 +1017,7 @@ module.exports = {
           if (this._applyStats) this._applyStats.listsAdded++
           this._debug(`list add: item ${localId} → "${listName}"`)
         } catch (err) {
-          this.logger.warn(`Failed to add item ${localId} to list "${listName}"`, { error: err.message })
+          this.logger.warn({ error: err.message }, `Failed to add item ${localId} to list "${listName}"`)
         }
       }
     }
@@ -879,7 +1039,7 @@ module.exports = {
               await this.api.removeItemsFromList(localList.id, [localId])
             }
           } catch (err) {
-            this.logger.warn(`Failed to remove item ${localId} from list "${listName}"`, { error: err.message })
+            this.logger.warn({ error: err.message }, `Failed to remove item ${localId} from list "${listName}"`)
           }
         }
       }

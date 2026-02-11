@@ -207,11 +207,11 @@ class TroparcelPlugin {
         `(${store ? 'store' : 'API'} mode, sync: ${this.options.syncMode})`)
     } catch (err) {
       let msg = err.message || String(err)
-      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
+      let isConnError = msg.includes('timeout') || msg.includes('ECONNREFUSED')
+      if (isConnError) {
         this.context.logger.warn(
           `Troparcel: could not reach server at ${this.options.serverUrl} — ` +
-          'is the Troparcel server running? ' +
-          'Start it with: node server/index.js')
+          'will retry with exponential backoff')
       } else {
         this.context.logger.warn(
           `Troparcel: sync failed to start — ${msg}. ` +
@@ -219,11 +219,47 @@ class TroparcelPlugin {
       }
       await this.engine.stop()
       this.engine = null
+
+      // Retry connection with exponential backoff for connection-related errors
+      if (isConnError && !this._retryTimer) {
+        let delay = 5000 // start at 5s
+        let maxDelay = 5 * 60 * 1000 // cap at 5 min
+        let scheduleRetry = () => {
+          this._retryTimer = setTimeout(async () => {
+            this._retryTimer = null
+            if (this.engine || this._unloading) return
+            try {
+              this.engine = new SyncEngine(this.options, this.context.logger, store)
+              await this.engine.start()
+              this.context.logger.info(
+                `Troparcel: connected to room "${this.options.room}" (after retry)`)
+            } catch {
+              if (this.engine) {
+                try { await this.engine.stop() } catch {}
+                this.engine = null
+              }
+              delay = Math.min(delay * 2, maxDelay)
+              this.context.logger.info(
+                `Troparcel: server still unreachable, next retry in ${Math.round(delay / 1000)}s`)
+              scheduleRetry()
+            }
+          }, delay)
+        }
+        scheduleRetry()
+      }
     }
   }
 
   /**
    * Export hook — share selected items to the collaboration room.
+   *
+   * Offline / sneakernet exchange:
+   * Troparcel requires a running server for sync. For truly offline exchange
+   * (no shared server), copy the server's data/ directory (LevelDB) to the
+   * other machine and start a local server there. Both instances will then
+   * have identical CRDT state and can diverge independently until reconnected.
+   * There is no file-based CRDT export/import from the plugin itself because
+   * Tropy's export hook only provides JSON-LD item data, not arbitrary file I/O.
    */
   async export(data) {
     if (this._isPrefsWindow()) return
@@ -321,6 +357,7 @@ class TroparcelPlugin {
       if (engine.localIndex.size === 0) {
         if (engine.adapter) {
           let items = engine.readAllItemsFull()
+            .filter(item => (item.photo || []).some(p => p.checksum))
           engine.localIndex = identity.buildIdentityIndex(items)
         } else {
           let localItems = await engine.api.getItems()
@@ -375,7 +412,12 @@ class TroparcelPlugin {
   }
 
   async unload() {
+    this._unloading = true
     this.context.logger.info('Troparcel unloading')
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer)
+      this._retryTimer = null
+    }
     if (this.engine) {
       await this.engine.stop()
       this.engine = null

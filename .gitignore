@@ -8,3 +8,5 @@ troparcel.zip
 package-lock.json
 .claude/
 .DS_Store
+.fuse_hidden*
+.npmrc

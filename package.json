@@ -47,7 +47,7 @@
     },
     {
       "field": "roomToken",
-      "label": "Room Token — shared secret, all collaborators must match",
+      "label": "Room Password — all collaborators must match",
       "type": "string",
       "default": "",
       "placeholder": "optional shared secret",
@@ -70,7 +70,7 @@
     },
     {
       "field": "syncMetadata",
-      "label": "Sync Metadata",
+      "label": "Sync item Metadata",
       "type": "boolean",
       "default": true,
       "hint": "Sync item metadata (title, date, description, custom fields) between collaborators."
@@ -112,14 +112,14 @@
     },
     {
       "field": "syncLists",
-      "label": "Sync List Membership",
+      "label": "Sync Lists",
       "type": "boolean",
       "default": false,
       "hint": "Add/remove items from lists based on other users' changes. Lists are matched by name."
     },
     {
       "field": "syncDeletions",
-      "label": "Propagate Deletions",
+      "label": "Sync your Deletions to other Collaborators as Retractions",
       "type": "boolean",
       "default": false,
       "hint": "Send your deletions (tags, notes, selections, etc.) to other collaborators. When off, deletions stay local only."
@@ -196,14 +196,14 @@
     },
     {
       "field": "tombstoneFloodThreshold",
-      "label": "[Advanced] Tombstone Flood Threshold 0-1",
+      "label": "[Advanced] Retractions Flood Threshold 0-1",
       "type": "number",
       "default": 0.5,
       "hint": "Warn if more than this fraction of an item's data is tombstoned in one sync."
     },
     {
       "field": "clearTombstones",
-      "label": "[Advanced] Clear Tombstones — purge on next restart, then disable this",
+      "label": "[Advanced] Clear Retractions — purge on next restart, then disable this",
       "type": "boolean",
       "default": false,
       "hint": "One-shot: purges all deletion markers from the CRDT on next startup. Remember to disable this afterward."

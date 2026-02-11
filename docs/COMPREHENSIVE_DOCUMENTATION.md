@@ -1,11 +1,12 @@
-# Troparcel — Comprehensive Documentation
+# Troparcel v5.0 — Comprehensive Documentation
 
 ## Overview
 
 Troparcel is a collaboration plugin for [Tropy](https://tropy.org) that enables real-time syncing of annotations, notes, tags, metadata, selections, transcriptions, and list memberships between Tropy instances. Items are matched across instances by photo checksum — each researcher keeps their own photos locally while sharing interpretations through a lightweight WebSocket relay.
 
-**Version:** 4.11
+**Version:** 5.0.0
 **Architecture:** Store-First (Redux store reads/writes with HTTP API fallback)
+**CRDT Schema:** v4 (UUID keys, YKeyValue metadata, awareness protocol, logic-based conflicts)
 **Sync Protocol:** Yjs CRDTs over WebSocket
 **License:** AGPL-3.0
 
@@ -14,16 +15,16 @@ Troparcel is a collaboration plugin for [Tropy](https://tropy.org) that enables 
 ## Quick Start
 
 ### Prerequisites
-- Tropy (latest or stable)
+- Tropy (latest or stable, version 1.15+)
 - Node.js >= 20 (for running the server)
 
 ### 1. Install the Server
 
 ```bash
-cd troparcel/
-npm install        # installs server dependencies (LevelDB, y-websocket)
-node server/index.js
-# → Troparcel server v3.1 listening on 0.0.0.0:2468
+cd troparcel/server
+npm install
+node index.js
+# -> Troparcel server listening on 0.0.0.0:2468
 ```
 
 ### 2. Install the Plugin
@@ -37,7 +38,7 @@ node server/index.js
 
 ### 3. Configure
 
-Essential settings (all text fields — hints are not visible for text inputs, so read the labels carefully):
+Essential settings:
 
 | Setting | What to enter |
 |---------|--------------|
@@ -47,7 +48,7 @@ Essential settings (all text fields — hints are not visible for text inputs, s
 | **Room Token** | Optional shared secret for authentication |
 | **Sync Mode** | `auto` (default), `review`, `push`, or `pull` |
 
-Toggle settings (hints ARE visible for these):
+Toggle settings:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
@@ -58,10 +59,8 @@ Toggle settings (hints ARE visible for these):
 | **Sync Selections** | On | Photo region selections |
 | **Sync Transcriptions** | On | Transcription text |
 | **Sync Photo Adjustments** | Off | Brightness, contrast, etc. |
-| **Sync Lists** | Off | List membership (matched by name) |
+| **Sync Lists** | Off | List membership |
 | **Propagate Deletions** | Off | Send deletions to others |
-
-Settings prefixed with **[Advanced]** are for tuning and troubleshooting — most users never need to change them.
 
 ### 4. Sync
 
@@ -73,17 +72,19 @@ Settings prefixed with **[Advanced]** are for tuning and troubleshooting — mos
 
 ## Architecture
 
-### Store-First Design (v4.0+)
+### Store-First Design
 
 Troparcel reads from and writes to Tropy's Redux store directly:
 
 ```
-Local Tropy ←→ Redux Store ←→ StoreAdapter ←→ SyncEngine ←→ Yjs CRDT ←→ WebSocket ←→ Server
+Local Tropy <-> Redux Store <-> StoreAdapter <-> SyncEngine <-> Yjs CRDT <-> WebSocket <-> Server
 ```
 
 - **Reads:** `store.getState()` for items, photos, selections, notes, metadata, tags, lists
 - **Writes:** `store.dispatch()` for selection.create, note.create/delete, list.item.add/remove
 - **HTTP API fallback:** Used for metadata save, tag operations, transcription create, and when the store is unavailable (temp engines in export/import hooks)
+
+The StoreAdapter validates the expected Redux state shape on construction. If slices are missing (incompatible Tropy version), a warning is logged and the engine falls back to the HTTP API.
 
 ### File Structure
 
@@ -91,21 +92,21 @@ Local Tropy ←→ Redux Store ←→ StoreAdapter ←→ SyncEngine ←→ Yjs 
 troparcel/
 ├── src/
 │   ├── plugin.js          # Entry point, hooks, lifecycle, store detection
-│   ├── sync-engine.js     # Core: constructor, lifecycle, orchestration (~1400 lines)
-│   ├── push.js            # Mixin: local → CRDT writes (~870 lines)
-│   ├── apply.js           # Mixin: CRDT → local writes (~850 lines)
-│   ├── enrich.js          # Mixin: HTTP API item enrichment (~215 lines)
+│   ├── sync-engine.js     # Core: constructor, lifecycle, orchestration
+│   ├── push.js            # Mixin: local -> CRDT writes
+│   ├── apply.js           # Mixin: CRDT -> local writes
+│   ├── enrich.js          # Mixin: HTTP API item enrichment
 │   ├── store-adapter.js   # Redux store abstraction (reads, writes, subscribe)
-│   ├── crdt-schema.js     # v3 Yjs document structure (all Y.Map, tombstones)
+│   ├── crdt-schema.js     # v4 Yjs document structure (UUIDs, YKeyValue, awareness)
 │   ├── api-client.js      # Tropy HTTP API client (fallback)
-│   ├── identity.js        # Item/selection/note/transcription key computation
-│   ├── vault.js           # SyncVault state tracker + persistence (~390 lines)
+│   ├── identity.js        # Item identity hashing + UUID generators
+│   ├── vault.js           # SyncVault v4: logic-based conflicts, UUID mappings
 │   ├── backup.js          # Pre-apply snapshots, validation, rollback
 │   └── sanitize.js        # HTML sanitizer for remote note content
 ├── server/
 │   └── index.js           # Collaboration server (Yjs + LevelDB + monitoring)
-├── docs/                  # Documentation
 ├── test/                  # Test suite
+├── docs/                  # Documentation
 ├── esbuild.config.mjs     # Build configuration
 ├── package.json           # Plugin manifest with options schema
 └── index.js               # Built bundle (output of esbuild)
@@ -123,21 +124,42 @@ Object.assign(SyncEngine.prototype, require('./enrich'))
 
 Each mixin exports a plain object of methods. All `this` references resolve to the SyncEngine instance at call time.
 
-### CRDT Schema (v3)
+### CRDT Schema (v4)
 
-All per-item collections are Yjs Y.Maps (not Y.Arrays), keyed by stable identity hashes:
+Schema v4 uses UUID keys for all sub-resources and YKeyValue for metadata:
 
-- Items keyed by photo checksum identity
-- Notes, selections, tags, transcriptions keyed by FNV-1a hashes
-- Tombstone support: `{ deleted: true, author, ts }`
-- Note keys change on content edit (content-addressed): `fnv1a("note:{parent}:{prefix}:{fullHash}")`
+```
+Y.Doc
+├── Y.Map "annotations"              keyed by item identity hash
+│   └── Y.Map per item
+│       ├── Y.Array "metadata"       YKeyValue: per-property with GC
+│       ├── Y.Map "tags"             keyed by lowercase tag name
+│       ├── Y.Map "notes"            keyed by n_UUID
+│       ├── Y.Map "photos"           keyed by checksum -> nested metadata
+│       ├── Y.Map "selections"       keyed by s_UUID
+│       ├── Y.Array "selectionMeta"  YKeyValue: per-property per selection
+│       ├── Y.Map "selectionNotes"   keyed by n_UUID
+│       ├── Y.Map "transcriptions"   keyed by t_UUID
+│       ├── Y.Map "lists"            keyed by l_UUID with name field
+│       ├── Y.Map "uuids"           UUID registry
+│       └── Y.Map "aliases"         identity redirect map
+├── Y.Map "room"                    {schemaVersion: 4}
+└── Awareness protocol              ephemeral presence (NOT persisted)
+```
+
+**Key design choices:**
+- **UUIDs** allow in-place updates (no delete+recreate for note edits)
+- **YKeyValue** for metadata eliminates Y.Map history bloat — document size depends on current map size, not historical operations
+- **Awareness protocol** for presence is ephemeral and not persisted, eliminating the heartbeat-induced document bloat of the v3 `users` Y.Map
+- **pushSeq** is a monotonic per-author counter for diagnostic ordering — NOT used for conflict resolution
 
 ### Item Matching
 
-Items are matched across instances by **photo checksum** — not by local database IDs. This means:
+Items are matched across instances by **photo checksum** (SHA-256 of the image file):
 - Each researcher imports their own photos independently
 - Items with the same photos are automatically linked
-- Fuzzy matching: CRDT checksums must be a SUBSET of local photos, with >= 50% coverage
+- Fuzzy matching: CRDT checksums must overlap local photos with Jaccard similarity >= 50%
+- Items without photos return null identity and are skipped
 
 ---
 
@@ -154,40 +176,48 @@ Items are matched across instances by **photo checksum** — not by local databa
 
 ## Conflict Resolution
 
-Troparcel uses a **"preserve data" strategy** — when in doubt, it keeps data rather than discarding it.
+Troparcel uses a **logic-based conflict resolution** strategy — when in doubt, it keeps data rather than discarding it.
 
-### Metadata Conflicts
-- Each metadata field carries a timestamp
-- **Push side:** only pushes if local value differs and remote author's `ts` is not newer than `lastPushTs` (LWW+AO)
-- **Apply side:** skips remote values where `ts < lastPushTs` (remote is older than last sync, protects local edits)
-- **New fields:** Remote fields with no local equivalent are always accepted
-- **Empty fields:** Empty metadata values are pushed to propagate field clears
+### Push Side
 
-### Note Conflicts
-- Notes use content-addressed keys — the key changes when content changes
-- This means edits create new keys rather than overwriting existing ones
-- Both versions coexist in the CRDT until tombstone cleanup
-- Duplicate detection: exact HTML match prevents duplicates during apply
-- For note updates: old note is deleted and new one created (avoids ProseMirror state complexity)
+For each field being pushed, the vault tracks what was last pushed:
 
-### Tag Conflicts
-- Tag resurrection: uses `>=` (not `>`) in timestamp guard — if a tag was removed and re-added at the same time, the add wins
-- Tags are matched by name across instances
+```js
+if (vault.hasLocalEdit(itemIdentity, fieldKey)) {
+  // Local value differs from last push -> push it
+} else {
+  // No local change since last push -> skip
+}
+```
 
-### Selection Conflicts
-- Selections are matched by identity hash (photo + coordinates)
-- Coordinates validated before creation (width/height must be positive finite)
+This replaces the v3 wall-clock timestamp comparison (`ts > lastPushTs`), eliminating clock-skew sensitivity.
+
+### Apply Side
+
+- **Metadata**: Skips fields where `vault.hasLocalEdit()` returns true; logs conflict with resolution `local-wins`
+- **Notes**: Checks `vault.hasLocalNoteEdit(noteKey, currentLocalHtml)` before overwriting — prevents silent loss of user edits to synced notes
+- **Tags**: Case-insensitive matching (keys normalized to lowercase); add-wins semantics
+- **Selections**: UUID-based matching with fingerprint dedup
+
+### Per-Data-Type Summary
+
+| Data type | Strategy | Concurrent edits |
+|-----------|----------|-----------------|
+| Metadata | Per-property logic-based | Different fields merge cleanly; same field: local-wins if locally edited |
+| Tags | Add-wins OR-Set (case-insensitive) | Add + remove: add wins; tags normalized to lowercase |
+| Notes | Logic-based per note (UUID-keyed) | Both users' notes kept; same note: local-wins if locally edited |
+| Selections | Logic-based (UUID-keyed) | Fingerprint dedup on apply; local-wins if locally edited |
+| Transcriptions | Logic-based (UUID-keyed) | Content conflicts: local-wins if locally edited |
+| Lists | Add-wins set (UUID-keyed) | Add + remove: add wins; matched by name with UUID identifiers |
 
 ### Tombstones and Deletions
+
 - Deletions only propagate when **Propagate Deletions** is enabled
 - When disabled, deletions are local-only
-- Tombstones accumulate over time — use **[Advanced] Clear Tombstones** to purge
+- Tombstones carry `deletedAt: Date.now()` for time-based GC
+- Server purges tombstones older than 30 days during periodic compaction
+- Clients offline longer than 30 days may resurrect deleted items
 - Flood threshold warns if too many tombstones appear in a single sync cycle
-
-### Timestamp Asymmetry (Intentional)
-- Push uses `>` (strict) for content, `>=` for tombstones
-- Apply uses `<` (strict) for content, `<=` for tombstones
-- This asymmetry biases toward preserving data — in edge cases, both sides keep their version
 
 ---
 
@@ -217,6 +247,8 @@ PORT=2468 AUTH_TOKENS=myroom:mysecret node server/index.js
 | `MONITOR_ORIGIN` | (none) | Allowed CORS origin for monitor API |
 | `MAX_ACTIVITY_LOG` | 200 | Ring buffer size for activity events |
 | `MIN_TOKEN_LENGTH` | 16 | Minimum token length for security |
+| `COMPACTION_HOURS` | 6 | Hours between LevelDB compaction passes |
+| `TOMBSTONE_MAX_DAYS` | 30 | Days before tombstones are purged |
 
 ### Monitoring
 
@@ -228,11 +260,17 @@ PORT=2468 AUTH_TOKENS=myroom:mysecret node server/index.js
 - **Live events (SSE):** `http://localhost:2468/api/rooms/<name>/events`
 - **Server status:** `http://localhost:2468/api/status`
 
-### Persistence
+### Persistence and Compaction
 
-CRDT state is persisted to LevelDB in the `./data/` directory. This means:
+CRDT state is persisted to LevelDB in the `./data/` directory:
 - Room state survives server restarts
-- When upgrading from CRDT schema v2 to v3, clear the `./data/` directory
+- Every `COMPACTION_HOURS` (default 6), the server re-encodes CRDT documents to reclaim space
+- During compaction, tombstones older than `TOMBSTONE_MAX_DAYS` (default 30) are purged
+- When upgrading from CRDT schema v3 to v4, clear the `./data/` directory and vault files
+
+### TLS
+
+The server does not provide TLS. For remote collaboration, deploy behind a reverse proxy (nginx/Caddy) with HTTPS/WSS. Without TLS, room tokens are sent in cleartext.
 
 ---
 
@@ -264,8 +302,8 @@ CRDT state is persisted to LevelDB in the `./data/` directory. This means:
 3. In plugin settings, enter the same token in **Room Token**
 
 ### Notes appear duplicated
-**Cause:** Note content changed on both sides simultaneously.
-**Fix:** This is expected — content-addressed note keys create new entries on edit. Delete the unwanted duplicate. Enable **Propagate Deletions** if you want the deletion to sync.
+**Cause:** Deduplication didn't match (different formatting or whitespace).
+**Fix:** This is rare in v5.0 with UUID keying. Delete the unwanted duplicate. Enable **Propagate Deletions** if you want the deletion to sync.
 
 ### "SQLITE_BUSY" errors in console
 **Cause:** Too many write operations hitting Tropy's database simultaneously.
@@ -305,7 +343,7 @@ If you don't see these, sync isn't running.
 
 1. **Startup sequence:**
    ```
-   Troparcel v4.11 — server: ws://localhost:2468, mode: auto, user: alice
+   Troparcel v5.0 — server: ws://localhost:2468, mode: auto, user: alice
    Troparcel: auto-sync enabled, waiting for project to load...
    Troparcel: store + project available after 1200ms
    [troparcel] connected to ws://localhost:2468
@@ -318,7 +356,12 @@ If you don't see these, sync isn't running.
    [troparcel] applied: 3 notes created, 2 tags added, 1 metadata fields across 4/42 items
    ```
 
-3. **Connection issues:**
+3. **Conflict logging (new in v5.0):**
+   ```
+   [troparcel] conflict (metadata-apply): field dc:title on item abc123 — local-wins (local: "My Title...", remote: "Their Ti..." by bob)
+   ```
+
+4. **Connection issues:**
    ```
    [troparcel] connection error: ... — check that the Troparcel server is running
    [troparcel] disconnected from server, reconnecting...
@@ -331,64 +374,12 @@ If you don't see these, sync isn't running.
 node --test test/index.test.js
 ```
 
-### Manual Testing Workflow
-
-1. Start the server: `node server/index.js`
-2. Open two Tropy instances with the same project (or projects sharing the same photos)
-3. Enable Troparcel on both with the same room name
-4. Make changes in one instance — observe them appearing in the other
-5. Check the server monitor at `http://localhost:2468/monitor` to verify both peers are connected
-
 ### Building
 
 ```bash
-node esbuild.config.mjs          # one-shot build → index.js
+node esbuild.config.mjs          # one-shot build -> index.js
 node esbuild.config.mjs --watch  # watch mode (source maps enabled)
 ```
-
-The built `index.js` bundle should be copied to your Tropy plugins directory.
-
----
-
-## Contributing
-
-### Code Organization
-
-- **sync-engine.js** — Don't put new methods here. Use the mixin pattern:
-  - Push-related methods → `push.js`
-  - Apply-related methods → `apply.js`
-  - HTTP enrichment methods → `enrich.js`
-- **store-adapter.js** — All Redux store reads/writes. Add new store interactions here.
-- **crdt-schema.js** — CRDT document structure. Changes here are breaking (clear LevelDB data).
-- **identity.js** — Key computation. Changes here are breaking (existing keys won't match).
-
-### Key Patterns
-
-- **ProseMirror live objects:** Always call `.toJSON()` before processing doc/nodes from Redux state
-- **Suppress feedback loops:** Use `adapter.suppressChanges()` / `adapter.resumeChanges()` around dispatches
-- **Async mutex:** All sync operations go through `_acquireLock()` to prevent concurrent access
-- **Tombstone guards:** Any code that creates tombstones (Y.Map.delete) must check `syncDeletions` option
-
-### Adding a New Sync Category
-
-1. Add a push method in `push.js` (local → CRDT)
-2. Add an apply method in `apply.js` (CRDT → local)
-3. Add a section in `crdt-schema.js` (CRDT structure)
-4. Add an option guard (boolean toggle in package.json)
-5. Add the option to `mergeOptions()` in plugin.js
-6. Guard both push and apply sides with the new option
-
-### Version Bumping
-
-Update version strings in:
-- `package.json` (`version` field)
-- `plugin.js` (startup log message)
-
-### Commit Conventions
-
-- Bug fixes: `fix: description`
-- Features: `feat: description`
-- Breaking CRDT changes: note in commit message that LevelDB data must be cleared
 
 ---
 
@@ -411,12 +402,12 @@ Update version strings in:
 | `autoSync` | boolean | true | Start syncing when Tropy opens |
 | `syncMode` | string | `auto` | auto / review / push / pull |
 | `syncMetadata` | boolean | true | Sync item metadata fields |
-| `syncTags` | boolean | true | Sync tag assignments |
+| `syncTags` | boolean | true | Sync tag assignments (case-insensitive matching) |
 | `syncNotes` | boolean | true | Sync notes/annotations |
 | `syncSelections` | boolean | true | Sync photo region selections |
 | `syncTranscriptions` | boolean | true | Sync transcription text |
 | `syncPhotoAdjustments` | boolean | false | Sync brightness, contrast, etc. |
-| `syncLists` | boolean | false | Sync list membership |
+| `syncLists` | boolean | false | Sync list membership (matched by name) |
 | `syncDeletions` | boolean | false | Propagate deletions to others |
 
 ### Advanced Timing
@@ -434,6 +425,7 @@ Update version strings in:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `maxBackups` | number | 10 | Max backup snapshots per room |
+| `maxBackupSize` | number | 10485760 | Max bytes per backup snapshot (10MB) |
 | `maxNoteSize` | number | 1048576 | Max bytes for remote notes (1MB) |
 | `maxMetadataSize` | number | 65536 | Max bytes for remote metadata (64KB) |
 | `tombstoneFloodThreshold` | number | 0.5 | Warn if > this fraction is tombstoned |
@@ -448,7 +440,7 @@ Troparcel operates within Tropy's plugin system, which imposes certain limitatio
 
 - **No custom UI:** Plugins cannot add panels, status bars, notifications, or toolbar buttons
 - **Configuration only via Preferences:** All settings must be defined as `options` in package.json
-- **Option types:** Only string, number, boolean, template, property, and save-file are available — no dropdowns with custom choices, no conditional visibility, no grouping
+- **Option types:** Only string, number, boolean, template, property, and save-file are available
 - **Hints only on checkboxes:** Text/number field hints are not displayed in the plugin manager
 - **Hooks:** Only export, import, extract, and transcribe — no project-open, project-close, or ready events
 - **No progress indicators:** Plugins cannot show progress bars or status messages in the UI
@@ -459,5 +451,13 @@ These constraints explain why Troparcel uses labels as the primary information c
 
 ---
 
-*Last Updated: 2026-02-09*
-*Troparcel v4.11 on Tropy 1.17.3+*
+## Offline / Sneakernet Exchange
+
+Troparcel requires a running server for sync. For truly offline exchange (no shared server), copy the server's `data/` directory (LevelDB) to the other machine and start a local server there. Both instances will then have identical CRDT state and can diverge independently until reconnected.
+
+There is no file-based CRDT export/import from the plugin itself because Tropy's export hook only provides JSON-LD item data, not arbitrary file I/O.
+
+---
+
+*Last Updated: 2026-02-11*
+*Troparcel v5.0.0 on Tropy 1.17.3+*

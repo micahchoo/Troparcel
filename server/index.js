@@ -434,7 +434,12 @@ async function handleHttp(req, res) {
     let roomName = sanitizeRoomName(decodeURIComponent(compactMatch[1]))
     try {
       let result = await compactAndPurge(roomName)
-      jsonReply(res, { status: 'compacted', room: roomName, purged: result.purged })
+      jsonReply(res, {
+        status: 'compacted', room: roomName,
+        purged: result.purged,
+        uuidsPurged: result.uuidsPurged,
+        aliasesPurged: result.aliasesPurged
+      })
     } catch (e) {
       res.writeHead(500)
       jsonReply(res, { error: 'Compaction failed', message: e.message })
@@ -736,6 +741,8 @@ async function compactAndPurge(docName, maxAgeMs) {
   let doc = await ldb.getYDoc(docName)
   let annotations = doc.getMap('annotations')
   let purged = 0
+  let uuidsPurged = 0
+  let aliasesPurged = 0
   let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
 
   doc.transact(() => {
@@ -754,13 +761,75 @@ async function compactAndPurge(docName, maxAgeMs) {
           purged++
         }
       }
+
+      // Prune orphaned UUID registry entries
+      let uuids = itemMap.get('uuids')
+      if (uuids && typeof uuids.forEach === 'function') {
+        let liveUUIDs = new Set()
+
+        let notes = itemMap.get('notes')
+        if (notes && typeof notes.forEach === 'function') {
+          notes.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let selections = itemMap.get('selections')
+        if (selections && typeof selections.forEach === 'function') {
+          selections.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let selectionNotes = itemMap.get('selectionNotes')
+        if (selectionNotes && typeof selectionNotes.forEach === 'function') {
+          selectionNotes.forEach((_, k) => {
+            let sep = k.indexOf(':')
+            if (sep > 0) {
+              liveUUIDs.add(k.slice(0, sep))
+              liveUUIDs.add(k.slice(sep + 1))
+            }
+          })
+        }
+
+        let transcriptions = itemMap.get('transcriptions')
+        if (transcriptions && typeof transcriptions.forEach === 'function') {
+          transcriptions.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let lists = itemMap.get('lists')
+        if (lists && typeof lists.forEach === 'function') {
+          lists.forEach((_, k) => liveUUIDs.add(k))
+        }
+
+        let orphaned = []
+        uuids.forEach((_, k) => {
+          if (!liveUUIDs.has(k)) orphaned.push(k)
+        })
+        for (let k of orphaned) {
+          uuids.delete(k)
+          uuidsPurged++
+        }
+      }
+
+      // Purge expired aliases
+      let aliases = itemMap.get('aliases')
+      if (aliases && typeof aliases.forEach === 'function') {
+        let toDelete = []
+        aliases.forEach((value, key) => {
+          let createdAt = (value && typeof value === 'object') ? value.createdAt : 0
+          if (!createdAt || createdAt < cutoff) {
+            toDelete.push(key)
+          }
+        })
+        for (let key of toDelete) {
+          aliases.delete(key)
+          aliasesPurged++
+        }
+      }
     })
   })
 
   // Flush compacted state (merges all incremental updates into one)
   await ldb.flushDocument(docName)
 
-  return { purged, docName }
+  return { purged, uuidsPurged, aliasesPurged, docName }
 }
 
 async function runCompaction() {
@@ -770,10 +839,14 @@ async function runCompaction() {
     for (let name of docNames) {
       try {
         let result = await compactAndPurge(name)
-        if (result.purged > 0) {
-          console.log(`[compaction] Room "${name}": purged ${result.purged} tombstone(s)`)
+        let parts = []
+        if (result.purged > 0) parts.push(`${result.purged} tombstone(s)`)
+        if (result.uuidsPurged > 0) parts.push(`${result.uuidsPurged} orphaned UUID(s)`)
+        if (result.aliasesPurged > 0) parts.push(`${result.aliasesPurged} expired alias(es)`)
+        if (parts.length > 0) {
+          console.log(`[compaction] Room "${name}": purged ${parts.join(', ')}`)
         } else {
-          console.log(`[compaction] Room "${name}": compacted (no tombstones to purge)`)
+          console.log(`[compaction] Room "${name}": compacted (nothing to purge)`)
         }
       } catch (e) {
         console.error(`[compaction] Failed for "${name}":`, e.message)
@@ -803,8 +876,17 @@ server.listen(PORT, HOST, () => {
   }
   if (MONITOR_TOKEN) {
     console.log(`  Monitor:   protected by MONITOR_TOKEN`)
+  } else {
+    console.log(`  Monitor:   WARNING — MONITOR_TOKEN not set, monitor endpoints are open`)
   }
   console.log(`  Compact:   every ${COMPACTION_HOURS}h, tombstones older than ${TOMBSTONE_MAX_DAYS}d`)
+  console.log(`  ⚠ Tombstone retention: deletions older than ${TOMBSTONE_MAX_DAYS}d are purged.`)
+  console.log(`    Clients offline longer than ${TOMBSTONE_MAX_DAYS}d may resurrect deleted items.`)
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    console.log(`  ⚠ TLS: This server does not provide TLS. For remote collaboration,`)
+    console.log(`    deploy behind a reverse proxy (nginx/caddy) with HTTPS/WSS.`)
+    console.log(`    Without TLS, room tokens are sent in cleartext.`)
+  }
 
   // Start periodic compaction
   let compactionIntervalMs = COMPACTION_HOURS * 60 * 60 * 1000

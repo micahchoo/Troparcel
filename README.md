@@ -41,6 +41,8 @@ For the Tropy HTTP API reference used internally, see [docs/API.md](docs/API.md)
 For the non-technical setup guide, see [docs/SETUP.md](docs/SETUP.md).
 For the group collaboration guide, see [docs/GUIDE.md](docs/GUIDE.md).
 For comprehensive technical documentation, see [docs/COMPREHENSIVE_DOCUMENTATION.md](docs/COMPREHENSIVE_DOCUMENTATION.md).
+For contributors and developers, see the [Developer's Guide](docs/DEVELOPER.md).
+For the version history and migration notes, see [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 ## Quick start
 
@@ -194,12 +196,12 @@ Troparcel uses [Yjs](https://docs.yjs.dev/) CRDTs for automatic conflict resolut
 
 | Data type | Strategy | Concurrent edits |
 |-----------|----------|-----------------|
-| Metadata | Per-property last-writer-wins | Different fields merge cleanly; same field: latest timestamp wins |
-| Tags | Add-wins OR-Set | Add + remove at the same time: add wins |
-| Notes | Last-writer-wins per note | Both users' distinct notes are kept; same note: latest wins |
-| Selections | Last-writer-wins per region | Position conflicts: latest wins |
-| Transcriptions | Last-writer-wins | Content conflicts: latest wins |
-| Lists | Add-wins set | Add + remove: add wins |
+| Metadata | Per-property logic-based | Different fields merge cleanly; same field: local-wins if locally edited since last sync |
+| Tags | Add-wins OR-Set (case-insensitive) | Add + remove at the same time: add wins; tags normalized to lowercase keys |
+| Notes | Logic-based per note (UUID-keyed) | Both users' distinct notes are kept; same note: local-wins if locally edited |
+| Selections | Logic-based per region (UUID-keyed) | Fingerprint dedup on apply; local-wins if locally edited |
+| Transcriptions | Logic-based (UUID-keyed) | Content conflicts: local-wins if locally edited |
+| Lists | Add-wins set (UUID-keyed) | Add + remove: add wins; lists matched by name with UUID identifiers |
 
 Deletions use **tombstones** — a deleted tag or note is marked as removed rather than erased, so it won't be re-created by a lagging peer.
 
@@ -226,9 +228,9 @@ troparcel/
 │   ├── enrich.js          Mixin: HTTP API item enrichment, fallback mode
 │   ├── store-adapter.js   Redux store abstraction (reads, writes, subscribe)
 │   ├── api-client.js      HTTP client for Tropy's local API (fallback)
-│   ├── crdt-schema.js     Yjs document structure (v3 — all Y.Map, tombstones)
-│   ├── identity.js        Item/selection/note/transcription key computation
-│   ├── vault.js           SyncVault state tracker + persistence
+│   ├── crdt-schema.js     Yjs document structure (v4 — UUIDs, YKeyValue, awareness)
+│   ├── identity.js        Item identity hashing + UUID generators + selection fingerprinting
+│   ├── vault.js           SyncVault v4: logic-based conflicts, UUID mappings, persistence
 │   ├── backup.js          Pre-apply snapshots, validation, rollback
 │   └── sanitize.js        HTML sanitizer for remote note content
 ├── server/
@@ -240,6 +242,8 @@ troparcel/
 │   ├── API.md             Tropy HTTP API reference
 │   ├── SETUP.md           Setup guide for 3 network scenarios
 │   ├── GUIDE.md           Group collaboration guide
+│   ├── DEVELOPER.md       Developer's guide (architecture, contributing)
+│   ├── CHANGELOG.md       Version history and migration notes
 │   └── COMPREHENSIVE_DOCUMENTATION.md  Full technical documentation
 ├── docker-compose.yml     One-click server deployment
 ├── esbuild.config.mjs     Plugin bundler config
@@ -254,9 +258,9 @@ troparcel/
 
 **sync-engine.js** — Core sync engine: constructor, lifecycle management, orchestration, and utilities. Coordinates push/apply cycles, manages the sync lock, and integrates backup and vault systems.
 
-**push.js** — Mixin for local-to-CRDT writes. Pushes metadata, tags, notes, selections, transcriptions, lists, and deletions into the Yjs document with LWW+AO conflict resolution.
+**push.js** — Mixin for local-to-CRDT writes. Pushes metadata, tags, notes, selections, transcriptions, lists, and deletions into the Yjs document with UUID keying and logic-based conflict resolution (`vault.hasLocalEdit()`).
 
-**apply.js** — Mixin for CRDT-to-local writes. Applies remote annotations to the local Tropy project via store dispatch, with deduplication, validation, and feedback loop prevention.
+**apply.js** — Mixin for CRDT-to-local writes. Applies remote annotations to the local Tropy project via store dispatch, with UUID matching, fingerprint dedup, note conflict detection, apply-side conflict logging, and feedback loop prevention.
 
 **enrich.js** — Mixin for HTTP API item enrichment. Used as a fallback when the Redux store is unavailable (e.g. temporary engines during export/import).
 
@@ -264,11 +268,11 @@ troparcel/
 
 **api-client.js** — HTTP client wrapping Tropy's localhost REST API. Used for metadata save, tag operations, and transcription create where store dispatch is unavailable. See **[docs/API.md](docs/API.md)** for the endpoint reference.
 
-**crdt-schema.js** — Defines the Yjs document structure. All per-item collections use `Y.Map` for proper update/delete support via tombstones. Nine sections per item: metadata, tags, notes, photos, selections, selectionMeta, selectionNotes, transcriptions, lists.
+**crdt-schema.js** — Defines the Yjs CRDT document structure (schema v4). Uses UUID keys for notes, selections, transcriptions, and lists. Metadata stored via YKeyValue (GC-friendly). Awareness protocol for presence. Twelve sections per item: metadata, tags, notes, photos, selections, selectionMeta, selectionNotes, transcriptions, lists, uuids, aliases.
 
-**identity.js** — Computes stable identity hashes for items using photo SHA-256 checksums. Also computes stable keys for selections (by photo checksum + coordinates), notes (by content hash + parent via FNV-1a), and transcriptions (by photo + index).
+**identity.js** — Computes stable identity hashes for items using photo SHA-256 checksums. Generates UUIDs (`n_`, `s_`, `t_`, `l_` prefixes) for sub-resources. Computes selection fingerprints for apply-side dedup.
 
-**vault.js** — SyncVault state tracker with disk persistence. Maintains stable key mappings (local ID to CRDT key), tracks applied note keys to prevent ghost notes, and manages content hashing for change detection.
+**vault.js** — SyncVault v4 state tracker with disk persistence. Logic-based conflict resolution via `hasLocalEdit()` / `markFieldPushed()`. UUID-to-local-ID mappings for notes, selections, transcriptions, lists. Tracks applied note content hashes to detect local edits before overwriting. Ghost note prevention. LRU eviction at 50K entries.
 
 **backup.js** — Saves JSON snapshots before applying remote changes. Validates inbound data (size guards, tombstone flood protection). Provides rollback by replaying snapshots.
 
@@ -286,7 +290,10 @@ troparcel/
 | `AUTH_TOKENS` | Comma-separated `room:token` pairs | *(empty = open)* |
 | `MAX_ROOMS` | Maximum concurrent rooms | `100` |
 | `MAX_CONNS_PER_IP` | Maximum connections per IP | `10` |
+| `MONITOR_TOKEN` | Auth token for monitoring endpoints | *(none = open)* |
 | `MONITOR_ORIGIN` | Allowed CORS origin for monitor API | *(none)* |
+| `COMPACTION_HOURS` | Hours between LevelDB compaction passes | `6` |
+| `TOMBSTONE_MAX_DAYS` | Days before tombstones are purged | `30` |
 
 ### API endpoints
 
@@ -296,7 +303,7 @@ troparcel/
 | `GET /api/status` | Server stats (uptime, rooms, connections) |
 | `GET /api/rooms` | List active rooms |
 | `GET /api/rooms/:name` | Room details + connected users |
-| `POST /api/rooms/:name/purge-users` | Remove stale user entries |
+| `POST /api/rooms/:name/purge-users` | Remove stale user entries (requires MONITOR_TOKEN if set) |
 | `GET /monitor` | Web dashboard |
 
 ### Authentication

@@ -5,10 +5,10 @@ This guide is for **coordinators** (instructors, team leads) and **contributors*
 Troparcel synchronizes annotations — notes, tags, metadata, selections, transcriptions, and list memberships — between Tropy projects. It does **not** sync photos. Each person keeps their own copy of the photos on their own computer, and Troparcel matches items across projects by comparing file fingerprints (checksums). When someone adds a note or tag, everyone else in the room receives it.
 
 **Prerequisites:**
-- [Tropy](https://tropy.org) version 1.15 or later installed on every participant's computer
+- [Tropy](https://tropy.org) version 1.15 or later (1.17.3+ recommended) installed on every participant's computer
 - The same set of photos imported into each person's Tropy project (identical files — see Section 5)
 - One person (the coordinator) to run the Troparcel server
-- [Node.js](https://nodejs.org) version 18 or later on the coordinator's machine
+- [Node.js](https://nodejs.org) version 20 or later on the coordinator's machine
 
 For server setup and network configuration, see [SETUP.md](SETUP.md). This guide focuses on **group workflows, safety, and coordination** rather than technical installation steps.
 
@@ -48,7 +48,7 @@ These terms appear throughout the guide. You don't need to memorize them — ref
 | **Validation** | Remote data is checked against size limits and sanitized for security before being applied to your project. |
 | **Content deduplication** | If a note with the same text already exists locally, Troparcel skips creating a duplicate. |
 | **Tombstone** | A deletion marker. When someone deletes an annotation and deletions are being propagated, a marker records what was deleted and by whom. |
-| **Last-Writer-Wins (LWW)** | When two people edit the same metadata field at the same time, the most recent edit wins. The other person's edit is preserved in their local project — it just doesn't overwrite the newer one. |
+| **Logic-based conflicts** | When two people edit the same metadata field, the local edit wins if you've changed it since the last sync. The other person's edit is preserved in their local project — it just doesn't overwrite yours. |
 | **syncDeletions** | A setting that controls whether deletions propagate to other people. Off by default — if you delete something, it only disappears from your project. |
 
 ### How sync modes work in practice
@@ -148,9 +148,9 @@ If the shared state on the server somehow becomes corrupted, the coordinator can
 
 These are situations where human coordination is needed — no software can fully solve them:
 
-- **Two people editing the same metadata field at the same time.** The most recent edit wins. The other person's edit stays in their local project but does not overwrite the newer value. To avoid this, agree on who edits which fields (see Section 10).
+- **Two people editing the same metadata field at the same time.** The local edit wins on each side — each person keeps their own version. To avoid divergence, agree on who edits which fields (see Section 10).
 
-- **Clock skew.** Troparcel uses timestamps to decide which edit is newer. If your computer's clock is wrong, your timestamps are wrong, and you might "win" or "lose" edit conflicts incorrectly. Keep your computer's clock synchronized (most operating systems do this automatically).
+- **Clock skew.** Troparcel v5.0 uses logic-based conflict resolution (not timestamps), so clock skew is no longer a major concern. However, tombstone GC uses wall-clock `deletedAt` timestamps, so keep your system clock reasonably accurate.
 
 - **Identical User IDs.** If two people use the same name in the "Your Name" field, their annotations overwrite each other without warning. Every person must have a unique User ID.
 
@@ -463,7 +463,7 @@ Close and reopen Tropy. The plugin activates on startup.
 1. Open the developer console: **Help > Toggle Developer Tools** or **View > Toggle Developer Tools**
 2. Look for messages like:
    ```
-   Troparcel v4.11 — server: ws://..., mode: auto, user: your-name
+   Troparcel v5.0 — server: ws://..., mode: auto, user: your-name
    Troparcel: connected to room "..." (store mode, sync: auto)
    ```
 3. If the coordinator gave you a monitor dashboard URL, open it in your browser and check that your connection appears
@@ -563,7 +563,7 @@ Here's how each annotation type behaves during collaboration:
 - If you want to respond to someone's note, write a new note rather than editing theirs
 
 **Tags:**
-- Tags are matched by exact name across projects
+- Tags are matched by name across projects (case-insensitive — "Important" and "important" are treated as the same tag)
 - If two people both add the tag "Important" to the same item, it counts as one tag (deduplicated)
 - If one person adds a tag and another removes it (with `syncDeletions` on), the add wins — data is preserved
 - Agree on tag names before starting to avoid duplicates like "Important" vs "important"
@@ -571,8 +571,8 @@ Here's how each annotation type behaves during collaboration:
 **Metadata:**
 - Metadata syncs per-field (title, date, description, etc.)
 - Different people can fill in different fields on the same item without conflict
-- If two people edit the **same** field on the same item, the most recent edit wins (Last-Writer-Wins)
-- The "losing" edit stays in that person's local project — it's not deleted, just not pushed to the shared state
+- If two people edit the **same** field on the same item, each person's local edit is preserved locally (logic-based conflict resolution)
+- The conflict is logged in the developer console so you can coordinate who keeps which version
 
 **Selections (photo regions):**
 - Selections are matched by position on the photo
@@ -653,7 +653,7 @@ Each person's notes are attributed with their name. If you need to respond to so
 
 **Rule 3: Agree on tag names before starting.**
 
-Create a shared vocabulary list. "Important" and "important" are different tags. "Damaged" and "damage" are different tags. Inconsistent names create duplicates instead of shared tags.
+Create a shared vocabulary list. Tags are case-insensitive ("Important" and "important" are the same tag), but "Damaged" and "damage" are different tags. Inconsistent naming creates duplicates.
 
 **Rule 4: Never rename, re-export, or edit the original photo files.**
 
@@ -667,9 +667,9 @@ Unless the coordinator explicitly enables it for a specific cleanup task, leave 
 
 Two people with the same name in the "Your Name" field overwrite each other's work without warning. Use distinct names (e.g. first name + last initial).
 
-**Rule 7: Keep your computer's clock accurate.**
+**Rule 7: Keep your computer's clock reasonably accurate.**
 
-Sync uses timestamps to resolve ties when two people edit the same field. A wrong clock means wrong timestamps. Most operating systems sync the clock automatically — just don't manually set it to the wrong time.
+While v5.0 uses logic-based conflict resolution (not timestamps), tombstone cleanup still depends on wall-clock time. Most operating systems sync the clock automatically.
 
 **Rule 8: Close Tropy before moving or renaming the project file.**
 
@@ -689,9 +689,9 @@ Changing the room name disconnects you from the group. Changing the sync mode ch
 
 | Rule broken | What happens | How to recover |
 |------------|-------------|----------------|
-| Same metadata field edited by two people | Most recent edit wins, other is preserved locally only | The "losing" editor re-enters their value if needed, or the team discusses which value to keep |
+| Same metadata field edited by two people | Each person's local edit is preserved; conflict logged in console | Team discusses which value to keep; one person re-enters the agreed value |
 | Editing someone else's note | Their note is overwritten locally, but the original exists in the shared state | Pull from shared state (File > Import) to restore the original |
-| Inconsistent tag names | Duplicate tags appear (e.g. both "Important" and "important") | Agree on one name, everyone removes the wrong variant, coordinator cleans up shared state if needed |
+| Inconsistent tag names | Similar but not identical tags appear (e.g. "Damaged" and "damage") | Agree on one name, everyone removes the wrong variant. Note: "Important" and "important" are now the same tag (case-insensitive in v5.0) |
 | Modified photo file | Item shows 0 matching shared items, annotations don't sync | Re-copy photo from coordinator's original source, re-import into Tropy |
 | syncDeletions accidentally enabled + mass delete | Deletion markers propagate to shared state | Coordinator restores from automatic backups in `~/.troparcel/backups/` (Section 12) |
 | Duplicate User IDs | Both people's annotations are attributed to the same author, overwriting each other | One person changes their User ID to something unique, restarts Tropy |

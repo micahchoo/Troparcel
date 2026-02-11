@@ -14,6 +14,7 @@ const os = require('os')
 
 const DEFAULT_OPTIONS = {
   maxBackups: 10,
+  maxBackupSize: 10 * 1024 * 1024,    // 10 MB per snapshot
   maxNoteSize: 1 * 1024 * 1024,       // 1 MB
   maxMetadataSize: 64 * 1024,          // 64 KB
   tombstoneFloodThreshold: 0.5         // 50%
@@ -64,7 +65,17 @@ class BackupManager {
       items: itemSnapshots
     }
 
-    await fs.promises.writeFile(filepath, JSON.stringify(data))
+    let json = JSON.stringify(data)
+
+    if (json.length > this.options.maxBackupSize) {
+      this.logger.warn(
+        `Backup skipped: snapshot size ${json.length} bytes exceeds limit ` +
+        `(${this.options.maxBackupSize} bytes) for ${itemSnapshots.length} item(s)`
+      )
+      return null
+    }
+
+    await fs.promises.writeFile(filepath, json)
     this.logger.info(`Backup saved: ${filepath}`, { items: itemSnapshots.length })
 
     await this.pruneOldBackups()
@@ -239,7 +250,9 @@ class BackupManager {
       }
     }
 
-    if (totalEntries > 0 && (tombstoned / totalEntries) > this.options.tombstoneFloodThreshold) {
+    // Require at least 20 entries before the ratio check — deleting 3 of 5
+    // tags is normal exploratory cleanup, not a flood.
+    if (totalEntries >= 20 && (tombstoned / totalEntries) > this.options.tombstoneFloodThreshold) {
       this.logger.info(
         `Tombstone ratio for ${itemIdentity.slice(0, 8)}: ${tombstoned}/${totalEntries} ` +
         `(${Math.round(tombstoned / totalEntries * 100)}%) — not blocking`

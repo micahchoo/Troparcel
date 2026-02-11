@@ -1,4 +1,4 @@
-# Troparcel v4.0 — Conflict Resolution Strategy
+# Troparcel v5.0 — Conflict Resolution Strategy
 
 This document describes how Troparcel resolves conflicts when multiple
 collaborators edit the same Tropy project concurrently. It covers the
@@ -20,11 +20,11 @@ mirrors the shared state on a collaboration server (LevelDB-persisted).
   (Y.Doc)          │  (LevelDB)   │          (Y.Doc)
                     └──────────────┘
 
-  Push: local Redux → CRDT (Y.Map writes within Y.Doc.transact)
-  Apply: CRDT → local Redux (store.dispatch or HTTP API)
+  Push: local Redux -> CRDT (Y.Map writes within Y.Doc.transact)
+  Apply: CRDT -> local Redux (store.dispatch or HTTP API)
 ```
 
-**v4.0 Store-First:** When Tropy's Redux store is available (normal
+**v5.0 Store-First:** When Tropy's Redux store is available (normal
 background sync), all reads come from `store.getState()` and writes use
 `store.dispatch()`. Falls back to the HTTP API for temporary engines
 created during export/import hooks.
@@ -34,22 +34,28 @@ created during export/import hooks.
 ## General Principles
 
 1. **No data loss** — when in doubt, keep both versions.
-2. **Last-Writer-Wins with Author Override (LWW+AO)** — for scalar values
-   (metadata fields, note content, selection coordinates), a local push
-   is **skipped** if a different author wrote a newer value since the last
-   sync. This is stricter than pure LWW: your local value is preserved in
-   Tropy but not pushed to the CRDT, preventing silent overwrites.
+2. **Logic-Based Conflict Resolution** — for scalar values
+   (metadata fields, note content, selection coordinates), the vault tracks
+   what was last pushed per field. A push is **skipped** if the local value
+   hasn't changed since the last push. On the apply side, a remote value
+   is **skipped** if the local value has been edited since the last apply.
+   This eliminates clock-skew sensitivity entirely.
 3. **Add-Wins** — for set-like data (tags, list membership), a concurrent
    add and remove resolves to *present*. Explicit tombstones are required
    for deletion, and a subsequent add clears the tombstone.
 4. **Per-Property Merge** — metadata is stored per property URI. Two users
    editing *different* properties merge cleanly with no conflict.
-5. **Tombstones** — deletions are recorded as `{ deleted: true, author, ts }`
+5. **Tombstones** — deletions are recorded as `{ deletedAt: Date.now() }`
    rather than removing the CRDT entry. This prevents deleted items from
-   being re-created by a lagging peer.
+   being re-created by a lagging peer. Tombstones are GC'd after 30 days
+   by the server's periodic compaction.
 6. **Content-Based Deduplication** — when applying remote notes, existing
    local notes are checked by text/HTML content to prevent creating
    duplicates of notes that already exist locally.
+7. **UUID Keying** — notes, selections, transcriptions, and lists use
+   stable UUID keys (`n_`, `s_`, `t_`, `l_` + randomUUID). This allows
+   in-place updates without the delete+recreate pattern of v3's
+   content-addressed keys.
 
 ---
 
@@ -64,104 +70,126 @@ machines.
 | Method | Input | Output |
 |--------|-------|--------|
 | **Primary** | SHA-256 of sorted photo checksums joined by `:` | 32-char hex hash |
-| **Fallback** | SHA-256 of `template|title|date` | 32-char hex hash |
-| **No data** | — | `null` (item skipped) |
+| **No photos** | — | `null` (item skipped) |
 
 Photo checksums are SHA-256 hashes of the original image files — they
 remain constant regardless of where the project lives. When an item has
 multiple photos, the checksums are sorted before hashing to ensure
 order-independence.
 
-### Selection Key
+Items without any photos return `null` identity and are unsyncable. This
+is logged at info level to help users diagnose matching issues.
 
-Selections are identified by their parent photo's checksum combined with
-rounded integer coordinates, using a fast FNV-1a hash (not cryptographic):
+### Fuzzy Matching
 
-```
-FNV-1a("sel:{photoChecksum}:{round(x)}:{round(y)}:{round(w)}:{round(h)}")
-  → 24-char hex key
-```
+CRDT items may have different photo sets than local items (photos added or
+removed). Troparcel uses Jaccard similarity: the intersection of CRDT and
+local checksums divided by the union must be >= 0.5 (50%). This handles
+the common case of adding or removing a photo from a multi-photo item.
 
-### Note Key
+### Sub-Resource Keys (v4 Schema)
 
-Notes are identified by content hash and parent association, using FNV-1a:
+All sub-resources use **stable UUID keys** generated on first push:
 
-```
-FNV-1a("note:{parent}:{first 200 chars of content}:{fullHash}")
-  → 24-char hex key
-```
+| Entity | Key Format | Example |
+|--------|-----------|---------|
+| Note | `n_` + crypto.randomUUID() | `n_a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
+| Selection | `s_` + crypto.randomUUID() | `s_f0e1d2c3-b4a5-6789-0abc-def123456789` |
+| Transcription | `t_` + crypto.randomUUID() | `t_12345678-90ab-cdef-1234-567890abcdef` |
+| List | `l_` + crypto.randomUUID() | `l_abcdef12-3456-7890-abcd-ef1234567890` |
+| Tag | Lowercase tag name (not UUID) | `important` |
 
-The `parent` is the photo checksum (or selection/photo ID for local notes).
-The `fullHash` is an 8-char FNV-1a of the full content when it exceeds
-200 characters, preventing collisions between notes that share the same
-opening but differ afterward.
+UUID-to-local-ID mappings are persisted in the vault. The vault tries its
+local mapping first, then scans the CRDT for existing entries, and only
+generates a new UUID if the entity is truly new.
+
+### Selection Fingerprinting
+
+Since UUID keys carry no positional information, the apply side uses
+`computeSelectionFingerprint()` to generate a position-based hash for
+dedup. This prevents creating a duplicate local selection when the CRDT
+already has one at the same coordinates.
+
+### Alias Map
+
+When items are re-imported (e.g., photos re-added to a project), the
+identity hash may change. The CRDT's `aliases` map stores
+`{ oldIdentity -> newIdentity }` redirects so that annotations on the old
+identity are found and matched to the new item. Aliases are GC'd during
+tombstone purge.
 
 ### Stable Key Mapping (Vault)
 
-Local note IDs change when notes are edited (delete + recreate). The
-`SyncVault` maintains a persistent mapping from local IDs to their
-original CRDT keys:
+The `SyncVault` maintains persistent mappings:
 
-- **First push:** `localNoteId → contentKey` mapping is stored
-- **Subsequent pushes:** The vault returns the original key, even if
-  content has changed, preventing duplicate entries
-- **Apply:** When a remote note is applied locally, the vault maps
-  `crdtKey → localNoteId` for future updates
+- **Notes:** `localNoteId <-> crdtKey (n_UUID)`
+- **Selections:** `localSelectionId <-> crdtKey (s_UUID)`
+- **Transcriptions:** `localTranscriptionId <-> crdtKey (t_UUID)`
+- **Lists:** `localListId <-> crdtKey (l_UUID)`
+- **Applied note keys:** Set of CRDT keys already applied locally
+- **Failed note keys:** Keys that failed 3+ create attempts (permanent skip)
+- **Applied note hashes:** Content hash of last-applied note content per key
+- **Dismissed keys:** User-dismissed remote deletions
 
-The same mechanism applies to transcriptions.
-
-### Transcription Key
-
-```
-FNV-1a("tx:{photoChecksum}:{index}") → 24-char hex key
-FNV-1a("tx:{photoChecksum}:{selKey}:{index}") → for selection transcriptions
-```
-
-### List Matching
-
-Lists are matched by **name**, not by local ID. A list named "Research"
-on Machine A matches a list named "Research" on Machine B, even if their
-internal IDs differ. The `_listNameCache` is refreshed at the start of
-each sync cycle.
+All maps are capped at 50,000 entries with LRU eviction of the oldest 20%.
 
 ---
 
-## LWW+AO Conflict Resolution — How It Works
+## Logic-Based Conflict Resolution — How It Works
 
-The core conflict resolution runs during the **push phase** (local →
+### Push Side
+
+The core conflict resolution runs during the **push phase** (local ->
 CRDT). For each field, the engine checks:
 
 ```javascript
-let current = existingCRDTValue
-if (current) {
-  if (current.text === localText) continue           // 1. No change
-  if (current.author !== userId                      // 2. Different author
-      && current.ts > lastPushTs) continue           // 3. Wrote after our last sync
+if (vault.hasLocalEdit(itemIdentity, fieldKey)) {
+  // Local value differs from what we last pushed -> push it
+  schema.set(...)
+  vault.markFieldPushed(itemIdentity, fieldKey, valueHash)
+} else {
+  // Local value is unchanged since last push -> skip
 }
-schema.set(...)  // Push our value
 ```
 
-**`lastPushTs`** is `this.lastSync.getTime()` — the timestamp of the
-last successful sync cycle on this client.
+**`hasLocalEdit()`** compares the current local value's hash against what
+was recorded when we last pushed this field. If they differ, the user has
+edited the field locally and we should push it. If they match, nothing
+changed and we skip to avoid unnecessary CRDT writes.
 
-This means:
-- If the remote value was written by **you** (same `userId`), your new
-  local value always overwrites it.
-- If the remote value was written by **someone else** and is **newer**
-  than your last sync, your local value is kept in Tropy but not pushed.
-- If the remote value is **older** than your last sync, your local value
-  overwrites it (you saw their version and chose to change it).
+This replaces the v3 wall-clock timestamp comparison
+(`current.ts > lastPushTs`), which was vulnerable to clock skew.
+
+### Apply Side
+
+The apply side has two layers of conflict detection:
+
+**1. Metadata fields:** Before overwriting a local field with a remote
+value, `vault.hasLocalEdit()` is checked. If the user has locally edited
+the field since the last sync, the remote value is skipped and a conflict
+is logged:
+
+```
+[troparcel] conflict (metadata-apply): field dc:title on item abc123
+  — local-wins (local: "My Title...", remote: "Their Ti..." by bob)
+```
+
+**2. Notes:** Before overwriting a synced note with a remote update,
+`vault.hasLocalNoteEdit(noteKey, currentLocalHtml)` is checked. This
+compares the current local note content against what was last applied. If
+they differ, the user has edited the note and the remote update is
+skipped.
 
 ### Conflict Scenarios
 
-| Scenario | Alice's action | Bob's action | Result in CRDT |
-|----------|---------------|--------------|----------------|
+| Scenario | Alice's action | Bob's action | Result |
+|----------|---------------|--------------|--------|
 | Different properties | Sets `dc:title` | Sets `dc:date` | Both merge cleanly |
-| Same property, Alice first | Sets `dc:title = "A"` | Sets `dc:title = "B"` (later) | Bob's value wins (newer `ts`) |
-| Same property, offline | Alice edits offline, Bob edits live | Alice comes online | Alice's push is skipped (Bob's `ts` > Alice's `lastPushTs`); Alice keeps her local value |
+| Same property, no local edit | Both at defaults | Bob sets `dc:title = "B"` | Bob's value applied on Alice's side |
+| Same property, local edit | Alice edits `dc:title` locally | Bob pushes `dc:title = "B"` | Alice keeps local edit (local-wins), conflict logged |
 | Tag add vs remove | Adds tag "Important" | Removes tag "Important" | Tag is present (add-wins) |
-| Both create notes | Creates note on photo | Creates different note on same photo | Both notes kept (different content keys) |
-| Same note edited | Edits note text | Edits same note text | Vault maps to same key; newer `ts` wins |
+| Both create notes | Creates note on photo | Creates different note on same photo | Both notes kept (different UUIDs) |
+| Same note edited | Edits synced note locally | Pushes update to same note | Local edit preserved (local-wins), conflict logged |
 
 ---
 
@@ -171,11 +199,11 @@ This means:
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by property URI within item's `metadata` section |
+| CRDT type | YKeyValue (Y.Array) keyed by property URI within item's `metadata` section |
 | Granularity | Per-property (each URI is independent) |
-| Strategy | LWW+AO per property |
-| Concurrent edits | Different properties merge cleanly; same property → newer author's `ts` wins |
-| CRDT entry | `{ text, type, language, author, ts }` |
+| Strategy | Logic-based per property (`vault.hasLocalEdit()`) |
+| Concurrent edits | Different properties merge cleanly; same property: local-wins if locally edited |
+| CRDT entry | `{ text, type, language, author, pushSeq }` |
 | Deletion | Setting `text` to empty string; properties with no text are skipped during push |
 | Toggles | Controlled by `syncMetadata` option (default: `true`) |
 
@@ -183,10 +211,9 @@ This means:
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` per photo (keyed by checksum), nested `metadata` sub-map |
+| CRDT type | Y.Map per photo (keyed by checksum), nested `metadata` sub-map |
 | Granularity | Per-property per photo |
-| Strategy | LWW+AO per property |
-| Concurrent edits | Same as item metadata |
+| Strategy | Logic-based per property |
 | Photo adjustments | Brightness, contrast, saturation, angle, mirror, negative |
 | Toggles | Only synced when `syncPhotoAdjustments` is `true` (default: `false`) |
 
@@ -194,52 +221,48 @@ This means:
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by `{selKey}:{propUri}` |
+| CRDT type | YKeyValue (Y.Array) keyed by `{selUUID}:{propUri}` |
 | Granularity | Per-property per selection |
-| Strategy | LWW+AO per property |
-| Concurrent edits | Same as item metadata |
+| Strategy | Logic-based per property |
 
 ### Tags
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by tag name within item's `tags` section |
-| Strategy | Add-wins OR-Set with tombstones |
-| CRDT entry | `{ name, color, author, ts }` or `{ ..., deleted: true }` |
+| CRDT type | Y.Map keyed by **lowercase** tag name within item's `tags` section |
+| Strategy | Add-wins OR-Set with tombstones; case-insensitive matching |
+| CRDT entry | `{ name (display case), color, author, pushSeq }` or `{ ..., deletedAt }` |
+| Case normalization | CRDT keys are lowercase; display name preserved in `name` field |
 | Add + remove concurrent | Add wins — tombstone is cleared unconditionally |
-| Color update | LWW+AO — local color change skipped if remote author set it more recently |
-| Re-tagging | Adding a tag with `deleted: true` clears the tombstone unless the tombstone author is a different peer with a newer timestamp (`ts >= lastPushTs`) |
+| Color update | Logic-based — local color change skipped if no local edit since last push |
 | Toggles | Controlled by `syncTags` option (default: `true`) |
 
 ### Notes (Photo and Selection)
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by stable note key (24-char hex hash) |
-| Strategy | LWW+AO per note; content-based dedup on apply |
-| CRDT entry | `{ noteKey, text, html, language, photo, selection, author, ts }` |
-| Content conflict | Local push skipped if remote author wrote after `lastPushTs` |
-| Two independent creates | Both kept (different content keys produce different map entries) |
-| Update | Same note key → overwrites previous content in CRDT |
+| CRDT type | Y.Map keyed by `n_UUID` |
+| Strategy | Logic-based per note; content-based dedup on apply; note edit detection |
+| CRDT entry | `{ noteKey, text, html, language, photo, selection, author, pushSeq }` |
+| Push conflict | Skipped if no local edit since last push |
+| Apply conflict | Before overwriting, checks `vault.hasLocalNoteEdit()` — preserves local edits |
+| Two independent creates | Both kept (different UUIDs) |
+| Update | In-place update via UUID key (no delete+recreate needed in v4) |
 | Apply dedup | Before creating a remote note locally, checks if text/HTML already exists |
-| Apply attribution | Remote notes are prefixed with `troparcel: author` in a blockquote with italics |
-| Deletion | Tombstone `{ deleted: true, author, ts }` via `pushDeletions` |
-| Re-creation after delete | New add clears tombstone |
-| Update mechanism | Delete old note + create new (avoids ProseMirror state complexity) |
+| Apply attribution | Remote notes are prefixed with `troparcel: author` in a `<sub>` tag |
+| Deletion | Tombstone `{ deletedAt }` via `pushDeletions` |
 | Toggles | Controlled by `syncNotes` option (default: `true`) |
 
 ### Selections
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by `FNV-1a(sel:{checksum}:{x}:{y}:{w}:{h})` |
-| Strategy | LWW+AO per selection; coordinate validation on apply |
-| CRDT entry | `{ selKey, x, y, w, h, angle, photo, author, ts }` |
-| Position conflict | Local push skipped if remote author wrote after `lastPushTs` |
+| CRDT type | Y.Map keyed by `s_UUID` |
+| Strategy | Logic-based per selection; fingerprint dedup on apply |
+| CRDT entry | `{ selKey, x, y, w, h, angle, photo, author, pushSeq }` |
+| Position conflict | Skipped if no local edit since last push |
 | Coordinate validation | `w > 0`, `h > 0`, all values `Number.isFinite()` — invalid selections rejected |
-| Deletion | Tombstone |
-| Overlapping regions | Treated as distinct selections (different rounded coordinates = different keys) |
-| Apply dedup | Checks if local selection with same key already exists before creating |
+| Fingerprint dedup | `computeSelectionFingerprint()` prevents creating duplicate local selections at the same position |
 | Uses `??` not `||` | Zero is valid for `x`, `y`, and `angle` |
 | Toggles | Controlled by `syncSelections` option (default: `true`) |
 
@@ -247,23 +270,21 @@ This means:
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by `FNV-1a(tx:{checksum}:{idx})` |
-| Strategy | LWW+AO per transcription; stable vault mapping |
-| CRDT entry | `{ txKey, text, data, photo, selection, author, ts }` |
-| Content conflict | Local push skipped if remote author wrote after `lastPushTs` |
-| Deletion | Tombstone |
-| Update mechanism | Delete old transcription + create new (HTTP API has no PUT route) |
+| CRDT type | Y.Map keyed by `t_UUID` |
+| Strategy | Logic-based per transcription; stable vault mapping |
+| CRDT entry | `{ txKey, text, data, photo, selection, author, pushSeq }` |
+| Push conflict | Skipped if no local edit since last push |
 | Toggles | Controlled by `syncTranscriptions` option (default: `true`) |
 
 ### Lists (Membership)
 
 | Aspect | Detail |
 |--------|--------|
-| CRDT type | `Y.Map` keyed by list name (cross-instance matching) |
+| CRDT type | Y.Map keyed by `l_UUID` with `name` field |
 | Strategy | Add-wins set with tombstones |
-| CRDT entry | `{ name, member: true/false, author, ts, deleted? }` |
+| CRDT entry | `{ name, member: true/false, author, pushSeq, deletedAt? }` |
 | Add + remove concurrent | Add wins (same as tags) |
-| Name matching | Lists matched by name, not by local ID |
+| Name matching | Lists matched by name across instances (stored in `name` field) |
 | Missing list | If list name doesn't exist locally, apply silently skips |
 | Toggles | Only when `syncLists` option is `true` (default: `false`) |
 
@@ -287,14 +308,16 @@ syncOnce()
   │   │   └── Apply: metadata, tags, notes, photo metadata,
   │   │           selections, selection notes, selection metadata,
   │   │           transcriptions, lists
+  │   │       (with conflict logging on skip)
   │   └── resumeChanges() + replay queued local changes
   │
-  ├── 5. PUSH LOCAL → CRDT
+  ├── 5. PUSH LOCAL -> CRDT
   │   ├── For each local item (skipped if vault hash unchanged):
   │   │   ├── Y.Doc.transact() with LOCAL_ORIGIN marker
   │   │   ├── Push: metadata, tags, notes, photo metadata,
   │   │   │        selections, transcriptions, lists, deletions
-  │   │   └── LWW+AO check on each field before writing
+  │   │   │   (with vault.hasLocalEdit() check per field)
+  │   │   └── vault.markFieldPushed() for each pushed field
   │   └── Mark items as pushed in vault
   │
   └── 6. Update CRDT hash, prune vault, set lastSync
@@ -349,6 +372,7 @@ Before applying remote changes, five layers of validation run:
 | Selection note HTML + text | 1 MB (`maxNoteSize`) | Per selection note |
 | Transcription text + data JSON | 1 MB (`maxNoteSize`) | Per transcription |
 | Metadata value text | 64 KB (`maxMetadataSize`) | Per property |
+| Backup snapshot size | 10 MB (`maxBackupSize`) | Per snapshot |
 
 **Behavior:** If any entry exceeds its limit, the **entire item** is
 blocked from apply (not partial). Validation warnings are logged.
@@ -378,8 +402,10 @@ state machine parser before being applied:
   (e.g. `&#x6A;avascript:`)
 - **Allowed tags:** `<p>`, `<br>`, `<em>`, `<i>`, `<strong>`, `<b>`,
   `<u>`, `<s>`, `<a>`, `<ul>`, `<ol>`, `<li>`, `<blockquote>`, `<hr>`,
-  `<h1>`–`<h6>`, `<code>`, `<pre>`, `<sup>`, `<sub>`, `<span>`, `<div>`
-- **Allowed attributes:** `href` (on `<a>`, validated), `title` (on `<a>`), `class` (global), `style` (global, with strict CSS allowlist: only `text-decoration` and `text-align` with known values)
+  `<h1>`-`<h6>`, `<code>`, `<pre>`, `<sup>`, `<sub>`, `<span>`, `<div>`
+- **Allowed attributes:** `href` (on `<a>`, validated), `title` (on `<a>`),
+  `class` (global), `style` (global, with strict CSS allowlist: only
+  `text-decoration` and `text-align` with known values)
 
 ### Layer 4: Coordinate Validation
 
@@ -406,6 +432,7 @@ If any check passes, the note is skipped rather than duplicated.
 - A JSON snapshot of affected items is saved before every apply cycle
 - Snapshots are only written when the `SyncVault.shouldBackup()` content
   hash indicates the data has actually changed
+- Snapshots exceeding `maxBackupSize` (default 10MB) are skipped with a warning
 - Stored at `~/.troparcel/backups/{sanitized-room}/{timestamp}-{counter}.json`
 - Counter prevents collisions when multiple apply cycles happen within
   the same millisecond
@@ -432,9 +459,6 @@ Manual rollback via `engine.rollback(backupPath)`:
 5. Selection coordinate restoration is not supported (logged as warning)
 6. Returns `{ restored: count, errors: [...] }`
 
-Rollback uses the HTTP API for metadata and tags, and the store adapter
-for note updates when available.
-
 ---
 
 ## Sync Modes
@@ -448,114 +472,37 @@ for note updates when available.
 
 ---
 
-## Granular Sync Toggles
-
-Each data type can be independently enabled or disabled:
-
-| Toggle | Default | Controls |
-|--------|---------|----------|
-| `syncMetadata` | `true` | Item metadata (selection metadata is guarded by `syncSelections`/`syncPhotoAdjustments`) |
-| `syncTags` | `true` | Tag assignments |
-| `syncNotes` | `true` | Photo and selection notes |
-| `syncSelections` | `true` | Photo region selections |
-| `syncTranscriptions` | `true` | OCR/transcription text |
-| `syncPhotoAdjustments` | `false` | Photo metadata (brightness, contrast, etc.) |
-| `syncLists` | `false` | List membership |
-
----
-
-## CRDT Schema (v3)
-
-All per-item data lives under `Y.Doc → Y.Map("annotations") → Y.Map(identity)`:
-
-```
-Y.Doc
-├── Y.Map "annotations"             keyed by item identity hash
-│   └── Y.Map per item
-│       ├── Y.Map "metadata"         {[propUri]: {text, type, lang, author, ts}}
-│       ├── Y.Map "tags"             {[tagName]: {color, author, ts, deleted?}}
-│       ├── Y.Map "notes"            {[noteKey]: {html, text, lang, photo, author, ts, deleted?}}
-│       ├── Y.Map "photos"           {[checksum]: Y.Map → "metadata" sub-map}
-│       ├── Y.Map "selections"       {[selKey]: {x, y, w, h, angle, photo, author, ts, deleted?}}
-│       ├── Y.Map "selectionMeta"    {[selKey:propUri]: {text, type, lang, author, ts}}
-│       ├── Y.Map "selectionNotes"   {[selKey:noteKey]: {html, text, lang, author, ts, deleted?}}
-│       ├── Y.Map "transcriptions"   {[txKey]: {text, data, photo, sel, author, ts, deleted?}}
-│       └── Y.Map "lists"            {[listName]: {member, author, ts, deleted?}}
-├── Y.Map "users"                    {[clientId]: {userId, name, joinedAt, lastSeen}}
-└── Y.Map "room"                     arbitrary room-level config
-```
-
-**Breaking change from v2:** All collections use `Y.Map` (not `Y.Array`).
-Existing LevelDB rooms from v2 must be cleared when upgrading.
-
----
-
 ## Known Limitations
 
-### Clock Skew
+### No Causal Ordering
 
-Timestamps use each client's local `Date.now()`. The LWW+AO comparison
-(`current.ts > lastPushTs`) is a direct millisecond comparison with no
-tolerance. Consequences:
+Troparcel uses logic-based conflict resolution (has the local value
+changed since last push?), not causal ordering or vector clocks. This
+means:
+- There is no "happened-before" relationship between edits
+- In rare cases where two clients push the same field at the exact same
+  moment, Yjs's internal Y.Map LWW (based on client ID) picks a winner
 
-- If Alice's clock is 30 seconds ahead, her changes will appear "newer"
-  and win conflicts even when Bob edited later in real time
-- If a client's clock jumps backward (e.g., NTP correction), changes
-  made during the skewed period may be overwritten
+### Selection Fingerprint Collisions
 
-**Mitigation:** Keep system clocks synchronized via NTP. The plugin does
-not attempt to detect or correct clock skew.
+Selection dedup on the apply side uses a position-based fingerprint. Two
+selections at very similar but not identical coordinates could produce
+different fingerprints and be treated as distinct, creating near-duplicates.
 
-### No Vector Clocks / Causal Ordering
+### Tombstone Retention Window
 
-Troparcel uses wall-clock timestamps, not logical clocks or vector
-clocks. This means:
-
-- Concurrent edits by the same author are resolved by timestamp only
-- There is no causal ordering guarantee ("A happened before B")
-- In rare cases, updates can be lost if two clients edit the same field
-  with the same millisecond timestamp (Yjs map insertion order wins)
-
-### Selection Key Rounding
-
-Selection coordinates are rounded to integers before hashing. Two
-selections at `(0.4, 0.4, 10.4, 10.4)` and `(0.0, 0.0, 10.0, 10.0)`
-both round to `(0, 0, 10, 10)` and produce the same key. If one
-collaborator creates a selection at fractional coordinates, another
-collaborator's nearby selection may collide.
-
-### Note Content Key Prefix
-
-Note keys use the first 200 characters of content plus a full-content
-FNV-1a hash suffix (when content exceeds 200 chars). This prevents
-collisions between notes with identical openings but different endings.
-However, FNV-1a is non-cryptographic and has a higher collision
-probability than SHA-256 — extremely similar notes could theoretically
-produce identical keys, though this is rare in practice.
-
-### Non-Atomic Note/Transcription Updates
-
-Updates to notes and transcriptions are implemented as **delete + create**
-(not an atomic update). If the sync engine crashes between the delete and
-the create, the note/transcription is lost until the next sync cycle
-re-creates it from the CRDT.
+Tombstones are purged after 30 days by the server's compaction pass.
+Clients offline for longer than 30 days may resurrect items that were
+deleted during their absence. To mitigate: connect at least once every
+30 days, or increase `TOMBSTONE_MAX_DAYS` on the server.
 
 ### Author ID Spoofing
 
 The `userId` is user-configured and not cryptographically verified. A
 malicious collaborator could set their `userId` to match another user's
-ID, causing the LWW+AO logic to treat their changes as the other user's
-self-overwrites (which are always accepted). Room token authentication
-protects the WebSocket connection but not the CRDT content.
-
-### Tombstone Accumulation
-
-Tombstones are not automatically garbage-collected from the CRDT. Over
-time, a heavily-edited project will accumulate tombstones that increase
-document size and slow down snapshot serialization. A one-shot
-`clearTombstones` option exists to purge all tombstones on the next
-startup (must be disabled afterward). The tombstone flood threshold
-only warns against sudden spikes, not gradual accumulation.
+ID, causing the logic-based checks to treat their changes as the other
+user's self-overwrites. Room token authentication protects the WebSocket
+connection but not the CRDT content.
 
 ### List Name Dependency
 
@@ -563,6 +510,18 @@ List sync relies on matching by name. If two collaborators have lists
 with different names that serve the same purpose, items won't sync
 between them. Renaming a list on one machine creates a new list entry
 in the CRDT without removing the old one.
+
+### Note Footer Visibility
+
+Remote notes are attributed with a visible `<sub>` footer
+(e.g., `troparcel: alice`). This is the only reliable approach because:
+- HTML comments (`<!-- -->`) are stripped by the sanitizer (security)
+- `data-*` attributes are blocked by the sanitizer (XSS prevention)
+- ProseMirror's DOMParser ignores unknown attributes and elements
+- Tropy's editor schema has no custom attrs that survive roundtrip
+
+The footer can be safely deleted by users — the vault mapping takes
+over once established.
 
 ---
 

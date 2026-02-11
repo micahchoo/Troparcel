@@ -37,6 +37,10 @@ const { YKeyValue } = require('y-utility/y-keyvalue')
  *   ├── Y.Map "room"                             {schemaVersion: 4}
  *   └── (Awareness protocol for presence — NOT persisted in Y.Doc)
  *
+ * pushSeq: Monotonic per-author counter stored in every entry for diagnostic
+ * ordering and future catch-up. NOT used for conflict resolution — see
+ * vault.hasLocalEdit() for the logic-based approach.
+ *
  * Tombstones: deleted entries carry { deleted: true, author, pushSeq, deletedAt }
  * where deletedAt is wall-clock (only for GC purging, not conflict resolution).
  */
@@ -49,6 +53,13 @@ const ITEM_SECTIONS = [
 
 // Sections that use YKeyValue (Y.Array) instead of Y.Map
 const YKV_SECTIONS = ['metadata', 'selectionMeta']
+
+// Tag keys are normalized to lowercase to avoid collisions with Tropy's
+// COLLATE NOCASE unique constraint. Display case is preserved in the value's
+// `name` field.
+function _normalizeTagKey(name) {
+  return name.toLowerCase()
+}
 
 // --- YKeyValue cache ---
 // Constructing YKeyValue scans the array; cache to avoid repeated scans.
@@ -172,10 +183,11 @@ function getMetadata(doc, identity) {
 
 function setTag(doc, identity, tag, author, pushSeq) {
   let tags = _getSection(doc, identity, 'tags')
-  let existing = tags.get(tag.name)
+  let key = _normalizeTagKey(tag.name)
+  let existing = tags.get(key)
 
   if (!existing || existing.deleted || tag.color !== existing.color) {
-    tags.set(tag.name, {
+    tags.set(key, {
       name: tag.name,
       color: tag.color || null,
       author,
@@ -186,9 +198,10 @@ function setTag(doc, identity, tag, author, pushSeq) {
 
 function removeTag(doc, identity, tagName, author, pushSeq) {
   let tags = _getSection(doc, identity, 'tags')
-  let existing = tags.get(tagName)
+  let key = _normalizeTagKey(tagName)
+  let existing = tags.get(key)
   if (existing && !existing.deleted) {
-    tags.set(tagName, {
+    tags.set(key, {
       ...existing,
       deleted: true,
       author,
@@ -642,14 +655,17 @@ function getUUIDRegistry(doc, identity) {
 
 function setAlias(doc, oldIdentity, newIdentity) {
   let itemMap = _getItemMap(doc, newIdentity)
-  if (!itemMap) return
+  if (!itemMap) {
+    // Item may not exist yet — ensure it does
+    itemMap = _ensureItemMap(doc, newIdentity)
+  }
 
   let aliases = itemMap.get('aliases')
   if (!aliases) {
     aliases = new Y.Map()
     itemMap.set('aliases', aliases)
   }
-  aliases.set(oldIdentity, newIdentity)
+  aliases.set(oldIdentity, { target: newIdentity, createdAt: Date.now() })
 }
 
 function resolveAlias(doc, identity) {
@@ -660,8 +676,11 @@ function resolveAlias(doc, identity) {
     if (resolved) return
     let aliases = itemMap.get('aliases')
     if (aliases) {
-      let target = aliases.get(identity)
-      if (target) resolved = target
+      let entry = aliases.get(identity)
+      if (entry) {
+        // Backward compat: handle both old string-only and new object format
+        resolved = typeof entry === 'string' ? entry : entry.target
+      }
     }
   })
   return resolved
@@ -678,6 +697,8 @@ function purgeTombstones(doc, maxAgeMs) {
   let annotations = doc.getMap('annotations')
   let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
   let purged = 0
+  let uuidsPurged = 0
+  let aliasesPurged = 0
   let items = 0
 
   let cutoff = maxAgeMs ? Date.now() - maxAgeMs : null
@@ -702,9 +723,64 @@ function purgeTombstones(doc, maxAgeMs) {
         purged++
       }
     }
+
+    // Prune orphaned UUID registry entries — collect live UUIDs from all sections
+    let uuids = itemMap.get('uuids')
+    if (uuids && typeof uuids.forEach === 'function') {
+      let liveUUIDs = new Set()
+
+      let notes = itemMap.get('notes')
+      if (notes) notes.forEach((_, k) => liveUUIDs.add(k))
+
+      let selections = itemMap.get('selections')
+      if (selections) selections.forEach((_, k) => liveUUIDs.add(k))
+
+      let selectionNotes = itemMap.get('selectionNotes')
+      if (selectionNotes) {
+        selectionNotes.forEach((_, k) => {
+          // Composite key: selUUID:noteUUID — both parts are live
+          let sep = k.indexOf(':')
+          if (sep > 0) {
+            liveUUIDs.add(k.slice(0, sep))
+            liveUUIDs.add(k.slice(sep + 1))
+          }
+        })
+      }
+
+      let transcriptions = itemMap.get('transcriptions')
+      if (transcriptions) transcriptions.forEach((_, k) => liveUUIDs.add(k))
+
+      let lists = itemMap.get('lists')
+      if (lists) lists.forEach((_, k) => liveUUIDs.add(k))
+
+      let orphaned = []
+      uuids.forEach((_, k) => {
+        if (!liveUUIDs.has(k)) orphaned.push(k)
+      })
+      for (let k of orphaned) {
+        uuids.delete(k)
+        uuidsPurged++
+      }
+    }
+
+    // Purge expired aliases
+    let aliases = itemMap.get('aliases')
+    if (aliases && typeof aliases.forEach === 'function') {
+      let toDelete = []
+      aliases.forEach((value, key) => {
+        let createdAt = (value && typeof value === 'object') ? value.createdAt : 0
+        if (!cutoff || !createdAt || createdAt < cutoff) {
+          toDelete.push(key)
+        }
+      })
+      for (let key of toDelete) {
+        aliases.delete(key)
+        aliasesPurged++
+      }
+    }
   })
 
-  return { items, purged }
+  return { items, purged, uuidsPurged, aliasesPurged }
 }
 
 // --- Item checksums (fuzzy identity matching) ---

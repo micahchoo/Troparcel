@@ -11,8 +11,9 @@ const crypto = require('crypto')
  * remain constant regardless of where the project lives.
  *
  * For items with multiple photos, we sort the checksums and
- * hash the concatenation.  For items with no photos (rare),
- * we fall back to hashing template + key metadata fields.
+ * hash the concatenation.  Items with no photos return null
+ * (photo-less items are not syncable — their identity would
+ * change whenever metadata is edited, causing data forks).
  *
  * Sub-resource keys (notes, selections, transcriptions) use FNV-1a
  * for speed — they only need to be unique within a CRDT room,
@@ -50,8 +51,8 @@ function computeIdentity(item) {
     return hashChecksums(checksums)
   }
 
-  // Fallback: hash template + title + date
-  return hashFallback(item)
+  // Photo-less items are not syncable
+  return null
 }
 
 /**
@@ -95,38 +96,6 @@ function hashChecksums(checksums) {
   return crypto
     .createHash('sha256')
     .update(sorted.join(':'))
-    .digest('hex')
-    .slice(0, 32)
-}
-
-/**
- * Fallback identity when no photo checksums are available.
- * Uses template URI + title + date metadata.
- */
-function hashFallback(item) {
-  let template = item.template || item['https://tropy.org/v1/tropy#template'] || ''
-  if (typeof template === 'object') template = template['@id'] || ''
-
-  let title =
-    item['http://purl.org/dc/elements/1.1/title'] ||
-    item['http://purl.org/dc/terms/title'] ||
-    item['title'] ||
-    ''
-  if (typeof title === 'object') title = title['@value'] || ''
-
-  let date =
-    item['http://purl.org/dc/elements/1.1/date'] ||
-    item['http://purl.org/dc/terms/date'] ||
-    item['date'] ||
-    ''
-  if (typeof date === 'object') date = date['@value'] || ''
-
-  let input = `${template}|${title}|${date}`
-  if (input === '||') return null
-
-  return crypto
-    .createHash('sha256')
-    .update(input)
     .digest('hex')
     .slice(0, 32)
 }

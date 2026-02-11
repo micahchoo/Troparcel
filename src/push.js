@@ -41,6 +41,7 @@ module.exports = {
 
       // P4: Compute checksumMap once per item
       let checksumMap = identity.buildPhotoChecksumMap(item)
+      this._debug(`pushLocal: ${id.slice(0, 8)} — ${checksumMap.size} photo(s), first checksum: ${[...checksumMap.values()][0]?.slice(0, 12) || 'none'}...`)
 
       try {
         // Collect keys during push to avoid recomputing them in saveItemSnapshot
@@ -145,7 +146,7 @@ module.exports = {
     if (!Array.isArray(tags)) tags = [tags]
 
     let existingTagsList = schema.getTags(this.doc, itemIdentity)
-    let existingTags = new Map(existingTagsList.map(t => [t.name, t]))
+    let existingTags = new Map(existingTagsList.map(t => [t.name.toLowerCase(), t]))
 
     for (let tag of tags) {
       let name = typeof tag === 'string' ? tag : (tag.name || tag['@value'] || '')
@@ -153,13 +154,13 @@ module.exports = {
 
       if (!name) continue
 
-      let existing = existingTags.get(name)
+      let existing = existingTags.get(name.toLowerCase())
       if (existing && !existing.deleted) {
         if ((existing.color || null) === (color || null)) continue
         // Logic-based: skip if remote author differs AND we haven't edited this tag
         if (existing.author !== userId) {
-          let valueHash = this.vault._fastHash(`tag:${name}:${color || ''}`)
-          if (!this.vault.hasLocalEdit(itemIdentity, `tag:${name}`, valueHash)) {
+          let valueHash = this.vault._fastHash(`tag:${name.toLowerCase()}:${color || ''}`)
+          if (!this.vault.hasLocalEdit(itemIdentity, `tag:${name.toLowerCase()}`, valueHash)) {
             continue
           }
         }
@@ -171,7 +172,7 @@ module.exports = {
       }
 
       schema.setTag(this.doc, itemIdentity, { name, color }, userId, pushSeq)
-      this.vault.markFieldPushed(itemIdentity, `tag:${name}`, this.vault._fastHash(`tag:${name}:${color || ''}`))
+      this.vault.markFieldPushed(itemIdentity, `tag:${name.toLowerCase()}`, this.vault._fastHash(`tag:${name.toLowerCase()}:${color || ''}`))
     }
   },
 
@@ -506,6 +507,13 @@ module.exports = {
       txs.forEach((tx, idx) => {
         if (!tx) return
 
+        // Size guard: skip oversized transcriptions (ALTO XML can be very large)
+        let txSize = (tx.text || '').length + JSON.stringify(tx.data || '').length
+        if (txSize > this.options.maxNoteSize) {
+          this.logger.warn(`Skipping oversized transcription (${txSize} bytes > ${this.options.maxNoteSize}) on photo ${photoChecksum.slice(0, 12)}`)
+          return
+        }
+
         // v4: UUID-based key
         let localTxId = tx['@id'] || tx.id
         let txUUID = localTxId
@@ -551,6 +559,13 @@ module.exports = {
 
         selTxs.forEach((tx, idx) => {
           if (!tx) return
+
+          // Size guard: skip oversized transcriptions
+          let txSize = (tx.text || '').length + JSON.stringify(tx.data || '').length
+          if (txSize > this.options.maxNoteSize) {
+            this.logger.warn(`Skipping oversized selection transcription (${txSize} bytes > ${this.options.maxNoteSize})`)
+            return
+          }
 
           let localTxId = tx['@id'] || tx.id
           let txUUID = localTxId
@@ -813,8 +828,9 @@ module.exports = {
     // Detect removed tags (only when syncTags is enabled)
     if (this.options.syncTags) {
       let currentTags = this._resolveTagNames(item)
+      let currentTagsLower = new Set([...currentTags].map(n => n.toLowerCase()))
       for (let tagName of prev.tags) {
-        if (!currentTags.has(tagName)) {
+        if (!currentTagsLower.has(tagName.toLowerCase())) {
           schema.removeTag(this.doc, itemIdentity, tagName, userId, pushSeq)
         }
       }
@@ -894,9 +910,13 @@ module.exports = {
    * Detect notes that were applied by troparcel from remote sync.
    */
   _isSyncedNote(text, html) {
-    if (!html) return false
-    if (html.includes('<blockquote><p><em>troparcel:')) return true
-    if (html.includes('<p><strong>[troparcel:')) return true
+    if (!html && !text) return false
+    // v5.0+: identifier at bottom of note
+    if (html && html.includes('[troparcel:')) return true
+    if (text && text.includes('[troparcel:')) return true
+    // Legacy: identifier at top (v4.0-v4.12)
+    if (html && html.includes('<blockquote><p><em>troparcel:')) return true
+    if (html && html.includes('<p><strong>[troparcel:')) return true
     return false
   },
 
@@ -955,7 +975,10 @@ module.exports = {
       for (let item of items) {
         let normalized = context ? this._expandJsonLdItem(item, context) : item
         let id = identity.computeIdentity(normalized)
-        if (!id) continue
+        if (!id) {
+          this._debug(`pushItems: skipped photo-less item ${(normalized['@id'] || normalized.id || '?').toString().slice(0, 20)}`)
+          continue
+        }
         let checksumMap = identity.buildPhotoChecksumMap(normalized)
         this.pushMetadata(normalized, id, userId, pushSeq)
         this.pushTags(normalized, id, userId, pushSeq)
