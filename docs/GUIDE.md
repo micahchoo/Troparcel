@@ -224,6 +224,10 @@ npm install
 node index.js
 ```
 
+If port 2468 is already in use, start the server on a different port: `PORT=3000 node index.js`. Update the Server URL in the settings card accordingly.
+
+**Port conflicts on a LAN:** The Troparcel server (port 2468) and Tropy's HTTP API (port 2019) are separate services. Each participant's Tropy instance binds its own API port locally — this doesn't conflict with other machines on the network. However, if a participant runs **two Tropy instances** on the same computer, only the first can bind port 2019. The second instance uses a different port (check its developer console) — that person must set the **[Advanced] API Port** in Troparcel's settings to match.
+
 ### Step 3: Set up authentication
 
 For any group larger than two people, or any server accessible from a network, use room tokens.
@@ -719,6 +723,7 @@ Changing the room name disconnects you from the group. Changing the sync mode ch
 | **Annotations from unknown author appearing** | Someone joined the room with an unexpected User ID, or someone changed their User ID | Coordinator checks the monitor dashboard and asks team members to verify their User IDs. |
 | **Data seems wrong or corrupted** | Rare: bug, network issue during apply, or conflicting edits | Don't panic. See Section 12 for recovery from automatic backups. Tell the coordinator before making changes. |
 | **Plugin loads but shows "waiting for project state"** | Tropy hasn't finished loading the project yet | Wait for the startup delay to complete (8 seconds by default). The plugin will connect automatically once the project is loaded. |
+| **Port conflict: "EADDRINUSE" or API not reachable** | Another process (or a second Tropy instance) is already using the port | Tropy's HTTP API defaults to port **2019** — only one instance can bind it. If running two Tropy instances on the same machine, check the second instance's developer console for its actual port (often 2021 or 2029), then set **[Advanced] API Port** in that instance's Troparcel settings to match. The Troparcel server defaults to port **2468** — if taken, start the server with `PORT=3000 node server/index.js` and update **Server URL** for all participants. See [SETUP.md](SETUP.md) for details. |
 
 ---
 
