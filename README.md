@@ -330,7 +330,7 @@ Troparcel uses two network ports:
 | **2468** | Troparcel server | WebSocket relay for CRDT sync between instances |
 
 **Tropy API port (2019):** Tropy starts its built-in HTTP API on port 2019 by default. If something else on your system is already using port 2019, or if you are running multiple Tropy instances on the same machine, only the first instance will bind successfully — the second will fail to start its API or use a different port. Check Tropy's developer console (**Help > Toggle Developer Tools**) on startup to confirm which port it is listening on, and set the **Tropy API Port** in the plugin settings to match.
-
+- Linux testing involved opening a tropy instance with the Appimage running the API and plugin on port 2019 and one instance of the flatpak on port 2021
 **Troparcel server port (2468):** If port 2468 is taken by another service, start the server on a different port using the `PORT` environment variable:
 
 ```bash

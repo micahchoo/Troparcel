@@ -1,7 +1,7 @@
 {
   "name": "troparcel",
   "productName": "Troparcel",
-  "version": "4.11.0",
+  "version": "5.0.0",
   "description": "Real-time collaboration for Tropy — requires a Troparcel server. Syncs notes, tags, metadata, selections, transcriptions, and lists across instances via CRDTs. See homepage for setup guide.",
   "author": "Micah",
   "license": "AGPL-3.0",
@@ -222,6 +222,7 @@
   "dependencies": {
     "yjs": "^13.6.0",
     "y-websocket": "^1.5.0",
+    "y-utility": "^0.1.4",
     "lib0": "^0.2.88"
   },
   "devDependencies": {

@@ -5,7 +5,13 @@ const schema = require('./crdt-schema')
 const { sanitizeHtml, escapeHtml } = require('./sanitize')
 
 /**
- * Apply mixin — CRDT → local write methods.
+ * Apply mixin — CRDT → local write methods (Schema v4).
+ *
+ * v4 changes:
+ *   - UUID-based note/selection/transcription/list keys
+ *   - Logic-based conflict checks replace ts < lastPushTs comparisons
+ *   - Selection matching via fingerprint (since UUIDs don't carry positional info)
+ *   - List matching via name field on UUID-keyed entries
  *
  * These methods are mixed onto SyncEngine.prototype via Object.assign.
  * All `this` references resolve to the SyncEngine instance at call time.
@@ -87,11 +93,10 @@ module.exports = {
     }
   },
 
-  // P6: No per-field delay within metadata apply
+  // Logic-based conflict check replaces ts < lastPushTs
   async applyMetadata(itemIdentity, localId, userId, localItem) {
     if (!this.options.syncMetadata) return
     let remoteMeta = schema.getMetadata(this.doc, itemIdentity)
-    let lastPushTs = this.lastSync ? this.lastSync.getTime() : 0
     let batch = {}
     for (let [prop, value] of Object.entries(remoteMeta)) {
       if (value.author === userId) continue
@@ -103,8 +108,9 @@ module.exports = {
           ? (localVal['@value'] || localVal.text || '')
           : String(localVal)
         if (localText === (value.text || '')) continue
-        // Only skip older remote values when local has a value (protects local edits)
-        if (value.ts && value.ts < lastPushTs) continue
+        // Logic-based: skip if we have a local edit for this field
+        let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
+        if (this.vault.hasLocalEdit(itemIdentity, prop, valueHash)) continue
       }
 
       batch[prop] = { text: value.text, type: value.type }
@@ -178,6 +184,9 @@ module.exports = {
       // Diff: skip if item doesn't have this tag anyway
       if (!localTagNames.has(tag.name)) continue
 
+      // Check if user dismissed this deletion
+      if (this.vault.dismissedKeys.has(`tag:${tag.name}:${itemIdentity}`)) continue
+
       let existing = tagMap.get(tag.name)
       if (existing) {
         try {
@@ -218,14 +227,6 @@ module.exports = {
   /**
    * Apply a single remote note: sanitize, dedup, update-or-create.
    * Shared by applyNotes and applySelectionNotes.
-   *
-   * @param {string} noteKey - vault key for this note
-   * @param {Object} note - remote note data
-   * @param {Object} parent - { photo, selection } — which parent to attach to
-   * @param {Set} existingTexts - dedup set (mutated on create)
-   * @param {string} userId - local user ID
-   * @param {string} label - label for log messages (e.g. "note" or "sel note")
-   * @returns {boolean} true if note was created/updated, false if skipped
    */
   async _applyRemoteNote(noteKey, note, parent, existingTexts, userId, label) {
     let safeHtml = note.html
@@ -301,7 +302,7 @@ module.exports = {
     return false
   },
 
-  // C1: Stores vault mapping when applying remote notes
+  // UUID-based note matching (schema v4)
   async applyNotes(itemIdentity, local, userId) {
     if (!this.options.syncNotes) return
     let localId = local.localId
@@ -375,11 +376,11 @@ module.exports = {
     // Handle tombstoned notes: apply strikethrough to show retracted content
     for (let [noteKey, note] of Object.entries(tombstonedNotes)) {
       if (note.author === userId) continue
+      if (this.vault.dismissedKeys.has(noteKey)) continue
       let existingLocalId = this.vault.getLocalNoteId(noteKey)
       if (!existingLocalId) continue
 
       let authorLabel = escapeHtml(note.author || 'unknown')
-      // Tombstone preserves original text/html via ...existing spread
       let contentHtml = note.html
         ? sanitizeHtml(note.html)
         : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
@@ -394,7 +395,6 @@ module.exports = {
             retracted = true
           }
         } else {
-          // API fallback: note.update returns 404, so mark as applied to stop retrying
           this._debug(`note retraction skipped (no adapter) for ${noteKey.slice(0, 8)}`)
           this.vault.appliedNoteKeys.add(noteKey)
         }
@@ -409,10 +409,10 @@ module.exports = {
     }
   },
 
+  // Logic-based conflict check replaces ts < lastPushTs
   async applyPhotoMetadata(itemIdentity, local, userId) {
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
-    let lastPushTs = this.lastSync ? this.lastSync.getTime() : 0
 
     for (let photo of photos) {
       let checksum = photo.checksum
@@ -434,8 +434,9 @@ module.exports = {
             ? (localVal['@value'] || localVal.text || '')
             : String(localVal)
           if (localText === (value.text || '')) continue
-          // Skip older remote values when local has a value (protects local edits)
-          if (value.ts && value.ts < lastPushTs) continue
+          // Logic-based: skip if we have a local edit
+          let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
+          if (this.vault.hasLocalEdit(itemIdentity, `photo:${checksum}:${prop}`, valueHash)) continue
         }
 
         batch[prop] = { text: value.text, type: value.type }
@@ -453,6 +454,7 @@ module.exports = {
     }
   },
 
+  // UUID-based selection matching with fingerprint fallback (schema v4)
   async applySelections(itemIdentity, local, userId) {
     if (!this.options.syncSelections) return
     let remoteSelections = schema.getActiveSelections(this.doc, itemIdentity)
@@ -460,20 +462,20 @@ module.exports = {
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
 
-    // Pre-build Set of existing local selection keys for O(1) dedup
-    let existingSelKeys = new Set()
+    // Pre-build Set of existing local selection fingerprints for dedup
+    let existingSelFingerprints = new Set()
     for (let p of photos) {
       if (!p.checksum) continue
       let localSels = p.selection || []
       if (!Array.isArray(localSels)) localSels = [localSels]
       for (let ls of localSels) {
-        if (ls) existingSelKeys.add(identity.computeSelectionKey(p.checksum, ls))
+        if (ls) existingSelFingerprints.add(identity.computeSelectionFingerprint(p.checksum, ls))
       }
     }
 
-    for (let [selKey, sel] of Object.entries(remoteSelections)) {
+    for (let [selUUID, sel] of Object.entries(remoteSelections)) {
       if (sel.author === userId) continue
-      if (this.vault.appliedSelectionKeys.has(selKey)) continue
+      if (this.vault.appliedSelectionKeys.has(selUUID)) continue
 
       let x = Number(sel.x)
       let y = Number(sel.y)
@@ -482,7 +484,7 @@ module.exports = {
       if (!Number.isFinite(x) || !Number.isFinite(y) ||
           !Number.isFinite(w) || !Number.isFinite(h) ||
           w <= 0 || h <= 0) {
-        this._log(`Skipping selection ${selKey}: invalid coordinates`, { x, y, w, h })
+        this._log(`Skipping selection ${selUUID}: invalid coordinates`, { x, y, w, h })
         continue
       }
 
@@ -495,13 +497,15 @@ module.exports = {
       }
       if (!localPhotoId) continue
 
-      // Pre-built Set lookup instead of O(n²) nested loop
-      let alreadyExists = existingSelKeys.has(selKey)
+      // Fingerprint-based dedup: check if a local selection with same coordinates exists
+      let fingerprint = identity.computeSelectionFingerprint(sel.photo, sel)
+      let alreadyExists = existingSelFingerprints.has(fingerprint)
 
       if (!alreadyExists) {
         try {
+          let created
           if (this.adapter) {
-            await this.adapter.createSelection({
+            created = await this.adapter.createSelection({
               photo: Number(localPhotoId),
               x,
               y,
@@ -510,7 +514,7 @@ module.exports = {
               angle: sel.angle || 0
             })
           } else {
-            await this.api.createSelection({
+            created = await this.api.createSelection({
               photo: Number(localPhotoId),
               x,
               y,
@@ -519,36 +523,57 @@ module.exports = {
               angle: sel.angle || 0
             })
           }
-          this.vault.appliedSelectionKeys.add(selKey)
+          if (created && (created.id || created['@id'])) {
+            let localSelId = created.id || created['@id']
+            this.vault.mapAppliedSelection(selUUID, localSelId)
+          }
+          this.vault.appliedSelectionKeys.add(selUUID)
           if (this._applyStats) this._applyStats.selectionsCreated++
-          this._debug(`selection created: ${selKey.slice(0, 8)} on photo ${localPhotoId}`)
+          this._debug(`selection created: ${selUUID.slice(0, 8)} on photo ${localPhotoId}`)
         } catch (err) {
           this.logger.warn(`Failed to create selection on photo ${localPhotoId}`, {
             error: err.message
           })
-          // Don't mark applied on failure — allow retry on next cycle
         }
       } else {
-        this.vault.appliedSelectionKeys.add(selKey)
+        // Match existing local selection by fingerprint
+        for (let p of photos) {
+          if (p.checksum !== sel.photo) continue
+          let localSels = p.selection || []
+          if (!Array.isArray(localSels)) localSels = [localSels]
+          for (let ls of localSels) {
+            if (!ls) continue
+            let lsFp = identity.computeSelectionFingerprint(p.checksum, ls)
+            if (lsFp === fingerprint) {
+              let localSelId = ls['@id'] || ls.id
+              if (localSelId) {
+                this.vault.mapAppliedSelection(selUUID, localSelId)
+              }
+              break
+            }
+          }
+        }
+        this.vault.appliedSelectionKeys.add(selUUID)
       }
     }
   },
 
+  // UUID-based selection note matching (schema v4)
   async applySelectionNotes(itemIdentity, local, userId) {
     if (!this.options.syncNotes) return
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
 
-    // Build tombstone index grouped by selKey prefix (avoids O(n²) inner loop)
+    // Build tombstone index grouped by selUUID prefix
     let allSelNotes = schema.getAllSelectionNotes(this.doc, itemIdentity)
-    let tombstonesBySelKey = new Map()
+    let tombstonesBySelUUID = new Map()
     for (let [compositeKey, note] of Object.entries(allSelNotes)) {
       if (!note.deleted) continue
       let sepIdx = compositeKey.indexOf(':')
       if (sepIdx > 0) {
         let prefix = compositeKey.slice(0, sepIdx)
-        if (!tombstonesBySelKey.has(prefix)) tombstonesBySelKey.set(prefix, [])
-        tombstonesBySelKey.get(prefix).push([compositeKey, note])
+        if (!tombstonesBySelUUID.has(prefix)) tombstonesBySelUUID.set(prefix, [])
+        tombstonesBySelUUID.get(prefix).push([compositeKey, note])
       }
     }
 
@@ -564,8 +589,13 @@ module.exports = {
 
         let existingTexts = this._buildExistingNoteTexts(sel.note || [])
 
-        let selKey = identity.computeSelectionKey(checksum, sel)
-        let remoteNotes = schema.getSelectionNotes(this.doc, itemIdentity, selKey)
+        // v4: Look up selection UUID via vault
+        let localSelId = sel['@id'] || sel.id
+        let selUUID = localSelId
+          ? this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
+          : identity.computeSelectionFingerprint(checksum, sel)
+
+        let remoteNotes = schema.getSelectionNotes(this.doc, itemIdentity, selUUID)
 
         for (let [compositeKey, note] of Object.entries(remoteNotes)) {
           if (note.author === userId) continue
@@ -586,7 +616,6 @@ module.exports = {
             }
           }
 
-          let localSelId = sel['@id'] || sel.id
           if (!localSelId) continue
 
           await this._applyRemoteNote(
@@ -597,9 +626,10 @@ module.exports = {
         }
 
         // Handle tombstoned selection notes: apply strikethrough
-        let selTombstones = tombstonesBySelKey.get(selKey) || []
+        let selTombstones = tombstonesBySelUUID.get(selUUID) || []
         for (let [compositeKey, note] of selTombstones) {
           if (note.author === userId) continue
+          if (this.vault.dismissedKeys.has(compositeKey)) continue
           let existingLocalId = this.vault.getLocalNoteId(compositeKey)
           if (!existingLocalId) continue
 
@@ -618,7 +648,6 @@ module.exports = {
                 retracted = true
               }
             } else {
-              // API fallback: note.update returns 404, so mark as applied to stop retrying
               this._debug(`sel note retraction skipped (no adapter) for ${compositeKey.slice(0, 8)}`)
               this.vault.appliedNoteKeys.add(compositeKey)
             }
@@ -635,10 +664,10 @@ module.exports = {
     }
   },
 
+  // Logic-based conflict check + UUID-based selection matching (schema v4)
   async applySelectionMetadata(itemIdentity, local, userId) {
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
-    let lastPushTs = this.lastSync ? this.lastSync.getTime() : 0
 
     for (let photo of photos) {
       let checksum = photo.checksum
@@ -649,11 +678,16 @@ module.exports = {
 
       for (let sel of localSels) {
         if (!sel) continue
-        let selKey = identity.computeSelectionKey(checksum, sel)
+
+        // v4: Look up selection UUID via vault
         let localSelId = sel['@id'] || sel.id
+        let selUUID = localSelId
+          ? this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
+          : identity.computeSelectionFingerprint(checksum, sel)
+
         if (!localSelId) continue
 
-        let remoteMeta = schema.getSelectionMeta(this.doc, itemIdentity, selKey)
+        let remoteMeta = schema.getSelectionMeta(this.doc, itemIdentity, selUUID)
         let localMeta = sel.metadata || {}
 
         // P6: Batch writes
@@ -668,8 +702,9 @@ module.exports = {
               ? (localVal['@value'] || localVal.text || '')
               : String(localVal)
             if (localText === (value.text || '')) continue
-            // Skip older remote values when local has a value (protects local edits)
-            if (value.ts && value.ts < lastPushTs) continue
+            // Logic-based: skip if we have a local edit
+            let valueHash = this.vault._fastHash(`${localText}|${value.type || ''}`)
+            if (this.vault.hasLocalEdit(itemIdentity, `selmeta:${selUUID}:${prop}`, valueHash)) continue
           }
 
           batch[prop] = { text: value.text, type: value.type }
@@ -688,7 +723,7 @@ module.exports = {
     }
   },
 
-  // C3: Stores vault mapping when applying remote transcriptions
+  // UUID-based transcription matching (schema v4)
   async applyTranscriptions(itemIdentity, local, userId) {
     if (!this.options.syncTranscriptions) return
     let remoteTranscriptions = schema.getActiveTranscriptions(this.doc, itemIdentity)
@@ -696,9 +731,9 @@ module.exports = {
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
 
-    // Pre-build lookup maps to avoid O(photos × selections) per transcription
+    // Pre-build lookup maps
     let photoByChecksum = new Map()
-    let selKeyToLocalId = new Map()
+    let selUUIDToLocalId = new Map()
     for (let p of photos) {
       if (p.checksum) {
         photoByChecksum.set(p.checksum, p['@id'] || p.id)
@@ -706,8 +741,12 @@ module.exports = {
         if (!Array.isArray(sels)) sels = [sels]
         for (let s of sels) {
           if (!s) continue
-          let sk = identity.computeSelectionKey(p.checksum, s)
-          selKeyToLocalId.set(sk, s['@id'] || s.id)
+          let localSelId = s['@id'] || s.id
+          if (localSelId) {
+            // v4: Look up selection UUID via vault
+            let selUUID = this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
+            selUUIDToLocalId.set(selUUID, localSelId)
+          }
         }
       }
     }
@@ -720,19 +759,15 @@ module.exports = {
       let localPhotoId = photoByChecksum.get(tx.photo) || null
       if (!localPhotoId) continue
 
-      let localSelId = tx.selection ? (selKeyToLocalId.get(tx.selection) || null) : null
+      let localSelId = tx.selection ? (selUUIDToLocalId.get(tx.selection) || null) : null
 
       // C3: Check for existing mapping (update vs create)
-      // Note: HTTP PUT for transcriptions returns 404 (no route).
-      // With adapter unavailable, fall through to delete + recreate.
       let existingLocalId = this.vault.getLocalTxId(txKey)
       if (existingLocalId) {
         try {
-          // Capture original for rollback
           let originalTx = null
           try { originalTx = await this.api.getTranscription(existingLocalId) } catch {}
 
-          // Delete old, recreate with new content (update not supported via HTTP)
           try { await this.api.deleteTranscription(existingLocalId) } catch (delErr) {
             this.logger.warn(`Failed to delete transcription ${existingLocalId}`, { error: String(delErr.message || delErr) })
           }
@@ -746,7 +781,6 @@ module.exports = {
             this.vault.mapAppliedTranscription(txKey, created.id || created['@id'])
             this.vault.appliedTranscriptionKeys.add(txKey)
           } else if (originalTx) {
-            // Create returned null — attempt to restore original
             this.logger.warn(`Transcription update returned null for ${txKey.slice(0, 8)}, restoring original`)
             try {
               let restored = await this.api.createTranscription({
@@ -785,29 +819,33 @@ module.exports = {
         this.logger.warn(`Failed to create transcription`, {
           error: err.message
         })
-        // Don't mark applied on failure — allow retry on next cycle
       }
     }
   },
 
-  // C2: Matches lists by name for cross-instance compatibility
+  // UUID-based list matching with name field (schema v4)
   async applyLists(itemIdentity, local, userId, listMap) {
     let remoteLists = schema.getActiveLists(this.doc, itemIdentity)
     let localId = local.localId
 
-    // I5: Build set of lists this item already belongs to
+    // Build set of lists this item already belongs to
     let localListNames = new Set()
     for (let listId of (local.item.lists || [])) {
       let name = this._listNameCache.get(listId) || this._listNameCache.get(String(listId))
       if (name) localListNames.add(name)
     }
 
-    for (let [listKey, list] of Object.entries(remoteLists)) {
+    for (let [listUUID, list] of Object.entries(remoteLists)) {
       if (list.author === userId) continue
-      if (localListNames.has(listKey)) continue  // Already in list
+      // v4: Lists carry name field
+      let listName = list.name || listUUID
+      if (localListNames.has(listName)) continue  // Already in list
 
-      // C2: Match by name
-      let localList = listMap.get(listKey)
+      // Store UUID mapping
+      this.vault.mapAppliedList(listUUID, listName)
+
+      // Match by name
+      let localList = listMap.get(listName)
       if (localList) {
         try {
           if (this.adapter) {
@@ -815,25 +853,24 @@ module.exports = {
           } else {
             await this.api.addItemsToList(localList.id, [localId])
           }
-          localListNames.add(listKey)
+          localListNames.add(listName)
           if (this._applyStats) this._applyStats.listsAdded++
-          this._debug(`list add: item ${localId} → "${listKey}"`)
+          this._debug(`list add: item ${localId} → "${listName}"`)
         } catch (err) {
-          this.logger.warn(`Failed to add item ${localId} to list "${listKey}"`, { error: err.message })
+          this.logger.warn(`Failed to add item ${localId} to list "${listName}"`, { error: err.message })
         }
       }
     }
 
     if (this.options.syncDeletions) {
-      let lastPushTs = this.lastSync ? this.lastSync.getTime() : 0
       let allLists = schema.getLists(this.doc, itemIdentity)
-      for (let [listKey, list] of Object.entries(allLists)) {
+      for (let [listUUID, list] of Object.entries(allLists)) {
         if (!list.deleted) continue
         if (list.author === userId) continue
-        // Skip stale tombstones — don't undo a local add that happened after the deletion
-        if (list.ts && list.ts <= lastPushTs) continue
+        if (this.vault.dismissedKeys.has(`list:${listUUID}:${itemIdentity}`)) continue
 
-        let localList = listMap.get(listKey)
+        let listName = list.name || listUUID
+        let localList = listMap.get(listName)
         if (localList) {
           try {
             if (this.adapter) {
@@ -842,7 +879,7 @@ module.exports = {
               await this.api.removeItemsFromList(localList.id, [localId])
             }
           } catch (err) {
-            this.logger.warn(`Failed to remove item ${localId} from list "${listKey}"`, { error: err.message })
+            this.logger.warn(`Failed to remove item ${localId} from list "${listName}"`, { error: err.message })
           }
         }
       }

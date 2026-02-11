@@ -246,13 +246,50 @@ function buildPhotoChecksumMap(item) {
   return map
 }
 
+// --- UUID generators (schema v4) ---
+
+function generateNoteUUID() {
+  return 'n_' + crypto.randomUUID()
+}
+
+function generateSelectionUUID() {
+  return 's_' + crypto.randomUUID()
+}
+
+function generateTranscriptionUUID() {
+  return 't_' + crypto.randomUUID()
+}
+
+function generateListUUID() {
+  return 'l_' + crypto.randomUUID()
+}
+
+/**
+ * Compute a fingerprint for matching remote selections to local ones.
+ * Same logic as old computeSelectionKey but used only for matching, not as CRDT key.
+ */
+function computeSelectionFingerprint(photoChecksum, sel) {
+  let x = Math.round(sel.x ?? 0)
+  let y = Math.round(sel.y ?? 0)
+  let w = Math.round(sel.width ?? sel.w ?? 0)
+  let h = Math.round(sel.height ?? sel.h ?? 0)
+  return fnv1a(`selfp:${photoChecksum}:${x}:${y}:${w}:${h}`)
+}
+
 module.exports = {
   computeIdentity,
   extractChecksums,
   buildIdentityIndex,
   findLocalMatch,
+  // Legacy content-addressed functions (kept for migration/matching)
   computeSelectionKey,
   computeNoteKey,
   computeTranscriptionKey,
+  // Schema v4 UUID generators
+  generateNoteUUID,
+  generateSelectionUUID,
+  generateTranscriptionUUID,
+  generateListUUID,
+  computeSelectionFingerprint,
   buildPhotoChecksumMap
 }

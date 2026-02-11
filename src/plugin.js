@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * Troparcel v4.0 — Store-First Annotation Overlay Collaboration Layer for Tropy
+ * Troparcel v5.0 — Store-First Annotation Overlay Collaboration Layer for Tropy
  *
  * Syncs notes, tags, metadata, selections, transcriptions, and lists
  * between Tropy instances through CRDTs (Yjs). Items are matched
@@ -35,7 +35,7 @@ class TroparcelPlugin {
     }
 
     this.context.logger.info(
-      `Troparcel v4.11 — server: ${this.options.serverUrl}, ` +
+      `Troparcel v5.0 — server: ${this.options.serverUrl}, ` +
       `mode: ${this.options.syncMode}, ` +
       `user: ${this.options.userId || '(anonymous)'}`)
 
@@ -228,7 +228,11 @@ class TroparcelPlugin {
   async export(data) {
     if (this._isPrefsWindow()) return
 
-    if (!data || data.length === 0) {
+    // Tropy passes a JSON-LD document: { '@context', '@graph': [...items], version }
+    let items = Array.isArray(data) ? data : (data && data['@graph']) || []
+    let jsonLdContext = !Array.isArray(data) && data ? data['@context'] : null
+
+    if (items.length === 0) {
       this.context.logger.warn('Troparcel Export: no items selected — select items first, then File > Export > Troparcel')
       return
     }
@@ -239,23 +243,23 @@ class TroparcelPlugin {
       return
     }
 
-    this.context.logger.info(`Troparcel Export: pushing ${data.length} item(s) to room "${this.options.room}"...`)
+    this.context.logger.info(`Troparcel Export: pushing ${items.length} item(s) to room "${this.options.room}"...`)
 
     try {
       if (this.engine && this.engine.state === 'connected') {
-        this.engine.pushItems(data)
+        this.engine.pushItems(items, jsonLdContext)
         this.context.logger.info(
-          `Troparcel Export: done — ${data.length} item(s) pushed to "${this.options.room}"`)
+          `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
         return
       }
 
       this.context.logger.info('Troparcel Export: connecting to server (no background sync active)...')
       let tempEngine = new SyncEngine(this.options, this.context.logger)
       await tempEngine.start()
-      tempEngine.pushItems(data)
+      tempEngine.pushItems(items, jsonLdContext)
 
       this.context.logger.info(
-        `Troparcel Export: done — ${data.length} item(s) pushed to "${this.options.room}"`)
+        `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
 
       setTimeout(() => { tempEngine.stop() }, 5000)
 
@@ -363,7 +367,7 @@ class TroparcelPlugin {
     delete safeOptions._roomExplicit
 
     return {
-      version: '4.11.0',
+      version: '5.0.0',
       options: safeOptions,
       engine: this.engine ? this.engine.getStatus() : null,
       backgroundSync: this.engine != null

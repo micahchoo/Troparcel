@@ -13,7 +13,7 @@ const { BackupManager } = require('./backup')
 const { SyncVault } = require('./vault')
 
 /**
- * Sync Engine v4.0 — Store-First Architecture.
+ * Sync Engine v5.0 — Store-First Architecture + Schema v4.
  *
  * When the Redux store is available (background sync in project window),
  * all reads come from store.getState() and writes use store.dispatch().
@@ -66,7 +66,6 @@ class SyncEngine {
     this.localIndex = new Map()
     this.previousSnapshot = new Map()
     this.safetyNetTimer = null
-    this.heartbeatTimer = null
     this.unsubscribe = null
     this._storeUnsubscribe = null
     this.fileWatcher = null
@@ -215,11 +214,10 @@ class SyncEngine {
       server: this.options.serverUrl,
       room: this.options.room,
       syncMode: this.options.syncMode
-    }, 'Sync engine v4.11 starting')
+    }, 'Sync engine v5.0 (schema v4) starting')
 
     try {
       this.doc = new Y.Doc()
-      schema.registerUser(this.doc, this.doc.clientID, this._stableUserId)
 
       // Always use Node.js ws module — browser WebSocket is blocked by Tropy's CSP
       let WSImpl = WS
@@ -259,6 +257,26 @@ class SyncEngine {
       })
 
       await this.waitForConnection()
+
+      // Stamp schema version in room map
+      schema.setSchemaVersion(this.doc)
+
+      // Set presence via Awareness protocol (replaces registerUser + heartbeat)
+      if (this.provider.awareness) {
+        this.provider.awareness.setLocalStateField('user', {
+          userId: this._stableUserId,
+          name: this._stableUserId,
+          joinedAt: Date.now()
+        })
+
+        this._awarenessHandler = ({ added, updated, removed }) => {
+          this.peerCount = 0
+          this.provider.awareness.getStates().forEach((state, clientId) => {
+            if (clientId !== this.doc.clientID && state.user) this.peerCount++
+          })
+        }
+        this.provider.awareness.on('change', this._awarenessHandler)
+      }
 
       // Set up backup manager
       this.backup = new BackupManager(
@@ -312,12 +330,10 @@ class SyncEngine {
       // Initial full sync (skipped for temp engines used in export/import)
       if (!opts.skipInitialSync) {
         await this.syncOnce()
-        let users = schema.getUsers(this.doc)
-        let peers = users.filter(u => u.clientID !== this.doc.clientID).length
         this._log(
           `initial sync complete — ${this.localIndex.size} local items indexed, ` +
           `${this.vault.annotationCount} shared items in CRDT, ` +
-          `${peers} peer(s) online`)
+          `${this.peerCount} peer(s) online`)
       }
 
       // Start file watching
@@ -333,24 +349,15 @@ class SyncEngine {
         }, safetyInterval)
       }
 
-      // Heartbeat — only when peers are connected (avoids spurious state vector changes)
-      this.heartbeatTimer = setInterval(() => {
-        if (this.provider && this.provider.wsconnected) {
-          schema.heartbeat(this.doc, this.doc.clientID)
-        }
-      }, 30000)
-
       // Periodic status log — lets users know sync is alive without DevTools
       this._statusLogCount = 0
       let statusInterval = this.debug ? 30000 : 300000 // 30s debug, 5min normal
       this._statusLogTimer = setInterval(() => {
         if (this.state !== 'connected') return
         this._statusLogCount++
-        let users = this.doc ? schema.getUsers(this.doc) : []
-        let peers = users.filter(u => u.clientID !== this.doc?.clientID).length
         this._log(
           `sync active — room "${this.options.room}", ` +
-          `${peers} peer(s), ` +
+          `${this.peerCount} peer(s), ` +
           `${this.localIndex.size} local / ${this.vault.annotationCount} shared items` +
           (this.lastSync ? `, last sync ${this._formatAge(this.lastSync)}` : ''))
       }, statusInterval)
@@ -403,11 +410,6 @@ class SyncEngine {
       this.safetyNetTimer = null
     }
 
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer)
-      this.heartbeatTimer = null
-    }
-
     if (this._statusLogTimer) {
       clearInterval(this._statusLogTimer)
       this._statusLogTimer = null
@@ -433,11 +435,16 @@ class SyncEngine {
       this.unsubscribe = null
     }
 
-    if (this.doc) {
+    // Clean up Awareness protocol
+    if (this.provider && this.provider.awareness) {
       try {
-        schema.deregisterUser(this.doc, this.doc.clientID)
+        if (this._awarenessHandler) {
+          this.provider.awareness.off('change', this._awarenessHandler)
+          this._awarenessHandler = null
+        }
+        this.provider.awareness.setLocalState(null)
       } catch (err) {
-        this._debug('Failed to deregister user', { error: err.message })
+        this._debug('Failed to clean up awareness', { error: err.message })
       }
     }
 
@@ -619,7 +626,10 @@ class SyncEngine {
       return
     }
 
-    this._debug('handleLocalChange: store change detected, debouncing')
+    // Only log once per debounce window to avoid flooding
+    if (!this._localDebounceTimer) {
+      this._debug('handleLocalChange: store change detected, debouncing')
+    }
 
     if (this._localDebounceTimer) {
       clearTimeout(this._localDebounceTimer)
@@ -853,8 +863,21 @@ class SyncEngine {
         items = await this._enrichAll(summaries)
       }
 
+      let previousIdentities = new Set(this.localIndex.keys())
       this.localIndex = identity.buildIdentityIndex(items)
       this._debug(`syncOnce: ${items.length} items, ${this.localIndex.size} identities`)
+
+      // Force apply when new local items appear (e.g. after import) —
+      // their CRDT identities may already have remote annotations.
+      if (!this._remoteAnnotationsDirty && previousIdentities.size > 0) {
+        for (let id of this.localIndex.keys()) {
+          if (!previousIdentities.has(id)) {
+            this._remoteAnnotationsDirty = true
+            this._debug('syncOnce: new local identities detected, forcing apply')
+            break
+          }
+        }
+      }
 
       // C2: Build list name cache
       await this._refreshListNameCache()
@@ -922,9 +945,10 @@ class SyncEngine {
 
       // Push local changes to CRDT (skipped in 'pull' mode — only receive, never push)
       if (this.options.syncMode !== 'pull') {
+        let pushSeq = this.vault.nextPushSeq()
         if (this.adapter) this.adapter.suppressChanges()
         try {
-          await this.pushLocal(items)
+          await this.pushLocal(items, pushSeq)
         } finally {
           if (this.adapter) this.adapter.resumeChanges()
         }
@@ -1015,6 +1039,18 @@ class SyncEngine {
     }
   }
 
+  // --- Conflict logging ---
+
+  _logConflict(type, identity, field, detail) {
+    this.logger.info({
+      event: 'conflict',
+      type,
+      identity: identity.slice(0, 8),
+      field,
+      ...detail
+    }, `[troparcel] Conflict: ${type} ${field} on ${identity.slice(0, 8)}`)
+  }
+
   // --- Fuzzy matching ---
 
   /**
@@ -1030,7 +1066,7 @@ class SyncEngine {
 
     let crdtSet = new Set(crdtChecksums)
     let bestMatch = null
-    let bestRatio = 0
+    let bestScore = 0
 
     for (let [localIdentity, local] of this.localIndex) {
       let photos = local.item.photo || []
@@ -1039,22 +1075,21 @@ class SyncEngine {
       for (let p of photos) {
         if (p.checksum) localChecksums.add(p.checksum)
       }
+      if (localChecksums.size === 0) continue
 
-      // ALL CRDT checksums must be present in the local item
-      let allFound = true
+      // Jaccard similarity: |intersection| / |union|
+      let intersection = 0
       for (let cs of crdtSet) {
-        if (!localChecksums.has(cs)) { allFound = false; break }
+        if (localChecksums.has(cs)) intersection++
       }
-      // Require minimum overlap: CRDT checksums must cover >= 50% of local photos
-      // to reduce false positives when items share a single common photo
-      if (allFound && localChecksums.size > 0 &&
-          crdtChecksums.length >= Math.ceil(localChecksums.size * 0.5)) {
-        // Pick the best match: highest overlap ratio (CRDT checksums / local photos)
-        let ratio = crdtChecksums.length / localChecksums.size
-        if (ratio > bestRatio) {
-          bestRatio = ratio
-          bestMatch = { local, localIdentity, checksumCount: crdtChecksums.length }
-        }
+      if (intersection === 0) continue
+
+      let union = new Set([...crdtSet, ...localChecksums]).size
+      let score = intersection / union
+
+      if (score > bestScore && score >= 0.5) {
+        bestScore = score
+        bestMatch = { local, localIdentity, checksumCount: intersection, score }
       }
     }
 
@@ -1374,7 +1409,7 @@ class SyncEngine {
       clientId: this.doc ? this.doc.clientID : null,
       localItems: this.localIndex.size,
       crdtItems: this.vault.annotationCount,
-      users: this.doc ? schema.getUsers(this.doc) : [],
+      peerCount: this.peerCount,
       watching: this.fileWatcher != null || this._storeUnsubscribe != null,
       storeAvailable: this.adapter != null,
       projectPath: this.projectPath,

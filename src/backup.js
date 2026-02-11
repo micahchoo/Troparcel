@@ -60,7 +60,7 @@ class BackupManager {
     let data = {
       room: this.room,
       timestamp: new Date().toISOString(),
-      version: '3.1',
+      version: '4.0',
       items: itemSnapshots
     }
 

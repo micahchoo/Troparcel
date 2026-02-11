@@ -6,7 +6,7 @@ Tropy exposes a local HTTP API for programmatic access to project data. The API 
 
 ---
 
-## Root
+## Root 
 
 ### `GET /`
 
