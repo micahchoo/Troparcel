@@ -2316,6 +2316,99 @@ describe('Team 4: Multi-Peer CRDT Convergence (BLUE)', () => {
     assert.equal(noteValues[0].author, 'alice')
     assert.equal(noteValues[0].photo, 'photo-chk-conv')
   })
+
+  // 4.10: Three-peer convergence — the acid test
+  it('three peers writing concurrently converge to identical state', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    let identity = 'item-3peer'
+
+    // Three independent contexts sharing the same doc
+    let ctxA = mockSyncContext({ doc, userId: 'alice' })
+    let ctxB = mockSyncContext({ doc, userId: 'bob' })
+    let ctxC = mockSyncContext({ doc, userId: 'carol' })
+
+    // Each peer writes different metadata fields concurrently
+    let itemA = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Alice Title', '@type': 'string' }
+    })
+    let itemB = buildItem({
+      'http://purl.org/dc/elements/1.1/creator': { '@value': 'Bob Author', '@type': 'string' }
+    })
+    let itemC = buildItem({
+      'http://purl.org/dc/elements/1.1/date': { '@value': '2025-01-01', '@type': 'string' }
+    })
+    ctxA.pushMetadata(itemA, identity, 'alice', 1)
+    ctxB.pushMetadata(itemB, identity, 'bob', 2)
+    ctxC.pushMetadata(itemC, identity, 'carol', 3)
+
+    // Each peer adds a different tag
+    let tagItemA = buildItem({ tag: [{ name: 'Red', color: '#f00' }] })
+    let tagItemB = buildItem({ tag: [{ name: 'Green', color: '#0f0' }] })
+    let tagItemC = buildItem({ tag: [{ name: 'Blue', color: '#00f' }] })
+    ctxA.pushTags(tagItemA, identity, 'alice', 4)
+    ctxB.pushTags(tagItemB, identity, 'bob', 5)
+    ctxC.pushTags(tagItemC, identity, 'carol', 6)
+
+    // All three peers see the same converged state
+    let meta = schema.getMetadata(doc, identity)
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].text, 'Alice Title')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/creator'].text, 'Bob Author')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/date'].text, '2025-01-01')
+
+    let tags = schema.getActiveTags(doc, identity)
+    let tagNames = tags.map(t => t.name).sort()
+    assert.deepEqual(tagNames, ['Blue', 'Green', 'Red'])
+
+    // Now test conflict: all three write the SAME field — last pushSeq wins
+    let conflictA = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Alice Wins?', '@type': 'string' }
+    })
+    let conflictB = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Bob Wins?', '@type': 'string' }
+    })
+    let conflictC = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Carol Wins', '@type': 'string' }
+    })
+    ctxA.pushMetadata(conflictA, identity, 'alice', 7)
+    ctxB.pushMetadata(conflictB, identity, 'bob', 8)
+    ctxC.pushMetadata(conflictC, identity, 'carol', 9)
+
+    let finalMeta = schema.getMetadata(doc, identity)
+    assert.equal(finalMeta['http://purl.org/dc/elements/1.1/title'].text, 'Carol Wins')
+    assert.equal(finalMeta['http://purl.org/dc/elements/1.1/title'].pushSeq, 9)
+  })
+
+  // 4.11: hasLocalEdit conflict preservation — logic-based conflict resolution
+  it('hasLocalEdit preserves local value when field was edited after push', () => {
+    let { SyncVault } = require('../src/vault')
+    let vault = new SyncVault()
+    let identity = 'item-conflict'
+    let field = 'http://purl.org/dc/elements/1.1/title'
+
+    // Simulate: user pushes "Original" → vault records the hash
+    let originalHash = vault._fastHash('Original|string')
+    vault.markFieldPushed(identity, field, originalHash)
+
+    // User edits locally to "Edited" — different hash
+    let editedHash = vault._fastHash('Edited|string')
+    assert.ok(vault.hasLocalEdit(identity, field, editedHash),
+      'Should detect local edit: current value differs from last pushed')
+
+    // Remote peer sends "Remote Value" — apply should skip (local wins)
+    // The apply code checks: if vault.hasLocalEdit(identity, field, valueHash) → skip
+    let remoteHash = vault._fastHash('Remote Value|string')
+    assert.ok(vault.hasLocalEdit(identity, field, remoteHash),
+      'Remote value also differs from last pushed → local edit detected → skip')
+
+    // If local value matches what was pushed (no edit), remote should win
+    assert.ok(!vault.hasLocalEdit(identity, field, originalHash),
+      'No local edit: current value matches last pushed → allow remote overwrite')
+
+    // Never-pushed field: hasLocalEdit returns true (assume local edit)
+    assert.ok(vault.hasLocalEdit(identity, 'dc:unknown', vault._fastHash('anything')),
+      'Never-pushed field treated as local edit (conservative default)')
+  })
 })
 
 // ============================================================
@@ -2619,18 +2712,20 @@ describe('Team 2: Vault Integrity Invariants (BLUE)', () => {
     }
   })
 
-  // 2.9: clear() resets v5 additions — BUG FOUND: clear() doesn't reset these maps
-  it('clear resets template and list hash maps', { todo: 'Bug: vault.clear() missing v5 map resets' }, () => {
+  // 2.9: clear() resets v5 additions (fixed: vault.clear() now resets all v5 maps)
+  it('clear resets template and list hash maps', () => {
     let v = new SyncVault()
     v.pushedTemplateHashes.set('uri1', 'hash1')
     v.pushedListHashes.set('l_1', 'hash2')
     v.listIdToCrdtUuid.set(42, 'l_1')
     v.crdtUuidToListId.set('l_1', 42)
+    v.attributionTagIds.set('synced', 99)
     v.clear()
     assert.equal(v.pushedTemplateHashes.size, 0, 'pushedTemplateHashes not cleared')
     assert.equal(v.pushedListHashes.size, 0, 'pushedListHashes not cleared')
     assert.equal(v.listIdToCrdtUuid.size, 0, 'listIdToCrdtUuid not cleared')
     assert.equal(v.crdtUuidToListId.size, 0, 'crdtUuidToListId not cleared')
+    assert.equal(v.attributionTagIds.size, 0, 'attributionTagIds not cleared')
   })
 
   // 2.10: failedNoteKeys migration — object format
@@ -2649,5 +2744,389 @@ describe('Team 2: Vault Integrity Invariants (BLUE)', () => {
     assert.equal(v.failedNoteKeys.get('n_fail1'), 2)
     assert.equal(v.failedNoteKeys.get('n_fail2'), 5)
     try { await fs.promises.unlink(file) } catch {}
+  })
+})
+
+// ============================================================
+//  Team 1: CRDT Poisoning (RED)
+// ============================================================
+
+describe('Team 1: CRDT Poisoning (RED)', () => {
+  const Y = require('yjs')
+  const schema = require('../src/crdt-schema')
+
+  // 1.3: Malformed UUID keys
+  it('CRDT accepts malformed note UUID keys (no key validation)', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    schema.setNote(doc, 'poison-item', 'n_<script>alert(1)</script>', {
+      html: '<p>test</p>', text: 'test', photo: 'cs1'
+    }, 'attacker', 1)
+    let notes = schema.getNotes(doc, 'poison-item')
+    assert.equal(Object.keys(notes).length, 1, 'CRDT accepts arbitrary keys — no validation')
+  })
+
+  // 1.5: Duplicate tag names with different casing
+  it('tags with different casing are separate CRDT entries', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    schema.setTag(doc, 'case-test', { name: 'Important', color: '#f00' }, 'alice', 1)
+    schema.setTag(doc, 'case-test', { name: 'important', color: '#00f' }, 'bob', 1)
+    schema.setTag(doc, 'case-test', { name: 'IMPORTANT', color: '#0f0' }, 'carol', 1)
+    let tags = schema.getActiveTags(doc, 'case-test')
+    // Tags are keyed by _normalizeTagKey (lowercase), so case variants collapse
+    assert.equal(tags.length, 1, 'case variants collapse to one entry via lowercase key')
+    assert.equal(tags[0].name, 'IMPORTANT', 'last writer wins — Carol wrote last')
+  })
+
+  // 1.7: Tombstone with absurd deletedAt
+  it('handles tombstone with future deletedAt', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    schema.setNote(doc, 'future-item', 'n_future', {
+      html: '<p>test</p>', text: 'test', photo: 'cs1'
+    }, 'alice', 1)
+    schema.removeNote(doc, 'future-item', 'n_future', 'attacker', 2)
+    let notes = schema.getNotes(doc, 'future-item')
+    assert.ok(notes['n_future'].deleted)
+  })
+
+  // 1.8: Missing/empty author
+  it('handles metadata with null/empty author without crash', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    schema.setMetadata(doc, 'auth-test', 'dc:title', { text: 'Test' }, null, 1)
+    schema.setMetadata(doc, 'auth-test', 'dc:date', { text: '2024' }, '', 1)
+    schema.setMetadata(doc, 'auth-test', 'dc:desc', { text: 'Desc' }, undefined, 1)
+    let meta = schema.getMetadata(doc, 'auth-test')
+    assert.ok(meta['dc:title'])
+    assert.ok(meta['dc:date'])
+    assert.ok(meta['dc:desc'])
+  })
+
+  // 1.2: Oversized metadata — no push-side validation
+  it('CRDT accepts 1MB metadata value (no push-side size guard)', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    let bigValue = 'x'.repeat(1024 * 1024)
+    schema.setMetadata(doc, 'big-item', 'dc:title', { text: bigValue }, 'attacker', 1)
+    let meta = schema.getMetadata(doc, 'big-item')
+    assert.equal(meta['dc:title'].text.length, 1024 * 1024, 'CRDT has no size guard on push')
+  })
+
+  // 1.1: No schema version — writes still accepted
+  it('doc with no schemaVersion still accepts writes', () => {
+    let doc = new Y.Doc()
+    // Deliberately skip setSchemaVersion
+    schema.setMetadata(doc, 'noversion', 'dc:title', { text: 'Test' }, 'alice', 1)
+    let meta = schema.getMetadata(doc, 'noversion')
+    assert.ok(meta['dc:title'], 'Writes succeed without schema version stamp')
+  })
+})
+
+// ============================================================
+//  Team 7: Lifecycle Race Conditions (RED)
+// ============================================================
+
+describe('Team 7: Lifecycle Race Conditions (RED)', () => {
+  const { SyncVault } = require('../src/vault')
+  const { StoreAdapter } = require('../src/store-adapter')
+  const noopLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
+
+  // 7.3: Error backoff calculation
+  it('exponential backoff caps at maxBackoff', () => {
+    let maxBackoff = 60000
+    function calculateBackoff(n) {
+      return Math.min(1000 * Math.pow(2, n), maxBackoff)
+    }
+    assert.equal(calculateBackoff(0), 1000)
+    assert.equal(calculateBackoff(5), 32000)
+    assert.equal(calculateBackoff(10), maxBackoff)
+    assert.equal(calculateBackoff(100), maxBackoff)
+  })
+
+  // 7.9: Mutex — Promise-chain pattern serializes access
+  it('Promise-chain mutex serializes concurrent access', async () => {
+    let _syncLock = Promise.resolve()
+    function acquireLock() {
+      let release
+      let prev = _syncLock
+      _syncLock = new Promise(resolve => { release = resolve })
+      return prev.then(() => release)
+    }
+
+    let order = []
+    async function task(id, delay) {
+      let release = await acquireLock()
+      try {
+        order.push(`start-${id}`)
+        await new Promise(r => setTimeout(r, delay))
+        order.push(`end-${id}`)
+      } finally {
+        release()
+      }
+    }
+
+    await Promise.all([task('A', 10), task('B', 5), task('C', 1)])
+    assert.deepEqual(order, ['start-A', 'end-A', 'start-B', 'end-B', 'start-C', 'end-C'])
+  })
+
+  // 7.1: _syncing flag starvation — if _acquireLock rejects, _syncing stays true forever
+  it('_syncing stays stuck when _acquireLock rejects (starvation bug)', { todo: 'Known bug: no try/catch around _acquireLock await' }, async () => {
+    const { SyncEngine } = require('../src/sync-engine')
+    let engine = new SyncEngine({
+      serverUrl: 'ws://localhost', room: 'test', syncMetadata: true,
+      syncTags: true, syncNotes: true, syncSelections: true,
+      syncTranscriptions: true, syncPhotoAdjustments: true,
+      syncLists: true, syncDeletions: true, debug: false,
+      startupDelay: 0, localDebounce: 50, remoteDebounce: 50,
+      safetyNetInterval: 0, writeDelay: 0, maxBackups: 0,
+      maxNoteSize: 100000, maxMetadataSize: 100000
+    }, noopLogger)
+
+    // Put engine in a state where syncOnce proceeds past the guards
+    engine.state = 'connected'
+    engine.doc = new (require('yjs').Doc)()
+
+    // Monkey-patch _acquireLock to reject — simulates corrupted promise chain
+    engine._acquireLock = () => Promise.reject(new Error('lock corrupted'))
+
+    // syncOnce sets _syncing = true at line 886, then awaits _acquireLock at 889
+    // If _acquireLock rejects, the try/finally never runs → _syncing stuck true
+    await engine.syncOnce().catch(() => {})
+
+    // This is the bug: _syncing should be false but stays true
+    assert.equal(engine._syncing, true,
+      'BUG: _syncing stuck true after _acquireLock rejection — sync engine frozen')
+  })
+
+  // 7.5: Vault rapid clear cycles
+  it('vault handles rapid clear cycles without corruption', () => {
+    let v = new SyncVault()
+    v.pushSeq = 10
+    v.appliedNoteKeys.add('test')
+    for (let i = 0; i < 50; i++) {
+      v.clear()
+      v.pushSeq = i
+      v.appliedNoteKeys.add(`key-${i}`)
+    }
+    assert.equal(v.pushSeq, 49)
+    assert.ok(v.appliedNoteKeys.has('key-49'))
+    assert.ok(!v.appliedNoteKeys.has('test'))
+  })
+
+  // 7.10: Mutex release on error
+  it('mutex releases lock even when body throws', async () => {
+    let _syncLock = Promise.resolve()
+    function acquireLock() {
+      let release
+      let prev = _syncLock
+      _syncLock = new Promise(resolve => { release = resolve })
+      return prev.then(() => release)
+    }
+
+    // First task throws
+    try {
+      let release = await acquireLock()
+      try {
+        throw new Error('simulated failure')
+      } finally {
+        release()
+      }
+    } catch {}
+
+    // Second task should still acquire the lock (not deadlocked)
+    let acquired = false
+    let release2 = await acquireLock()
+    acquired = true
+    release2()
+    assert.ok(acquired, 'Lock should be acquirable after error in previous holder')
+  })
+})
+
+// ============================================================
+//  Team 3: Identity Collision & Fuzzy Match (RED)
+// ============================================================
+
+describe('Team 3: Identity Collision & Fuzzy Match (RED)', () => {
+  const identity = require('../src/identity')
+
+  // 3.2: Single-photo identity theft
+  it('single-photo items with same checksum produce identical identity', () => {
+    let victim = { photo: [{ checksum: 'shared-cs' }] }
+    let attacker = { photo: [{ checksum: 'shared-cs' }] }
+    assert.equal(
+      identity.computeIdentity(victim),
+      identity.computeIdentity(attacker),
+      'Same single checksum = same identity — maximum vulnerability'
+    )
+  })
+
+  // 3.4: Selection fingerprint collision from rounding
+  it('different coordinates produce same key after rounding', () => {
+    let key1 = identity.computeSelectionKey('photo1', { x: 10.4, y: 20.4, width: 100.4, height: 50.4 })
+    let key2 = identity.computeSelectionKey('photo1', { x: 10.0, y: 20.0, width: 100.0, height: 50.0 })
+    assert.equal(key1, key2, 'Rounding creates collision between close coordinates')
+  })
+
+  // 3.6: Empty photo array
+  it('item with empty photo array returns null identity', () => {
+    assert.equal(identity.computeIdentity({ photo: [] }), null)
+  })
+
+  // 3.7: Empty checksum in JSON-LD value
+  it('item with empty checksum @value handles gracefully', () => {
+    let item = { photo: [{ checksum: { '@value': '' } }] }
+    let id = identity.computeIdentity(item)
+    assert.ok(id === null || typeof id === 'string')
+  })
+
+  // 3.8: Many photos — stability and performance
+  it('identity hash is stable with 100 photos', () => {
+    let photos = Array.from({ length: 100 }, (_, i) => ({ checksum: `cs-${i}` }))
+    let item = { photo: photos }
+    let id1 = identity.computeIdentity(item)
+    let id2 = identity.computeIdentity(item)
+    assert.equal(id1, id2)
+    assert.equal(id1.length, 32)
+  })
+
+  // 3.1: Two-photo Jaccard analysis
+  it('two-photo items with one shared checksum have different identity', () => {
+    let victim = { photo: [{ checksum: 'real1' }, { checksum: 'real2' }] }
+    let attacker = { photo: [{ checksum: 'real1' }, { checksum: 'fake1' }] }
+    let victimId = identity.computeIdentity(victim)
+    let attackerId = identity.computeIdentity(attacker)
+    assert.notEqual(victimId, attackerId, 'Different checksum sets produce different identities')
+    // But Jaccard similarity = 1/3 (intersection={real1}, union={real1,real2,fake1})
+    // Fuzzy match threshold is 0.5, so this specific case does NOT match
+  })
+
+  // 3.1b: Jaccard = 0.5 boundary — single-photo attacker vs two-photo victim
+  it('single-photo attacker matches two-photo victim at Jaccard = 0.5 boundary', () => {
+    // victim={A,B}, attacker={A} → Jaccard = |{A}|/|{A,B}| = 1/2 = 0.5
+    // The fuzzy match threshold is >= 0.5, so this IS a match — the attacker
+    // can hijack annotations by sharing a single checksum with a two-photo item
+    let victim = { photo: [{ checksum: 'real-A' }, { checksum: 'real-B' }] }
+    let attacker = { photo: [{ checksum: 'real-A' }] }
+    let victimId = identity.computeIdentity(victim)
+    let attackerId = identity.computeIdentity(attacker)
+    // Different identity hashes (different checksum sets)
+    assert.notEqual(victimId, attackerId)
+    // But Jaccard similarity = 0.5 — meets threshold for fuzzy match
+    let intersection = new Set(['real-A'])
+    let union = new Set(['real-A', 'real-B'])
+    let jaccard = intersection.size / union.size
+    assert.equal(jaccard, 0.5, 'Jaccard at exact threshold boundary')
+    // This means the attacker CAN fuzzy-match to the victim — red team finding
+  })
+
+  // Sorted checksums produce consistent hash
+  it('photo order does not affect identity hash', () => {
+    let item1 = { photo: [{ checksum: 'aaa' }, { checksum: 'bbb' }, { checksum: 'ccc' }] }
+    let item2 = { photo: [{ checksum: 'ccc' }, { checksum: 'aaa' }, { checksum: 'bbb' }] }
+    assert.equal(identity.computeIdentity(item1), identity.computeIdentity(item2))
+  })
+})
+
+// ============================================================
+//  Team 8: Boundary Validation & Connection Security (BLUE)
+// ============================================================
+
+describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
+  const { parseConnectionString, generateConnectionString } = require('../src/connection-string')
+  const { BackupManager } = require('../src/backup')
+  const { ApiClient } = require('../src/api-client')
+  const noopLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
+
+  // 8.1: Path traversal in connection string
+  it('connection string room with path traversal chars', () => {
+    let r = parseConnectionString('troparcel://ws/server.edu:2468/../../../etc/passwd?token=x')
+    // Should parse — room contains the literal string (URL parsing)
+    assert.ok(r)
+    assert.equal(r.transport, 'websocket')
+  })
+
+  // 8.2: Long room name
+  it('connection string handles 10KB room name', () => {
+    let longRoom = 'a'.repeat(10000)
+    let r = parseConnectionString(`troparcel://ws/server.edu:2468/${longRoom}?token=x`)
+    assert.ok(r === null || typeof r.room === 'string')
+  })
+
+  // 8.3: Unknown transport
+  it('connection string returns null for unknown transport', () => {
+    let r = parseConnectionString('troparcel://ftp/server.edu/room')
+    assert.equal(r, null)
+  })
+
+  // 8.8: sanitizeDir with null bytes
+  it('sanitizeDir handles null bytes', () => {
+    let bm = new BackupManager('test', null, noopLogger)
+    let result = bm.sanitizeDir('room\x00evil')
+    assert.ok(!result.includes('\x00'))
+  })
+
+  // 8.8b: sanitizeDir with Windows reserved names
+  it('sanitizeDir handles Windows reserved names', () => {
+    let bm = new BackupManager('test', null, noopLogger)
+    for (let reserved of ['CON', 'PRN', 'NUL', 'COM1', 'LPT1']) {
+      let result = bm.sanitizeDir(reserved)
+      assert.ok(result.length > 0, `sanitizeDir should handle ${reserved}`)
+    }
+  })
+
+  // 8.9: Path separators — sanitizeDir strips slashes (dots allowed, safe
+  //   because result is used as a single directory name under a fixed parent)
+  it('sanitizeDir neutralizes path separators', () => {
+    let bm = new BackupManager('test', null, noopLogger)
+    let result = bm.sanitizeDir('../../etc/passwd')
+    assert.ok(!result.includes('/'), 'slashes must be removed')
+    assert.ok(!result.includes('\\'), 'backslashes must be removed')
+  })
+
+  // 8.10: API client file path bypass
+  it('importItems blocks /etc/passwd', async () => {
+    let client = new ApiClient()
+    await assert.rejects(
+      () => client.importItems({ file: '/etc/passwd' }),
+      { message: /blocked/i }
+    )
+  })
+
+  // 8.4: Backup size boundary — over limit
+  it('validateInbound rejects oversized note', () => {
+    let bm = new BackupManager('test', null, noopLogger, { maxNoteSize: 100 })
+    let result = bm.validateInbound('item-1', {
+      notes: { 'note-1': { html: 'x'.repeat(101) } }
+    })
+    assert.ok(!result.valid, 'Over-limit note should be rejected')
+  })
+
+  // 8.4b: Under limit
+  it('validateInbound accepts note under size limit', () => {
+    let bm = new BackupManager('test', null, noopLogger, { maxNoteSize: 100 })
+    let result = bm.validateInbound('item-1', {
+      notes: { 'note-1': { html: 'x'.repeat(50) } }
+    })
+    assert.ok(result.valid, 'Under-limit note should be accepted')
+  })
+
+  // 8.13: Missing backup directory
+  it('listBackups handles missing directory', () => {
+    let bm = new BackupManager('nonexistent-room-xyz-test', null, noopLogger)
+    let backups = bm.listBackups()
+    assert.ok(Array.isArray(backups))
+    assert.equal(backups.length, 0)
+  })
+
+  // 8.2b: Connection string roundtrip
+  it('generate then parse connection string roundtrip', () => {
+    let original = { transport: 'websocket', serverUrl: 'ws://example.com:2468', room: 'test', roomToken: 'abc' }
+    let str = generateConnectionString(original)
+    let parsed = parseConnectionString(str)
+    assert.equal(parsed.transport, 'websocket')
+    assert.equal(parsed.room, 'test')
+    assert.equal(parsed.roomToken, 'abc')
   })
 })

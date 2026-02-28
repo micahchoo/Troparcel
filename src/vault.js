@@ -75,7 +75,8 @@ class SyncVault {
     this.pushedFieldValues = new Map()  // `${identity}:${field}` -> value hash
 
     // v4: Locally-dismissed remote deletions
-    this.dismissedKeys = new Set()
+    // Map<key, pushSeq> — pushSeq-aware: auto-undismiss when author revises content
+    this.dismissedKeys = new Map()
 
     // v4: Track notes that have been retracted (tombstone applied)
     // Prevents re-retraction on every apply cycle
@@ -84,6 +85,27 @@ class SyncVault {
     // v4: Track content hash of last-applied note content per CRDT key.
     // Used to detect local edits before overwriting with remote content.
     this.appliedNoteHashes = new Map()  // crdtKey -> FNV-1a hash of applied HTML
+
+    // v4: Original authors — maps CRDT key -> author userId.
+    // Recorded when content is first seen (push or apply).
+    // Used for apply-side tombstone validation (defense-in-depth).
+    this.originalAuthors = new Map()
+
+    // v6: Template/list push change detection
+    this.pushedTemplateHashes = new Map()  // URI -> content hash
+    this.pushedListHashes = new Map()      // list name -> content hash
+
+    // v6: List UUID mappings (local list ID <-> CRDT UUID)
+    this.listIdToCrdtUuid = new Map()
+    this.crdtUuidToListId = new Map()
+
+    // v6: Attribution tag ID cache — tagName -> tagId
+    // Not persisted — rediscovered from store state
+    this.attributionTagIds = new Map()
+
+    // v6: Synced list ID cache
+    // Not persisted — rediscovered from store state
+    this.syncedListId = null
   }
 
   markDirty() {
@@ -299,6 +321,62 @@ class SyncVault {
     return lastApplied !== this._fastHash(currentHtml)
   }
 
+  // --- Original author tracking (v4) ---
+
+  /**
+   * Record the original author of a CRDT entry (first write wins).
+   * Called during push (when we create entries) and apply (when we first see remote entries).
+   */
+  trackOriginalAuthor(key, author) {
+    if (!key || !author) return
+    if (this.originalAuthors.has(key)) return  // First write wins
+    this._evictIfNeeded(this.originalAuthors, MAX_ID_MAPPINGS)
+    this.originalAuthors.set(key, author)
+  }
+
+  /**
+   * Get the original author of a CRDT entry.
+   * Returns null if unknown (entry was never tracked).
+   */
+  getOriginalAuthor(key) {
+    return this.originalAuthors.get(key) || null
+  }
+
+  // --- pushSeq-aware dismissals (v4) ---
+
+  /**
+   * Dismiss a key with its current pushSeq.
+   * Auto-undismisses when author revises (pushSeq advances past dismissal).
+   */
+  dismissKey(key, pushSeq) {
+    this.dismissedKeys.set(key, pushSeq || 0)
+    this._dirty = true
+  }
+
+  /**
+   * Check if a key is dismissed. Returns false if pushSeq has advanced
+   * (author revised the content since dismissal).
+   */
+  isDismissed(key, currentPushSeq) {
+    if (!this.dismissedKeys.has(key)) return false
+    let dismissedAt = this.dismissedKeys.get(key)
+    return currentPushSeq <= dismissedAt
+  }
+
+  /**
+   * Check if a note should be skipped (dismissed OR permanently failed).
+   * Dismissed keys are NOT counted as failed — different buckets.
+   */
+  shouldSkipNote(noteKey, currentPushSeq) {
+    let prefixedKey = noteKey.startsWith('note:') ? noteKey : noteKey
+    if (this.isDismissed(prefixedKey, currentPushSeq)) return true
+    // Only check failedNoteKeys if NOT dismissed (dismissed = user choice, not failure)
+    if (!this.dismissedKeys.has(prefixedKey) && this.failedNoteKeys.has(noteKey)) {
+      return this.failedNoteKeys.get(noteKey) >= 3
+    }
+    return false
+  }
+
   // --- CRDT-fallback UUID recovery (v4) ---
 
   recoverFromCRDT(doc, identity, schema) {
@@ -423,9 +501,14 @@ class SyncVault {
         txMappings: Array.from(this.crdtKeyToTxId.entries()).map(([k, v]) => [k, v]),
         selMappings: Array.from(this.crdtKeyToSelId.entries()).map(([k, v]) => [k, v]),
         listMappings: Array.from(this.crdtKeyToListName.entries()).map(([k, v]) => [k, v]),
-        dismissedKeys: Array.from(this.dismissedKeys),
+        dismissedKeys: Array.from(this.dismissedKeys.entries()),
         retractedNoteKeys: Array.from(this.retractedNoteKeys),
-        appliedNoteHashes: Array.from(this.appliedNoteHashes.entries())
+        appliedNoteHashes: Array.from(this.appliedNoteHashes.entries()),
+        originalAuthors: Array.from(this.originalAuthors.entries()),
+        // v6: Template/list push hashes + list UUID mappings
+        pushedTemplateHashes: Array.from(this.pushedTemplateHashes.entries()),
+        pushedListHashes: Array.from(this.pushedListHashes.entries()),
+        listUuidMappings: Array.from(this.crdtUuidToListId.entries())
         // pushedFieldValues intentionally NOT persisted — rebuilt on first push cycle
       }
       await fs.promises.writeFile(tmpFile, JSON.stringify(data))
@@ -511,9 +594,15 @@ class SyncVault {
       if (typeof data.pushSeq === 'number') {
         this.pushSeq = data.pushSeq
       }
-      // v4: Restore dismissed keys
+      // v4: Restore dismissed keys (backward-compat: old Set format → pushSeq 0)
       if (Array.isArray(data.dismissedKeys)) {
-        for (let k of data.dismissedKeys) this.dismissedKeys.add(k)
+        for (let entry of data.dismissedKeys) {
+          if (Array.isArray(entry) && entry.length === 2) {
+            this.dismissedKeys.set(entry[0], entry[1])
+          } else if (typeof entry === 'string') {
+            this.dismissedKeys.set(entry, 0)
+          }
+        }
       }
       // v4: Restore retracted note keys
       if (Array.isArray(data.retractedNoteKeys)) {
@@ -522,6 +611,24 @@ class SyncVault {
       // v4: Restore applied note content hashes
       if (Array.isArray(data.appliedNoteHashes)) {
         for (let [k, v] of data.appliedNoteHashes) this.appliedNoteHashes.set(k, v)
+      }
+      // v4: Restore original authors
+      if (Array.isArray(data.originalAuthors)) {
+        for (let [k, v] of data.originalAuthors) this.originalAuthors.set(k, v)
+      }
+      // v6: Restore template/list push hashes
+      if (Array.isArray(data.pushedTemplateHashes)) {
+        for (let [k, v] of data.pushedTemplateHashes) this.pushedTemplateHashes.set(k, v)
+      }
+      if (Array.isArray(data.pushedListHashes)) {
+        for (let [k, v] of data.pushedListHashes) this.pushedListHashes.set(k, v)
+      }
+      // v6: Restore list UUID mappings
+      if (Array.isArray(data.listUuidMappings)) {
+        for (let [uuid, listId] of data.listUuidMappings) {
+          this.crdtUuidToListId.set(uuid, listId)
+          this.listIdToCrdtUuid.set(listId, uuid)
+        }
       }
       return true
     } catch {
@@ -554,6 +661,12 @@ class SyncVault {
     this.dismissedKeys.clear()
     this.retractedNoteKeys.clear()
     this.appliedNoteHashes.clear()
+    this.originalAuthors.clear()
+    this.pushedTemplateHashes.clear()
+    this.pushedListHashes.clear()
+    this.listIdToCrdtUuid.clear()
+    this.crdtUuidToListId.clear()
+    this.attributionTagIds.clear()
     this.pushSeq = 0
   }
 }
