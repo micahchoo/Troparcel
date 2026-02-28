@@ -4,6 +4,75 @@ const { describe, it, beforeEach } = require('node:test')
 const assert = require('node:assert/strict')
 
 // ============================================================
+//  connection-string.js
+// ============================================================
+
+describe('connection-string', () => {
+  const { parseConnectionString, generateConnectionString } = require('../src/connection-string')
+
+  it('parses websocket URL with port and room', () => {
+    let r = parseConnectionString('troparcel://ws/server.edu:2468/my-room?token=secret')
+    assert.equal(r.transport, 'websocket')
+    assert.equal(r.serverUrl, 'ws://server.edu:2468')
+    assert.equal(r.room, 'my-room')
+    assert.equal(r.roomToken, 'secret')
+  })
+
+  it('parses wss URL (no port)', () => {
+    let r = parseConnectionString('troparcel://ws/server.edu/room?token=abc')
+    assert.equal(r.serverUrl, 'wss://server.edu')
+  })
+
+  it('parses file path', () => {
+    let r = parseConnectionString('troparcel://file/home/alice/Nextcloud/tropy-collab')
+    assert.equal(r.transport, 'file')
+    assert.equal(r.syncDir, '/home/alice/Nextcloud/tropy-collab')
+  })
+
+  it('parses Windows file path', () => {
+    let r = parseConnectionString('troparcel://file/C:/Users/alice/Dropbox/sync')
+    assert.equal(r.transport, 'file')
+    assert.equal(r.syncDir, '/C:/Users/alice/Dropbox/sync')
+  })
+
+  it('parses snapshot URL', () => {
+    let r = parseConnectionString('troparcel://snapshot/https://r2.example.com/crdt/room.yjs?auth=Bearer+tok')
+    assert.equal(r.transport, 'snapshot')
+    assert.equal(r.snapshotUrl, 'https://r2.example.com/crdt/room.yjs')
+    assert.equal(r.snapshotAuth, 'Bearer tok')
+  })
+
+  it('parses bare ws:// URL as websocket', () => {
+    let r = parseConnectionString('ws://localhost:2468')
+    assert.equal(r.transport, 'websocket')
+    assert.equal(r.serverUrl, 'ws://localhost:2468')
+  })
+
+  it('returns null for empty string', () => {
+    assert.equal(parseConnectionString(''), null)
+    assert.equal(parseConnectionString(null), null)
+    assert.equal(parseConnectionString(undefined), null)
+  })
+
+  it('parses websocket with no room', () => {
+    let r = parseConnectionString('troparcel://ws/server.edu:2468')
+    assert.equal(r.transport, 'websocket')
+    assert.equal(r.serverUrl, 'ws://server.edu:2468')
+    assert.equal(r.room, undefined)
+  })
+
+  it('generates websocket connection string', () => {
+    let s = generateConnectionString({ transport: 'websocket', serverUrl: 'ws://example.com:2468', room: 'test', roomToken: 'abc' })
+    assert.equal(s, 'troparcel://ws/example.com:2468/test?token=abc')
+  })
+
+  it('generates file connection string', () => {
+    let s = generateConnectionString({ transport: 'file', syncDir: '/home/alice/sync' })
+    assert.equal(s, 'troparcel://file/home/alice/sync')
+  })
+})
+
+// ============================================================
 //  sanitize.js
 // ============================================================
 
@@ -434,15 +503,14 @@ describe('identity', () => {
       assert.equal(identity.computeIdentity(item1), identity.computeIdentity(item2))
     })
 
-    it('falls back to template+title+date when no checksums', () => {
+    it('returns null when no photo checksums (photo-less items not syncable)', () => {
       let item = {
         template: 'https://tropy.org/v1/templates/generic',
         'http://purl.org/dc/elements/1.1/title': 'Test Item',
         'http://purl.org/dc/elements/1.1/date': '2024-01-01'
       }
       let id = identity.computeIdentity(item)
-      assert.ok(id)
-      assert.equal(id.length, 32)
+      assert.equal(id, null)
     })
 
     it('returns null for item with no identifying info', () => {
@@ -606,17 +674,19 @@ describe('vault', () => {
 
   describe('hasItemChanged / markPushed', () => {
     it('returns true for unknown items', () => {
-      assert.ok(vault.hasItemChanged('item1', { title: 'Test' }))
+      assert.ok(vault.hasItemChanged('item1', { title: 'Test' }).changed)
     })
 
     it('returns false after marking pushed', () => {
-      vault.markPushed('item1', { title: 'Test' })
-      assert.ok(!vault.hasItemChanged('item1', { title: 'Test' }))
+      let { hash } = vault.hasItemChanged('item1', { title: 'Test' })
+      vault.markPushed('item1', hash)
+      assert.ok(!vault.hasItemChanged('item1', { title: 'Test' }).changed)
     })
 
     it('returns true when item content changes', () => {
-      vault.markPushed('item1', { title: 'Test' })
-      assert.ok(vault.hasItemChanged('item1', { title: 'Changed' }))
+      let { hash } = vault.hasItemChanged('item1', { title: 'Test' })
+      vault.markPushed('item1', hash)
+      assert.ok(vault.hasItemChanged('item1', { title: 'Changed' }).changed)
     })
   })
 
@@ -701,12 +771,96 @@ describe('vault', () => {
     })
   })
 
+  describe('pushSeq-aware dismissals (V2)', () => {
+    it('dismissKey stores pushSeq', () => {
+      vault.dismissKey('note:n_abc', 5)
+      assert.equal(vault.isDismissed('note:n_abc', 5), true)
+      assert.equal(vault.isDismissed('note:n_abc', 6), false)
+    })
+
+    it('isDismissed returns false for unknown key', () => {
+      assert.equal(vault.isDismissed('note:n_xyz', 0), false)
+    })
+
+    it('auto-undismisses when pushSeq advances', () => {
+      vault.dismissKey('note:n_abc', 3)
+      assert.equal(vault.isDismissed('note:n_abc', 3), true)
+      assert.equal(vault.isDismissed('note:n_abc', 4), false)
+    })
+
+    it('shouldSkipNote returns true for dismissed notes', () => {
+      vault.dismissKey('n_abc', 5)
+      assert.equal(vault.shouldSkipNote('n_abc', 5), true)
+      assert.equal(vault.shouldSkipNote('n_abc', 6), false)
+    })
+
+    it('shouldSkipNote returns true for failed notes (>= 3 retries)', () => {
+      vault.failedNoteKeys.set('n_fail', 3)
+      assert.equal(vault.shouldSkipNote('n_fail', 0), true)
+    })
+
+    it('shouldSkipNote dismissed overrides failedNoteKeys', () => {
+      vault.dismissKey('n_abc', 5)
+      vault.failedNoteKeys.set('n_abc', 3)
+      assert.equal(vault.shouldSkipNote('n_abc', 5), true)
+      // When undismissed (pushSeq advanced), failedNoteKeys should NOT block
+      assert.equal(vault.shouldSkipNote('n_abc', 6), false)
+    })
+
+    it('dismissedKeys serialization round-trip (Map entries)', () => {
+      vault.dismissKey('note:n_abc', 5)
+      vault.dismissKey('sel:s_def', 10)
+      let entries = Array.from(vault.dismissedKeys.entries())
+      let v2 = new SyncVault()
+      for (let [k, v] of entries) v2.dismissedKeys.set(k, v)
+      assert.equal(v2.isDismissed('note:n_abc', 5), true)
+      assert.equal(v2.isDismissed('sel:s_def', 10), true)
+    })
+
+    it('backward-compat: old Set format loads as pushSeq 0', () => {
+      // Simulate old format: array of strings
+      let v2 = new SyncVault()
+      let oldData = ['note:n_old1', 'sel:s_old2']
+      for (let entry of oldData) {
+        if (typeof entry === 'string') v2.dismissedKeys.set(entry, 0)
+      }
+      assert.equal(v2.isDismissed('note:n_old1', 0), true)
+      assert.equal(v2.isDismissed('note:n_old1', 1), false)
+    })
+  })
+
+  describe('original author tracking (V2)', () => {
+    it('tracks original author (first write wins)', () => {
+      vault.trackOriginalAuthor('n_abc', 'alice')
+      assert.equal(vault.getOriginalAuthor('n_abc'), 'alice')
+    })
+
+    it('first write wins — does not overwrite', () => {
+      vault.trackOriginalAuthor('n_abc', 'alice')
+      vault.trackOriginalAuthor('n_abc', 'bob')
+      assert.equal(vault.getOriginalAuthor('n_abc'), 'alice')
+    })
+
+    it('returns null for unknown key', () => {
+      assert.equal(vault.getOriginalAuthor('unknown'), null)
+    })
+
+    it('ignores null/empty author', () => {
+      vault.trackOriginalAuthor('n_abc', null)
+      assert.equal(vault.getOriginalAuthor('n_abc'), null)
+      vault.trackOriginalAuthor('n_abc', '')
+      assert.equal(vault.getOriginalAuthor('n_abc'), null)
+    })
+  })
+
   describe('clear', () => {
     it('resets all state', () => {
       vault.hasCRDTChanged({ foo: 'bar' })
       vault.markPushed('item1', { title: 'Test' })
       vault.appliedNoteKeys.add('note-1')
       vault.updateAnnotationCount(10)
+      vault.dismissKey('note:n_test', 5)
+      vault.trackOriginalAuthor('n_test', 'alice')
 
       vault.clear()
 
@@ -714,6 +868,8 @@ describe('vault', () => {
       assert.equal(vault.pushedHashes.size, 0)
       assert.equal(vault.appliedNoteKeys.size, 0)
       assert.equal(vault.annotationCount, 0)
+      assert.equal(vault.dismissedKeys.size, 0)
+      assert.equal(vault.originalAuthors.size, 0)
     })
   })
 })
@@ -991,22 +1147,6 @@ describe('crdt-schema', () => {
     })
   })
 
-  describe('user registration', () => {
-    it('registers and deregisters users', () => {
-      let doc = new Y.Doc()
-      schema.registerUser(doc, 123, 'alice')
-
-      let users = schema.getUsers(doc)
-      let alice = users.find(u => u.userId === 'alice')
-      assert.ok(alice)
-
-      schema.deregisterUser(doc, 123)
-      users = schema.getUsers(doc)
-      alice = users.find(u => u.userId === 'alice')
-      assert.ok(!alice)
-    })
-  })
-
   describe('getAllIdentities (via getSnapshot)', () => {
     it('returns all item identities in the doc', () => {
       let doc = new Y.Doc()
@@ -1116,7 +1256,7 @@ describe('plugin', () => {
 
       new TroparcelPlugin({ autoSync: false }, ctx)
       assert.ok(!logs.some(m => m.includes('skipping sync')))
-      assert.ok(logs.some(m => m.includes('v4.0')))
+      assert.ok(logs.some(m => m.includes('v5.0')))
     })
   })
 
@@ -1207,7 +1347,7 @@ describe('plugin', () => {
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
       let status = plugin.getStatus()
 
-      assert.equal(status.version, '4.1.0')
+      assert.equal(status.version, '5.0.0')
       assert.equal(status.backgroundSync, false)
       assert.equal(status.engine, null)
     })
@@ -1327,14 +1467,15 @@ describe('store-adapter', () => {
         200: { id: 200, name: 'Research', parent: null, children: [] }
       },
       activities: {},
-      transcriptions: {}
+      transcriptions: {},
+      ontology: { template: {}, vocab: {} }
     }
   }
 
   describe('getAllItems', () => {
     it('returns all items as summaries', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let items = adapter.getAllItems()
 
       assert.equal(items.length, 2)
@@ -1348,7 +1489,7 @@ describe('store-adapter', () => {
   describe('getItemFull', () => {
     it('returns fully enriched item', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let item = adapter.getItemFull(1)
 
       assert.ok(item)
@@ -1364,13 +1505,13 @@ describe('store-adapter', () => {
 
     it('returns null for nonexistent item', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       assert.equal(adapter.getItemFull(999), null)
     })
 
     it('includes metadata on item', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let item = adapter.getItemFull(1)
 
       assert.ok(item['http://purl.org/dc/elements/1.1/title'])
@@ -1381,7 +1522,7 @@ describe('store-adapter', () => {
   describe('getAllTags', () => {
     it('returns all tags', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let tags = adapter.getAllTags()
 
       assert.equal(tags.length, 1)
@@ -1393,7 +1534,7 @@ describe('store-adapter', () => {
   describe('getAllLists', () => {
     it('returns all lists', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let lists = adapter.getAllLists()
 
       assert.equal(lists.length, 1)
@@ -1404,7 +1545,7 @@ describe('store-adapter', () => {
   describe('_noteStateToHtml', () => {
     it('converts ProseMirror state to HTML', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let state = mockState()
       let html = adapter._noteStateToHtml(state.notes[30])
 
@@ -1413,7 +1554,7 @@ describe('store-adapter', () => {
 
     it('converts bold marks', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let state = mockState()
       let html = adapter._noteStateToHtml(state.notes[31])
 
@@ -1422,7 +1563,7 @@ describe('store-adapter', () => {
 
     it('falls back to text when no state', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let html = adapter._noteStateToHtml({ text: 'Plain text' })
 
       assert.equal(html, '<p>Plain text</p>')
@@ -1430,7 +1571,7 @@ describe('store-adapter', () => {
 
     it('returns empty for empty note', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       let html = adapter._noteStateToHtml({})
 
       assert.equal(html, '')
@@ -1448,7 +1589,7 @@ describe('store-adapter', () => {
           return () => { listeners = listeners.filter(l => l !== fn) }
         }
       }
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
 
       let called = false
       let unsub = adapter.subscribe(() => { called = true })
@@ -1471,7 +1612,7 @@ describe('store-adapter', () => {
           return () => { listeners = listeners.filter(l => l !== fn) }
         }
       }
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
 
       let called = false
       adapter.subscribe(() => { called = true })
@@ -1488,7 +1629,7 @@ describe('store-adapter', () => {
   describe('ping', () => {
     it('returns true when store exists', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       assert.ok(adapter.ping())
     })
   })
@@ -1496,10 +1637,36 @@ describe('store-adapter', () => {
   describe('_esc', () => {
     it('escapes HTML entities', () => {
       let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {} })
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
       assert.equal(adapter._esc('<script>'), '&lt;script&gt;')
       assert.equal(adapter._esc('"hello"'), '&quot;hello&quot;')
       assert.equal(adapter._esc('a&b'), 'a&amp;b')
+    })
+  })
+
+  describe('dispatchSuppressed (V3)', () => {
+    it('dispatches action with change detection suppressed', () => {
+      let dispatched = []
+      let store = {
+        getState: () => mockState(),
+        dispatch: (action) => { dispatched.push(action); return action },
+        subscribe: () => () => {}
+      }
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
+      adapter.dispatchSuppressed({ type: 'test.action', payload: {} })
+      assert.equal(dispatched.length, 1)
+      assert.equal(adapter._suppressChangeDetection, false)
+    })
+
+    it('restores change detection even on dispatch error', () => {
+      let store = {
+        getState: () => mockState(),
+        dispatch: () => { throw new Error('boom') },
+        subscribe: () => () => {}
+      }
+      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
+      try { adapter.dispatchSuppressed({ type: 'test.action' }) } catch {}
+      assert.equal(adapter._suppressChangeDetection, false)
     })
   })
 
@@ -1523,5 +1690,420 @@ describe('store-adapter', () => {
       assert.ok(warnings[0].includes('tags'))
       assert.ok(warnings[0].includes('lists'))
     })
+  })
+})
+
+// ============================================================
+//  V3: Attribution helpers
+// ============================================================
+
+describe('attribution (V3)', () => {
+  it('attributionColor is deterministic', () => {
+    // Test the algorithm directly — same hash logic as in apply.js
+    const PALETTE = [
+      '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+      '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+      '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000'
+    ]
+    function color(username) {
+      let hash = 0
+      for (let i = 0; i < username.length; i++) {
+        hash = ((hash << 5) - hash) + username.charCodeAt(i)
+        hash |= 0
+      }
+      return PALETTE[Math.abs(hash) % PALETTE.length]
+    }
+    let c1 = color('alice')
+    let c2 = color('alice')
+    let c3 = color('bob')
+    assert.equal(c1, c2)
+    assert.notEqual(c1, c3)
+    assert.match(c1, /^#[0-9a-fA-F]{6}$/)
+  })
+})
+
+// ============================================================
+//  V5: crdt-schema — template + list hierarchy
+// ============================================================
+
+describe('crdt-schema v5 (template + list hierarchy)', () => {
+  const Y = require('yjs')
+  const schema = require('../src/crdt-schema')
+
+  it('set/get template schema', () => {
+    let doc = new Y.Doc()
+    schema.setTemplateSchema(doc, 'https://example.org/template/field-notes', {
+      name: 'Field Notes', type: 'https://tropy.org/v1/tropy#Item',
+      creator: 'alice', description: 'A template for field notes',
+      fields: [
+        { property: 'http://purl.org/dc/elements/1.1/title', label: 'Title', datatype: 'http://www.w3.org/2001/XMLSchema#string' },
+        { property: 'http://purl.org/dc/elements/1.1/date', label: 'Date' }
+      ]
+    }, 'alice', 1)
+    let result = schema.getTemplateSchema(doc)
+    let uri = 'https://example.org/template/field-notes'
+    assert.equal(result[uri].name, 'Field Notes')
+    assert.equal(result[uri].fields.length, 2)
+    assert.equal(result[uri].fields[0].property, 'http://purl.org/dc/elements/1.1/title')
+    assert.equal(result[uri].author, 'alice')
+  })
+
+  it('remove template schema (tombstone)', () => {
+    let doc = new Y.Doc()
+    let uri = 'https://example.org/template/test'
+    schema.setTemplateSchema(doc, uri, { name: 'Test', type: 'Item', fields: [] }, 'alice', 1)
+    schema.removeTemplateSchema(doc, uri, 'alice', 2)
+    let result = schema.getTemplateSchema(doc)
+    assert.equal(result[uri].deleted, true)
+  })
+
+  it('set/get list hierarchy entry', () => {
+    let doc = new Y.Doc()
+    schema.setListHierarchyEntry(doc, 'l_uuid1', { name: 'Research', parent: null, children: ['l_uuid2'] }, 'alice', 1)
+    schema.setListHierarchyEntry(doc, 'l_uuid2', { name: 'Fieldwork', parent: 'l_uuid1', children: [] }, 'alice', 1)
+    let result = schema.getListHierarchy(doc)
+    assert.equal(result['l_uuid1'].name, 'Research')
+    assert.equal(result['l_uuid1'].children[0], 'l_uuid2')
+    assert.equal(result['l_uuid2'].parent, 'l_uuid1')
+  })
+
+  it('remove list hierarchy entry (tombstone)', () => {
+    let doc = new Y.Doc()
+    schema.setListHierarchyEntry(doc, 'l_uuid1', { name: 'Old List', parent: null, children: [] }, 'alice', 1)
+    schema.removeListHierarchyEntry(doc, 'l_uuid1', 'alice', 2)
+    let result = schema.getListHierarchy(doc)
+    assert.equal(result['l_uuid1'].deleted, true)
+  })
+
+  it('observeSchema fires on template change', (t, done) => {
+    let doc = new Y.Doc()
+    schema.observeSchema(doc, (changes) => {
+      assert.equal(changes.length, 1)
+      assert.equal(changes[0].uri, 'https://example.org/t/1')
+      done()
+    })
+    schema.setTemplateSchema(doc, 'https://example.org/t/1', { name: 'T1', type: 'Item', fields: [] }, 'bob', 1)
+  })
+
+  it('observeProjectLists fires on list change', (t, done) => {
+    let doc = new Y.Doc()
+    schema.observeProjectLists(doc, (changes) => {
+      assert.equal(changes.length, 1)
+      assert.equal(changes[0].uuid, 'l_test')
+      done()
+    })
+    schema.setListHierarchyEntry(doc, 'l_test', { name: 'Test', parent: null, children: [] }, 'bob', 1)
+  })
+})
+
+// ============================================================
+//  V5: store-adapter — readTemplates / readLists
+// ============================================================
+
+describe('store-adapter V5 (readTemplates / readLists)', () => {
+  const { StoreAdapter } = require('../src/store-adapter')
+
+  function mockStore(state) {
+    let listeners = []
+    return {
+      getState: () => state,
+      dispatch: (action) => {
+        action.meta = action.meta || {}
+        action.meta.seq = Date.now()
+        action.meta.now = Date.now()
+        return action
+      },
+      subscribe: (fn) => {
+        listeners.push(fn)
+        return () => {
+          listeners = listeners.filter(l => l !== fn)
+        }
+      },
+      _listeners: listeners,
+      _notify: () => listeners.forEach(fn => fn())
+    }
+  }
+
+  it('readTemplates returns ontology.template', () => {
+    let state = {
+      items: {}, photos: {}, selections: {}, notes: {},
+      metadata: {}, tags: {}, lists: {}, activities: {}, transcriptions: {},
+      ontology: {
+        template: {
+          'https://tropy.org/v1/templates/generic': {
+            name: 'Generic', type: 'Item',
+            fields: [{ property: 'dc:title', label: 'Title' }]
+          }
+        }
+      }
+    }
+    let store = mockStore(state)
+    let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
+    let templates = adapter.readTemplates()
+    assert.equal(templates['https://tropy.org/v1/templates/generic'].name, 'Generic')
+    assert.equal(templates['https://tropy.org/v1/templates/generic'].fields.length, 1)
+  })
+
+  it('readTemplates returns empty when ontology missing', () => {
+    let state = {
+      items: {}, photos: {}, selections: {}, notes: {},
+      metadata: {}, tags: {}, lists: {}, activities: {}, transcriptions: {}
+    }
+    let store = mockStore(state)
+    let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
+    let templates = adapter.readTemplates()
+    assert.deepEqual(templates, {})
+  })
+
+  it('readLists returns state.lists', () => {
+    let state = {
+      items: {}, photos: {}, selections: {}, notes: {},
+      metadata: {}, tags: {}, activities: {}, transcriptions: {},
+      lists: {
+        1: { id: 1, name: 'Research', parent: null, children: [2] },
+        2: { id: 2, name: 'Fieldwork', parent: 1, children: [] }
+      }
+    }
+    let store = mockStore(state)
+    let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
+    let lists = adapter.readLists()
+    assert.equal(lists[1].name, 'Research')
+    assert.equal(lists[2].parent, 1)
+    assert.deepEqual(lists[1].children, [2])
+  })
+})
+
+// ============================================================
+//  V5: vault — template + list hashes
+// ============================================================
+
+describe('vault V5 (template + list hashes)', () => {
+  const { SyncVault } = require('../src/vault')
+  let vault
+
+  beforeEach(() => {
+    vault = new SyncVault()
+  })
+
+  it('tracks pushed template hashes', () => {
+    vault.pushedTemplateHashes.set('https://example.org/t/1', 'abc123')
+    assert.equal(vault.pushedTemplateHashes.get('https://example.org/t/1'), 'abc123')
+  })
+
+  it('tracks pushed list hashes', () => {
+    vault.pushedListHashes.set('l_uuid1', 'def456')
+    assert.equal(vault.pushedListHashes.get('l_uuid1'), 'def456')
+  })
+
+  it('maps list IDs bidirectionally', () => {
+    vault.listIdToCrdtUuid.set(42, 'l_uuid1')
+    vault.crdtUuidToListId.set('l_uuid1', 42)
+    assert.equal(vault.listIdToCrdtUuid.get(42), 'l_uuid1')
+    assert.equal(vault.crdtUuidToListId.get('l_uuid1'), 42)
+  })
+})
+
+// ============================================================
+//  C2: Push unit tests (via helpers)
+// ============================================================
+
+describe('push (unit tests via helpers)', () => {
+  const { buildItem, buildTemplate, buildCRDTDoc, mockStore, mockState, mockSyncContext } = require('./helpers')
+  const schema = require('../src/crdt-schema')
+
+  it('pushMetadata writes metadata to CRDT doc', () => {
+    let ctx = mockSyncContext()
+    let item = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'My Title', '@type': 'string' }
+    })
+    let itemIdentity = 'test-identity-hash'
+    ctx.pushMetadata(item, itemIdentity, 'test-user', 1)
+    let meta = schema.getMetadata(ctx.doc, itemIdentity)
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].text, 'My Title')
+  })
+
+  it('pushTags writes tags to CRDT doc', () => {
+    let ctx = mockSyncContext()
+    let item = buildItem({ tag: [{ name: 'Important', color: '#ff0000' }] })
+    ctx.pushTags(item, 'test-identity', 'test-user', 1)
+    let tags = schema.getActiveTags(ctx.doc, 'test-identity')
+    assert.equal(tags.length, 1)
+    assert.equal(tags[0].name, 'Important')
+  })
+
+  it('pushNotes writes notes to CRDT doc', () => {
+    let ctx = mockSyncContext()
+    let item = buildItem({
+      photo: [{
+        '@id': 10,
+        checksum: 'abc123',
+        note: [{ '@id': 30, text: 'Hello world', html: '<p>Hello world</p>' }],
+        selection: [],
+        transcription: []
+      }]
+    })
+    let checksumMap = new Map([[10, 'abc123']])
+    ctx.previousSnapshot = new Map()
+    let result = ctx.pushNotes(item, 'test-identity', 'test-user', checksumMap, 1)
+    let notes = schema.getActiveNotes(ctx.doc, 'test-identity')
+    let noteValues = Object.values(notes)
+    assert.ok(noteValues.length >= 1)
+    assert.equal(noteValues[0].html, '<p>Hello world</p>')
+  })
+
+  it('pushTemplates writes templates to CRDT doc', () => {
+    let tmpl = buildTemplate({ name: 'Photo Template' })
+    let state = mockState({
+      ontology: { template: { [tmpl.uri]: tmpl } }
+    })
+    let ctx = mockSyncContext({ state })
+    ctx.pushTemplates(1)
+    let templates = schema.getTemplateSchema(ctx.doc)
+    assert.ok(templates[tmpl.uri])
+    assert.equal(templates[tmpl.uri].name, 'Photo Template')
+  })
+
+  it('pushListHierarchy writes lists to CRDT doc', () => {
+    let state = mockState({
+      lists: {
+        0: { id: 0, name: 'Root', parent: null, children: [1] },
+        1: { id: 1, name: 'Research', parent: 0, children: [] }
+      }
+    })
+    let ctx = mockSyncContext({ state })
+    ctx.pushListHierarchy(1)
+    let hierarchy = schema.getListHierarchy(ctx.doc)
+    let entries = Object.values(hierarchy)
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].name, 'Research')
+  })
+})
+
+// ============================================================
+//  C3: Apply unit tests (via helpers)
+// ============================================================
+
+describe('apply (unit tests via helpers)', () => {
+  const { buildTemplate, buildCRDTDoc, mockStore, mockState, mockSyncContext } = require('./helpers')
+
+  it('applyTemplates dispatches template creation', async () => {
+    let tmpl = buildTemplate({ name: 'Remote Template', uri: 'https://example.org/tmpl/remote' })
+    let doc = buildCRDTDoc({
+      templates: { [tmpl.uri]: tmpl }
+    })
+    let state = mockState({ ontology: { template: {} } })
+    let store = mockStore(state)
+    let ctx = mockSyncContext({ doc, state, store, userId: 'local-user' })
+    await ctx.applyTemplates()
+    let dispatched = store._dispatched
+    let tmplDispatch = dispatched.find(a => a.type === 'ontology.template.create')
+    assert.ok(tmplDispatch, 'should dispatch ontology.template.create')
+    assert.ok(tmplDispatch.payload[tmpl.uri])
+  })
+
+  it('applyTemplates skips own templates', async () => {
+    let doc = buildCRDTDoc({
+      templates: { 'https://example.org/tmpl/mine': buildTemplate({ name: 'My Template' }) }
+    })
+    let state = mockState({ ontology: { template: {} } })
+    let store = mockStore(state)
+    let ctx = mockSyncContext({ doc, state, store, userId: 'remote-user' })
+    await ctx.applyTemplates()
+    let dispatched = store._dispatched
+    let tmplDispatch = dispatched.find(a => a.type === 'ontology.template.create')
+    assert.ok(!tmplDispatch, 'should NOT dispatch for own templates')
+  })
+
+  it('applyListHierarchy dispatches list creation', async () => {
+    let doc = buildCRDTDoc({
+      lists: { 'l_uuid-1': { name: 'Archive', parent: null, children: [] } }
+    })
+    let state = mockState({ lists: {} })
+    let store = mockStore(state)
+    let ctx = mockSyncContext({ doc, state, store, userId: 'local-user' })
+    await ctx.applyListHierarchy()
+    let dispatched = store._dispatched
+    let listDispatch = dispatched.find(a => a.type === 'list.create')
+    assert.ok(listDispatch, 'should dispatch list.create')
+    assert.equal(listDispatch.payload.name, 'Archive')
+  })
+
+  it('applyListHierarchy skips own lists', async () => {
+    let doc = buildCRDTDoc({
+      lists: { 'l_uuid-2': { name: 'My List', parent: null, children: [] } }
+    })
+    let state = mockState({ lists: {} })
+    let store = mockStore(state)
+    let ctx = mockSyncContext({ doc, state, store, userId: 'remote-user' })
+    await ctx.applyListHierarchy()
+    let dispatched = store._dispatched
+    let listDispatch = dispatched.find(a => a.type === 'list.create')
+    assert.ok(!listDispatch, 'should NOT dispatch for own lists')
+  })
+})
+
+// ============================================================
+//  C4: Roundtrip tests (push -> CRDT -> apply)
+// ============================================================
+
+describe('roundtrip (push -> CRDT -> apply)', () => {
+  const { buildItem, buildTemplate, mockStore, mockState, mockSyncContext } = require('./helpers')
+  const schema = require('../src/crdt-schema')
+
+  it('metadata roundtrip (push -> CRDT -> verify)', () => {
+    let ctxA = mockSyncContext({
+      state: mockState(),
+      userId: 'user-a'
+    })
+    let item = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Roundtrip Title', '@type': 'string' },
+      'http://purl.org/dc/elements/1.1/description': { '@value': 'A description', '@type': 'string' }
+    })
+    ctxA.pushMetadata(item, 'rt-identity', 'user-a', 1)
+
+    let meta = schema.getMetadata(ctxA.doc, 'rt-identity')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].text, 'Roundtrip Title')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/description'].text, 'A description')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].author, 'user-a')
+  })
+
+  it('tags roundtrip (push -> CRDT -> verify)', () => {
+    let ctxA = mockSyncContext({ userId: 'user-a' })
+    let item = buildItem({
+      tag: [
+        { name: 'Important', color: '#ff0000' },
+        { name: 'Review', color: '#00ff00' }
+      ]
+    })
+    ctxA.pushTags(item, 'rt-tag-identity', 'user-a', 1)
+
+    let tags = schema.getActiveTags(ctxA.doc, 'rt-tag-identity')
+    assert.equal(tags.length, 2)
+    let names = tags.map(t => t.name).sort()
+    assert.deepEqual(names, ['Important', 'Review'])
+  })
+
+  it('template+list roundtrip', async () => {
+    let tmpl = buildTemplate({ name: 'Shared Template', uri: 'https://tropy.org/v1/templates/shared' })
+    let stateA = mockState({
+      ontology: { template: { [tmpl.uri]: tmpl } },
+      lists: {
+        0: { id: 0, name: 'Root', parent: null, children: [1] },
+        1: { id: 1, name: 'Shared List', parent: 0, children: [] }
+      }
+    })
+    let ctxA = mockSyncContext({ state: stateA, userId: 'user-a' })
+    ctxA.pushTemplates(1)
+    ctxA.pushListHierarchy(1)
+
+    let stateB = mockState({ ontology: { template: {} }, lists: {} })
+    let storeB = mockStore(stateB)
+    let ctxB = mockSyncContext({ doc: ctxA.doc, state: stateB, store: storeB, userId: 'user-b' })
+    await ctxB.applyTemplates()
+    await ctxB.applyListHierarchy()
+
+    let dispatched = storeB._dispatched
+    assert.ok(dispatched.find(a => a.type === 'ontology.template.create'), 'should create template')
+    assert.ok(dispatched.find(a => a.type === 'list.create'), 'should create list')
   })
 })

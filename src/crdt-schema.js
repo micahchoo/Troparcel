@@ -34,6 +34,10 @@ const { YKeyValue } = require('y-utility/y-keyvalue')
  *   │       ├── Y.Map "uuids"                    {[uuid]: {type, localRef, author}}
  *   │       ├── Y.Map "aliases"                  {[oldIdentity]: targetIdentity}
  *   │       └── "checksums"                      string (comma-separated)
+ *   ├── Y.Map "schema"                           keyed by template URI (v6)
+ *   │   └── {uri, name, type, version, creator, description, fields:[], author, pushSeq}
+ *   ├── Y.Map "projectLists"                     keyed by UUID (v6)
+ *   │   └── {uuid, name, parent, children:[], author, pushSeq}
  *   ├── Y.Map "room"                             {schemaVersion: 4}
  *   └── (Awareness protocol for presence — NOT persisted in Y.Doc)
  *
@@ -125,6 +129,7 @@ function getItemAnnotations(doc, identity) {
   let isNew = !itemMap
   if (isNew) {
     itemMap = new Y.Map()
+    annotations.set(identity, itemMap)
   }
 
   let result = {}
@@ -144,10 +149,6 @@ function getItemAnnotations(doc, identity) {
       }
       result[section] = sectionMap
     }
-  }
-
-  if (isNew) {
-    annotations.set(identity, itemMap)
   }
 
   return result
@@ -175,7 +176,7 @@ function getMetadata(doc, identity) {
 
   let ykv = _cachedYKV(arr)
   let result = {}
-  ykv.map.forEach((val, key) => { result[key] = val })
+  ykv.map.forEach((entry, key) => { result[key] = entry.val ?? entry })
   return result
 }
 
@@ -342,7 +343,7 @@ function getPhotoMetadata(doc, identity, checksum) {
 
   let ykv = _cachedYKV(arr)
   let result = {}
-  ykv.map.forEach((val, key) => { result[key] = val })
+  ykv.map.forEach((entry, key) => { result[key] = entry.val ?? entry })
   return result
 }
 
@@ -447,10 +448,10 @@ function getSelectionMeta(doc, identity, selUUID) {
   let ykv = _cachedYKV(arr)
   let prefix = `${selUUID}:`
   let result = {}
-  ykv.map.forEach((value, key) => {
+  ykv.map.forEach((entry, key) => {
     if (key.startsWith(prefix)) {
       let propUri = key.slice(prefix.length)
-      result[propUri] = value
+      result[propUri] = entry.val ?? entry
     }
   })
   return result
@@ -829,7 +830,7 @@ function getItemSnapshot(doc, identity) {
       }
       let ykv = _cachedYKV(arr)
       let obj = {}
-      ykv.map.forEach((v, k) => { obj[k] = v })
+      ykv.map.forEach((entry, k) => { obj[k] = entry.val ?? entry })
       item[section] = obj
     } else if (section === 'photos') {
       let photosMap = itemMap.get(section)
@@ -840,7 +841,7 @@ function getItemSnapshot(doc, identity) {
           let meta = {}
           if (arr && arr instanceof Y.Array) {
             let ykv = _cachedYKV(arr)
-            ykv.map.forEach((v, k) => { meta[k] = v })
+            ykv.map.forEach((entry, k) => { meta[k] = entry.val ?? entry })
           } else if (arr) {
             // Fallback: plain Y.Map (shouldn't happen in v4 but be safe)
             arr.forEach((v, k) => { meta[k] = v })
@@ -893,7 +894,7 @@ function getSnapshot(doc) {
         }
         let ykv = _cachedYKV(arr)
         let obj = {}
-        ykv.map.forEach((v, k) => { obj[k] = _stripMeta(v) })
+        ykv.map.forEach((entry, k) => { obj[k] = _stripMeta(entry.val ?? entry) })
         item[section] = obj
       } else if (section === 'photos') {
         let photosMap = itemMap.get(section)
@@ -904,7 +905,7 @@ function getSnapshot(doc) {
             let meta = {}
             if (arr && arr instanceof Y.Array) {
               let ykv = _cachedYKV(arr)
-              ykv.map.forEach((v, k) => { meta[k] = _stripMeta(v) })
+              ykv.map.forEach((entry, k) => { meta[k] = _stripMeta(entry.val ?? entry) })
             } else if (arr) {
               arr.forEach((v, k) => { meta[k] = _stripMeta(v) })
             }
@@ -945,6 +946,115 @@ function getRoomConfig(doc) {
     result[key] = value
   })
   return result
+}
+
+// --- Template Schema (root doc, keyed by URI) ---
+
+function getTemplateSchema(doc) {
+  let schemaMap = doc.getMap('schema')
+  let result = {}
+  schemaMap.forEach((val, key) => {
+    result[key] = val
+  })
+  return result
+}
+
+function setTemplateSchema(doc, uri, templateDef, author, pushSeq) {
+  let schemaMap = doc.getMap('schema')
+  schemaMap.set(uri, {
+    uri,
+    name: templateDef.name,
+    type: templateDef.type,
+    version: templateDef.version || null,
+    creator: templateDef.creator || null,
+    description: templateDef.description || null,
+    fields: (templateDef.fields || []).map(f => ({
+      property: f.property,
+      label: f.label || null,
+      datatype: f.datatype || null,
+      isRequired: !!f.isRequired,
+      isConstant: !!f.isConstant,
+      hint: f.hint || null,
+      value: f.value || null
+    })),
+    author,
+    pushSeq: pushSeq || 0
+  })
+}
+
+function removeTemplateSchema(doc, uri, author, pushSeq) {
+  let schemaMap = doc.getMap('schema')
+  schemaMap.set(uri, {
+    uri,
+    deleted: true,
+    author,
+    pushSeq: pushSeq || 0,
+    deletedAt: Date.now()
+  })
+}
+
+// --- List Hierarchy (root doc, keyed by UUID) ---
+
+function getListHierarchy(doc) {
+  let listsMap = doc.getMap('projectLists')
+  let result = {}
+  listsMap.forEach((val, key) => {
+    result[key] = val
+  })
+  return result
+}
+
+function setListHierarchyEntry(doc, uuid, entry, author, pushSeq) {
+  let listsMap = doc.getMap('projectLists')
+  listsMap.set(uuid, {
+    uuid,
+    name: entry.name,
+    parent: entry.parent || null,
+    children: entry.children || [],
+    author,
+    pushSeq: pushSeq || 0
+  })
+}
+
+function removeListHierarchyEntry(doc, uuid, author, pushSeq) {
+  let listsMap = doc.getMap('projectLists')
+  listsMap.set(uuid, {
+    uuid,
+    deleted: true,
+    author,
+    pushSeq: pushSeq || 0,
+    deletedAt: Date.now()
+  })
+}
+
+// --- Root doc observers ---
+
+function observeSchema(doc, callback, skipOrigin) {
+  let schemaMap = doc.getMap('schema')
+  let handler = (event, transaction) => {
+    if (skipOrigin != null && transaction.origin === skipOrigin) return
+    let changed = []
+    event.changes.keys.forEach((change, key) => {
+      changed.push({ uri: key, action: change.action })
+    })
+    if (changed.length > 0) callback(changed)
+  }
+  schemaMap.observe(handler)
+  return () => schemaMap.unobserve(handler)
+}
+
+function observeProjectLists(doc, callback, skipOrigin) {
+  let listsMap = doc.getMap('projectLists')
+  let handler = (event, transaction) => {
+    if (skipOrigin != null && transaction.origin === skipOrigin) return
+    let changed = []
+    event.changes.keys.forEach((change, key) => {
+      changed.push({ uuid: key, action: change.action })
+    })
+    if (changed.length > 0) callback(changed)
+  }
+  listsMap.observe(handler)
+  return () => listsMap.unobserve(handler)
 }
 
 // --- Observers ---
@@ -1062,7 +1172,17 @@ module.exports = {
   // Room
   setRoomConfig,
   getRoomConfig,
+  // Template schema (root doc)
+  getTemplateSchema,
+  setTemplateSchema,
+  removeTemplateSchema,
+  // List hierarchy (root doc)
+  getListHierarchy,
+  setListHierarchyEntry,
+  removeListHierarchyEntry,
   // Observers
   observeAnnotations,
-  observeAnnotationsDeep
+  observeAnnotationsDeep,
+  observeSchema,
+  observeProjectLists
 }
