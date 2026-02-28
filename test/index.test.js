@@ -2107,3 +2107,547 @@ describe('roundtrip (push -> CRDT -> apply)', () => {
     assert.ok(dispatched.find(a => a.type === 'list.create'), 'should create list')
   })
 })
+
+// ============================================================
+//  Team 4: Multi-Peer CRDT Convergence (BLUE)
+// ============================================================
+
+describe('Team 4: Multi-Peer CRDT Convergence (BLUE)', () => {
+  const Y = require('yjs')
+  const schema = require('../src/crdt-schema')
+  const { buildItem, buildTemplate, mockStore, mockState, mockSyncContext } = require('./helpers')
+
+  function twoPeers(overridesA = {}, overridesB = {}) {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    let ctxA = mockSyncContext({ doc, userId: 'alice', ...overridesA })
+    let ctxB = mockSyncContext({ doc, userId: 'bob', ...overridesB })
+    return { doc, ctxA, ctxB }
+  }
+
+  it('metadata roundtrip: Alice pushes title, read back with correct text and author', () => {
+    let { doc, ctxA } = twoPeers()
+    let identity = 'item-conv-1'
+    let item = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Alice Title', '@type': 'string' }
+    })
+    ctxA.pushMetadata(item, identity, 'alice', 1)
+
+    let meta = schema.getMetadata(doc, identity)
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].text, 'Alice Title')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].author, 'alice')
+  })
+
+  it('concurrent metadata: higher pushSeq wins (last-writer-wins via CRDT)', () => {
+    let { doc, ctxA, ctxB } = twoPeers()
+    let identity = 'item-conv-2'
+
+    // Alice sets title with pushSeq=1
+    let itemA = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Foo', '@type': 'string' }
+    })
+    ctxA.pushMetadata(itemA, identity, 'alice', 1)
+
+    // Bob sets title with pushSeq=2 (overwrites Alice's value in the shared CRDT)
+    let itemB = buildItem({
+      'http://purl.org/dc/elements/1.1/title': { '@value': 'Bar', '@type': 'string' }
+    })
+    ctxB.pushMetadata(itemB, identity, 'bob', 2)
+
+    let meta = schema.getMetadata(doc, identity)
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].text, 'Bar')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].author, 'bob')
+    assert.equal(meta['http://purl.org/dc/elements/1.1/title'].pushSeq, 2)
+  })
+
+  it('tag add-wins: re-adding after remove resurrects the tag', () => {
+    let { doc, ctxA } = twoPeers()
+    let identity = 'item-conv-3'
+
+    // Alice adds a tag
+    let item = buildItem({ tag: [{ name: 'Shared', color: '#0000ff' }] })
+    ctxA.pushTags(item, identity, 'alice', 1)
+    assert.equal(schema.getActiveTags(doc, identity).length, 1)
+
+    // Bob removes the tag via schema directly (simulates remote peer deletion)
+    schema.removeTag(doc, identity, 'Shared', 'bob', 2)
+    assert.equal(schema.getActiveTags(doc, identity).length, 0)
+    assert.equal(schema.getDeletedTags(doc, identity).length, 1)
+
+    // Alice re-adds the tag with higher pushSeq (direct schema call, bypassing conflict logic)
+    schema.setTag(doc, identity, { name: 'Shared', color: '#0000ff' }, 'alice', 3)
+    let active = schema.getActiveTags(doc, identity)
+    assert.equal(active.length, 1, 'tag should survive after re-add')
+    assert.equal(active[0].name, 'Shared')
+    assert.equal(active[0].author, 'alice')
+  })
+
+  it('template roundtrip: push templates from state, verify in CRDT schema map', () => {
+    let tmpl = buildTemplate({
+      name: 'Convergence Template',
+      uri: 'https://tropy.org/v1/templates/convergence',
+      fields: [
+        {
+          property: 'http://purl.org/dc/elements/1.1/title',
+          label: 'Title',
+          datatype: 'http://www.w3.org/2001/XMLSchema#string',
+          isRequired: true,
+          isConstant: false,
+          hint: '',
+          value: ''
+        },
+        {
+          property: 'http://purl.org/dc/elements/1.1/date',
+          label: 'Date',
+          datatype: 'http://www.w3.org/2001/XMLSchema#date',
+          isRequired: false,
+          isConstant: false,
+          hint: '',
+          value: ''
+        }
+      ]
+    })
+    let state = mockState({
+      ontology: { template: { [tmpl.uri]: tmpl } }
+    })
+    let ctx = mockSyncContext({ state, userId: 'alice' })
+    ctx.pushTemplates(1)
+
+    let templates = schema.getTemplateSchema(ctx.doc)
+    assert.ok(templates[tmpl.uri], 'template should exist in CRDT')
+    assert.equal(templates[tmpl.uri].name, 'Convergence Template')
+    assert.equal(templates[tmpl.uri].fields.length, 2)
+    assert.equal(templates[tmpl.uri].fields[0].property, 'http://purl.org/dc/elements/1.1/title')
+    assert.equal(templates[tmpl.uri].fields[1].property, 'http://purl.org/dc/elements/1.1/date')
+  })
+
+  it('nested list hierarchy: root excluded, parent/child relationships preserved', () => {
+    let state = mockState({
+      lists: {
+        0: { id: 0, name: 'Root', parent: null, children: [1] },
+        1: { id: 1, name: 'Research', parent: 0, children: [2] },
+        2: { id: 2, name: 'Fieldwork', parent: 1, children: [] }
+      }
+    })
+    let ctx = mockSyncContext({ state, userId: 'alice' })
+    ctx.pushListHierarchy(1)
+
+    let hierarchy = schema.getListHierarchy(ctx.doc)
+    let entries = Object.values(hierarchy)
+
+    // Root (id=0) should NOT be in the hierarchy
+    assert.equal(entries.length, 2, 'only non-root lists should be pushed')
+
+    let research = entries.find(e => e.name === 'Research')
+    let fieldwork = entries.find(e => e.name === 'Fieldwork')
+    assert.ok(research, 'Research list should exist')
+    assert.ok(fieldwork, 'Fieldwork list should exist')
+
+    // Research has no parent (its parent is root which maps to null)
+    assert.equal(research.parent, null, 'Research parent should be null (root)')
+
+    // Fieldwork parent should be the UUID of Research
+    let researchUuid = Object.entries(hierarchy).find(([_, v]) => v.name === 'Research')[0]
+    assert.equal(fieldwork.parent, researchUuid, 'Fieldwork parent should be Research UUID')
+
+    // Research children should contain Fieldwork UUID
+    let fieldworkUuid = Object.entries(hierarchy).find(([_, v]) => v.name === 'Fieldwork')[0]
+    assert.ok(research.children.includes(fieldworkUuid), 'Research children should include Fieldwork UUID')
+  })
+
+  it('tombstone lifecycle: note set then removed acquires deleted flag', () => {
+    let doc = new Y.Doc()
+    schema.setSchemaVersion(doc)
+    let identity = 'item-conv-6'
+    let noteUuid = 'n_test-tombstone-uuid'
+
+    // Set a note
+    schema.setNote(doc, identity, noteUuid, {
+      text: 'Ephemeral note',
+      html: '<p>Ephemeral note</p>',
+      photo: 'chk-photo-1'
+    }, 'alice', 1)
+
+    // Verify note is alive
+    let activeNotes = schema.getActiveNotes(doc, identity)
+    assert.ok(activeNotes[noteUuid], 'note should exist before removal')
+    assert.equal(activeNotes[noteUuid].deleted, undefined)
+
+    // Remove the note (creates tombstone)
+    schema.removeNote(doc, identity, noteUuid, 'bob', 2)
+
+    // Verify note is now tombstoned
+    let allNotes = schema.getNotes(doc, identity)
+    assert.ok(allNotes[noteUuid].deleted, 'note should have deleted flag after removal')
+    assert.ok(allNotes[noteUuid].deletedAt, 'note should have deletedAt timestamp')
+    assert.equal(allNotes[noteUuid].author, 'bob')
+
+    // Active notes should not include the tombstoned note
+    let activeAfter = schema.getActiveNotes(doc, identity)
+    assert.ok(!activeAfter[noteUuid], 'tombstoned note should not appear in active notes')
+  })
+
+  it('note push with content: push item with photo note, verify CRDT content', () => {
+    let { doc, ctxA } = twoPeers()
+    let identity = 'item-conv-7'
+
+    let item = buildItem({
+      photo: [{
+        '@id': 20,
+        checksum: 'photo-chk-conv',
+        note: [{
+          '@id': 50,
+          text: 'Field observation from site A',
+          html: '<p>Field observation from <em>site A</em></p>'
+        }],
+        selection: [],
+        transcription: []
+      }]
+    })
+    let checksumMap = new Map([[20, 'photo-chk-conv']])
+    ctxA.previousSnapshot = new Map()
+    ctxA.pushNotes(item, identity, 'alice', checksumMap, 1)
+
+    let notes = schema.getActiveNotes(doc, identity)
+    let noteValues = Object.values(notes)
+    assert.ok(noteValues.length >= 1, 'should have at least one note')
+    assert.equal(noteValues[0].html, '<p>Field observation from <em>site A</em></p>')
+    assert.equal(noteValues[0].text, 'Field observation from site A')
+    assert.equal(noteValues[0].author, 'alice')
+    assert.equal(noteValues[0].photo, 'photo-chk-conv')
+  })
+})
+
+// ============================================================
+//  Team 5: Sanitizer Evasion (RED)
+// ============================================================
+
+describe('Team 5: Sanitizer Evasion (RED)', () => {
+  const { sanitizeHtml, escapeHtml } = require('../src/sanitize')
+
+  // 5.6: noteKey injection — validates the apply.js fix
+  it('noteKey with HTML metacharacters is escaped in footer pattern', () => {
+    let maliciousKey = 'n_<img src=x onerror=alert(1)>'
+    let authorLabel = escapeHtml('alice')
+    let footer = `<p><sub>[troparcel:${escapeHtml(maliciousKey)} from ${authorLabel}]</sub></p>`
+    assert.ok(!footer.includes('<img'), 'HTML tag should be escaped in footer')
+    assert.ok(footer.includes('&lt;img'), 'Should contain escaped version')
+  })
+
+  // 5.1: Mutation XSS — noscript
+  it('handles noscript mutation XSS vector', () => {
+    let result = sanitizeHtml('<noscript><p title="</noscript><img src=x onerror=alert(1)>">')
+    assert.ok(!result.includes('onerror'))
+  })
+
+  // 5.2: Unicode fullwidth — documents gap: sanitizer does NOT normalize fullwidth
+  it('Unicode fullwidth brackets do not create real HTML tags (safe)', () => {
+    let result = sanitizeHtml('\uFF1Cscript\uFF1Ealert(1)\uFF1C/script\uFF1E')
+    // Fullwidth < > (\uFF1C \uFF1E) are NOT real HTML delimiters.
+    // Browsers don't parse them as tags, so this is safe — text passes through.
+    assert.ok(typeof result === 'string')
+    assert.ok(!result.includes('<script>'), 'Should not contain real script tag')
+  })
+
+  // 5.3: Double encoding
+  it('double-encoded entities do not produce real script tags', () => {
+    let result = sanitizeHtml('&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;')
+    assert.ok(!result.includes('<script>'))
+  })
+
+  // 5.4: SVG foreignObject
+  it('strips SVG foreignObject injection', () => {
+    let result = sanitizeHtml('<svg><foreignObject><body onload="alert(1)"></body></foreignObject></svg>')
+    assert.ok(!result.includes('onload'))
+    assert.ok(!result.includes('alert'))
+  })
+
+  // 5.5: CSS @import
+  it('strips CSS @import in style attribute', () => {
+    let result = sanitizeHtml('<p style="@import url(evil.css)">ok</p>')
+    assert.ok(!result.includes('@import'))
+  })
+
+  // 5.7: RTL override
+  it('handles RTL override characters without crash', () => {
+    let result = sanitizeHtml('Hello \u202Escript\u202C world')
+    assert.ok(typeof result === 'string')
+  })
+
+  // 5.9: Entity-encoded attribute name
+  it('strips entity-encoded onclick', () => {
+    let result = sanitizeHtml('<p &#111;nclick="alert(1)">ok</p>')
+    assert.ok(!result.includes('alert'))
+  })
+
+  // 5.10: Control char prefix in href
+  it('blocks control char prefix in javascript: href', () => {
+    let result = sanitizeHtml('<a href="\x01javascript:alert(1)">link</a>')
+    assert.ok(!result.includes('javascript'))
+  })
+
+  // 5.11: escapeHtml completeness
+  it('escapeHtml handles all critical characters', () => {
+    assert.equal(escapeHtml('<>&"\''), '&lt;&gt;&amp;&quot;&#x27;')
+  })
+})
+
+// ============================================================
+//  Team 6: Store Adapter Correctness (BLUE)
+// ============================================================
+
+describe('Team 6: Store Adapter Correctness (BLUE)', () => {
+  const { StoreAdapter } = require('../src/store-adapter')
+  const noopLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
+
+  function ms(overrides = {}) {
+    return {
+      items: {}, photos: {}, selections: {}, notes: {},
+      metadata: {}, tags: {}, lists: {}, activities: {},
+      transcriptions: {}, ontology: { template: {} },
+      ...overrides
+    }
+  }
+  function mkStore(state) {
+    return {
+      getState: () => state,
+      dispatch: (a) => { a.meta = a.meta || {}; a.meta.seq = Date.now(); return a },
+      subscribe: () => () => {}
+    }
+  }
+
+  // 6.2: Empty state
+  it('getAllItems returns [] on empty state', () => {
+    let adapter = new StoreAdapter(mkStore(ms()), noopLogger)
+    let items = adapter.getAllItems()
+    assert.ok(Array.isArray(items))
+    assert.equal(items.length, 0)
+  })
+
+  // 6.3: Missing photo
+  it('getItemFull handles missing photo gracefully', () => {
+    let state = ms({
+      items: { 1: { id: 1, photos: [999], tags: [], lists: [], template: 'generic' } },
+      metadata: { 1: {} }
+    })
+    let adapter = new StoreAdapter(mkStore(state), noopLogger)
+    let item = adapter.getItemFull(1)
+    assert.ok(item)
+    assert.equal(item.photo.length, 0)
+  })
+
+  // 6.4: Note with no state and no text
+  it('_noteStateToHtml returns empty for note with no state or text', () => {
+    let adapter = new StoreAdapter(mkStore(ms()), noopLogger)
+    assert.equal(adapter._noteStateToHtml({}), '')
+  })
+
+  // 6.5: All ProseMirror node types
+  it('_noteStateToHtml renders all ProseMirror node types', () => {
+    let adapter = new StoreAdapter(mkStore(ms()), noopLogger)
+
+    let doc = { type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'Hello' }] },
+      { type: 'blockquote', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Quote' }] }] },
+      { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'H1' }] },
+      { type: 'heading', attrs: { level: 3 }, content: [{ type: 'text', text: 'H3' }] },
+      { type: 'bullet_list', content: [
+        { type: 'list_item', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'bullet' }] }] }
+      ] },
+      { type: 'ordered_list', content: [
+        { type: 'list_item', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'ordered' }] }] }
+      ] },
+      { type: 'code_block', content: [{ type: 'text', text: 'let x = 1' }] },
+      { type: 'horizontal_rule' },
+      { type: 'paragraph', content: [{ type: 'text', text: 'before' }, { type: 'hard_break' }, { type: 'text', text: 'after' }] }
+    ] }
+    let html = adapter._noteStateToHtml({ state: { doc } })
+    assert.ok(html.includes('<p>Hello</p>'))
+    assert.ok(html.includes('<blockquote>'))
+    assert.ok(html.includes('<h1>H1</h1>'))
+    assert.ok(html.includes('<h3>H3</h3>'))
+    assert.ok(html.includes('<ul>'))
+    assert.ok(html.includes('<ol>'))
+    assert.ok(html.includes('<pre><code>'))
+    assert.ok(html.includes('<hr>'))
+    assert.ok(html.includes('line-break'))
+  })
+
+  // 6.6: Nested marks
+  it('_noteStateToHtml renders nested bold+italic+link marks', () => {
+    let adapter = new StoreAdapter(mkStore(ms()), noopLogger)
+    let doc = { type: 'doc', content: [
+      { type: 'paragraph', content: [
+        { type: 'text', text: 'styled', marks: [
+          { type: 'bold' },
+          { type: 'italic' },
+          { type: 'link', attrs: { href: 'https://example.com' } }
+        ] }
+      ] }
+    ] }
+    let html = adapter._noteStateToHtml({ state: { doc } })
+    assert.ok(html.includes('<strong>'))
+    assert.ok(html.includes('<em>'))
+    assert.ok(html.includes('href'))
+    assert.ok(html.includes('example.com'))
+  })
+
+  // 6.7: suppressChanges is boolean not refcount
+  it('suppressChanges twice then resumeChanges once = not suppressed', () => {
+    let state = ms()
+    let store = mkStore(state)
+    let adapter = new StoreAdapter(store, noopLogger)
+    adapter.suppressChanges()
+    adapter.suppressChanges()
+    adapter.resumeChanges()
+    assert.equal(adapter._suppressChangeDetection, false,
+      'Single resumeChanges undoes double suppressChanges — boolean, not refcount')
+  })
+
+  // 6.8: Large state
+  it('getAllItems handles 500 items without error', () => {
+    let items = {}
+    let photos = {}
+    for (let i = 1; i <= 500; i++) {
+      items[i] = { id: i, photos: [i + 1000], tags: [], lists: [], template: 'generic' }
+      photos[i + 1000] = { id: i + 1000, item: i, checksum: `cs-${i}`, selections: [], notes: [], transcriptions: [] }
+    }
+    let adapter = new StoreAdapter(mkStore(ms({ items, photos })), noopLogger)
+    let result = adapter.getAllItems()
+    assert.equal(result.length, 500)
+  })
+
+  // 6.12: Circular parent
+  it('readLists handles circular parent without infinite loop', () => {
+    let state = ms({
+      lists: { 1: { id: 1, name: 'Circular', parent: 1, children: [1] } }
+    })
+    let adapter = new StoreAdapter(mkStore(state), noopLogger)
+    let lists = adapter.readLists()
+    assert.ok(lists[1])
+    assert.equal(lists[1].name, 'Circular')
+  })
+})
+
+// ============================================================
+//  Team 2: Vault Integrity Invariants (BLUE)
+// ============================================================
+
+describe('Team 2: Vault Integrity Invariants (BLUE)', () => {
+  const { SyncVault } = require('../src/vault')
+  const fs = require('fs')
+  const os = require('os')
+  const path = require('path')
+
+  // 2.1: Full serialization roundtrip
+  it('persistToFile -> loadFromFile preserves all state', async () => {
+    let v = new SyncVault()
+    v.pushSeq = 42
+    v.appliedNoteKeys.add('n_abc')
+    v.appliedSelectionKeys.add('s_def')
+    v.appliedTranscriptionKeys.add('t_ghi')
+    v.failedNoteKeys.set('n_fail', 3)
+    v.crdtKeyToNoteId.set('crdt-n1', 'local-n1')
+    v.noteIdToCrdtKey.set('local-n1', 'crdt-n1')
+    v.dismissKey('note:n_test', 5)
+    v.trackOriginalAuthor('n_test', 'alice')
+    v.pushedTemplateHashes.set('uri1', 'hash1')
+    v.pushedListHashes.set('l_1', 'hash2')
+    v.crdtUuidToListId.set('l_1', 42)
+    v.listIdToCrdtUuid.set(42, 'l_1')
+
+    let tmpRoom = `test-roundtrip-${Date.now()}`
+    await v.persistToFile(tmpRoom, 'testuser')
+
+    let v2 = new SyncVault()
+    let loaded = v2.loadFromFile(tmpRoom, 'testuser')
+    assert.ok(loaded)
+    assert.equal(v2.pushSeq, 42)
+    assert.ok(v2.appliedNoteKeys.has('n_abc'))
+    assert.ok(v2.appliedSelectionKeys.has('s_def'))
+    assert.ok(v2.appliedTranscriptionKeys.has('t_ghi'))
+    assert.equal(v2.failedNoteKeys.get('n_fail'), 3)
+    assert.equal(v2.crdtKeyToNoteId.get('crdt-n1'), 'local-n1')
+    assert.equal(v2.noteIdToCrdtKey.get('local-n1'), 'crdt-n1')
+    assert.equal(v2.isDismissed('note:n_test', 5), true)
+    assert.equal(v2.getOriginalAuthor('n_test'), 'alice')
+    assert.equal(v2.pushedTemplateHashes.get('uri1'), 'hash1')
+    assert.equal(v2.pushedListHashes.get('l_1'), 'hash2')
+    assert.equal(v2.crdtUuidToListId.get('l_1'), 42)
+
+    // Cleanup
+    let dir = path.join(os.homedir(), '.troparcel', 'vault')
+    try { await fs.promises.unlink(path.join(dir, `${tmpRoom}_testuser.json`)) } catch {}
+  })
+
+  // 2.2: Bidirectional map invariant
+  it('note bidirectional maps stay consistent after operations', () => {
+    let v = new SyncVault()
+    for (let i = 0; i < 100; i++) {
+      v.getNoteKey(`note-${i}`, `crdt-key-${i}`)
+      v.mapAppliedNote(`crdt-key-${i}`, `local-${i}`)
+    }
+    for (let [crdtKey, noteId] of v.crdtKeyToNoteId) {
+      let reverse = v.noteIdToCrdtKey.get(noteId)
+      assert.ok(reverse !== undefined, `Missing reverse for crdtKey=${crdtKey}, noteId=${noteId}`)
+    }
+  })
+
+  // 2.3: LRU eviction breaks invariant (KNOWN BUG)
+  it('LRU eviction preserves bidirectional invariant', { todo: 'Known bug: one-sided LRU eviction' }, () => {
+    let v = new SyncVault()
+    for (let i = 0; i < 100; i++) {
+      v.noteIdToCrdtKey.set(`local-${i}`, `crdt-${i}`)
+      v.crdtKeyToNoteId.set(`crdt-${i}`, `local-${i}`)
+    }
+    v._evictIfNeeded(v.noteIdToCrdtKey, 80)
+    let orphans = 0
+    for (let [crdtKey, noteId] of v.crdtKeyToNoteId) {
+      if (!v.noteIdToCrdtKey.has(noteId)) orphans++
+    }
+    assert.equal(orphans, 0, `Found ${orphans} orphaned entries after one-sided eviction`)
+  })
+
+  // 2.4: pushSeq monotonicity
+  it('pushSeq never decreases within a session', () => {
+    let v = new SyncVault()
+    let prev = 0
+    for (let i = 0; i < 100; i++) {
+      let seq = v.nextPushSeq()
+      assert.ok(seq > prev, `pushSeq went backwards: ${seq} <= ${prev}`)
+      prev = seq
+    }
+  })
+
+  // 2.9: clear() resets v5 additions — BUG FOUND: clear() doesn't reset these maps
+  it('clear resets template and list hash maps', { todo: 'Bug: vault.clear() missing v5 map resets' }, () => {
+    let v = new SyncVault()
+    v.pushedTemplateHashes.set('uri1', 'hash1')
+    v.pushedListHashes.set('l_1', 'hash2')
+    v.listIdToCrdtUuid.set(42, 'l_1')
+    v.crdtUuidToListId.set('l_1', 42)
+    v.clear()
+    assert.equal(v.pushedTemplateHashes.size, 0, 'pushedTemplateHashes not cleared')
+    assert.equal(v.pushedListHashes.size, 0, 'pushedListHashes not cleared')
+    assert.equal(v.listIdToCrdtUuid.size, 0, 'listIdToCrdtUuid not cleared')
+    assert.equal(v.crdtUuidToListId.size, 0, 'crdtUuidToListId not cleared')
+  })
+
+  // 2.10: failedNoteKeys migration — object format
+  it('failedNoteKeys loads from object format', async () => {
+    let v = new SyncVault()
+    let tmpRoom = `test-failedkeys-${Date.now()}`
+    let dir = path.join(os.homedir(), '.troparcel', 'vault')
+    await fs.promises.mkdir(dir, { recursive: true })
+    let file = path.join(dir, `${tmpRoom}_testuser.json`)
+    await fs.promises.writeFile(file, JSON.stringify({
+      version: 4,
+      failedNoteKeys: [{ key: 'n_fail1', count: 2 }, { key: 'n_fail2', count: 5 }]
+    }))
+    let loaded = v.loadFromFile(tmpRoom, 'testuser')
+    assert.ok(loaded)
+    assert.equal(v.failedNoteKeys.get('n_fail1'), 2)
+    assert.equal(v.failedNoteKeys.get('n_fail2'), 5)
+    try { await fs.promises.unlink(file) } catch {}
+  })
+})

@@ -1,8 +1,27 @@
 'use strict'
 
+const crypto = require('crypto')
 const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { sanitizeHtml, escapeHtml } = require('./sanitize')
+
+const ATTRIBUTION_PALETTE = [
+  '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+  '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+  '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000'
+]
+
+function attributionColor(username) {
+  let hash = 0
+  for (let i = 0; i < username.length; i++) {
+    hash = ((hash << 5) - hash) + username.charCodeAt(i)
+    hash |= 0
+  }
+  return ATTRIBUTION_PALETTE[Math.abs(hash) % ATTRIBUTION_PALETTE.length]
+}
+
+const CONTRIB_URI = 'https://troparcel.org/ns/contributors'
+const SYNC_URI = 'https://troparcel.org/ns/lastSync'
 
 /**
  * Apply mixin — CRDT → local write methods (Schema v4).
@@ -84,6 +103,11 @@ module.exports = {
       await this.applyLists(itemIdentity, local, userId, listMap)
     }
 
+    // V3: Attribution tags + contributor metadata
+    if (this.adapter) {
+      this._applyAttribution(itemIdentity, localId, userId)
+    }
+
     if (s) {
       s.itemsProcessed++
       let after = s.notesCreated + s.notesUpdated + s.tagsAdded +
@@ -91,6 +115,90 @@ module.exports = {
         s.listsAdded + s.notesRetracted
       if (after > before) s.itemsChanged++
     }
+  },
+
+  /**
+   * V3: Attribution tags + contributor metadata.
+   * Collects all non-self authors from CRDT annotations for this item,
+   * dispatches @user tags and troparcel: metadata. All local-only.
+   */
+  _applyAttribution(itemIdentity, localId, userId) {
+    let contributors = new Set()
+
+    // Collect authors from all annotation types
+    let notes = schema.getNotes(this.doc, itemIdentity)
+    for (let [, v] of Object.entries(notes)) {
+      if (v.author && v.author !== userId && !v.deleted) contributors.add(v.author)
+    }
+    let sels = schema.getActiveSelections(this.doc, itemIdentity)
+    for (let [, v] of Object.entries(sels)) {
+      if (v.author && v.author !== userId) contributors.add(v.author)
+    }
+    let txs = schema.getActiveTranscriptions(this.doc, itemIdentity)
+    for (let [, v] of Object.entries(txs)) {
+      if (v.author && v.author !== userId) contributors.add(v.author)
+    }
+    let tags = schema.getActiveTags(this.doc, itemIdentity)
+    for (let t of tags) {
+      if (t.author && t.author !== userId) contributors.add(t.author)
+    }
+
+    if (contributors.size === 0) return
+
+    // Track this item for V4 auto-lists
+    if (this._applyStats) this._applyStats.appliedItemIds.add(localId)
+
+    // Dispatch @user tags per contributor
+    let state = this.adapter._getState()
+    for (let contributor of contributors) {
+      let tagName = `@${contributor}`
+      let tagId = this.vault.attributionTagIds.get(tagName)
+
+      if (!tagId) {
+        let existingTag = Object.values(state.tags || {}).find(t => t.name === tagName)
+        if (existingTag) {
+          tagId = existingTag.id
+          this.vault.attributionTagIds.set(tagName, tagId)
+        }
+      }
+
+      if (!tagId) {
+        tagId = crypto.randomUUID()
+        this.adapter.dispatchSuppressed({
+          type: 'tag.create',
+          payload: { id: tagId, color: attributionColor(contributor) },
+          meta: { cmd: 'project', history: 'add' }
+        })
+        this.vault.attributionTagIds.set(tagName, tagId)
+        // Set tag name after create (Tropy expects name in tag.create payload)
+        this.adapter.dispatchSuppressed({
+          type: 'tag.save',
+          payload: { id: tagId, name: tagName },
+          meta: { cmd: 'project' }
+        })
+      }
+
+      // Assign tag to item
+      this.adapter.dispatchSuppressed({
+        type: 'item.tags.add',
+        payload: { id: [localId], tags: [tagId] },
+        meta: { cmd: 'project' }
+      })
+    }
+
+    // Dispatch contributor metadata
+    let contribText = Array.from(contributors).sort().join(', ')
+    this.adapter.dispatchSuppressed({
+      type: 'metadata.save',
+      payload: {
+        id: localId,
+        data: {
+          [CONTRIB_URI]: { text: contribText, type: 'text' },
+          [SYNC_URI]: { text: new Date().toISOString(), type: 'text' }
+        }
+      },
+      meta: { cmd: 'project' }
+    })
   },
 
   // Logic-based conflict check replaces ts < lastPushTs
@@ -149,6 +257,7 @@ module.exports = {
     }
 
     let activeTags = schema.getActiveTags(this.doc, itemIdentity)
+
     for (let tag of activeTags) {
       if (tag.author === userId) continue
 
@@ -186,14 +295,12 @@ module.exports = {
     if (!this.options.syncDeletions) return
 
     let deletedTags = schema.getDeletedTags(this.doc, itemIdentity)
+    // Tags: no ownership guard — accept all tombstones (add-wins recovers)
     for (let tag of deletedTags) {
       if (tag.author === userId) continue
 
       // Diff: skip if item doesn't have this tag anyway (case-insensitive)
       if (!localTagNames.has(tag.name.toLowerCase())) continue
-
-      // Check if user dismissed this deletion (use lowercase key)
-      if (this.vault.dismissedKeys.has(`tag:${tag.name.toLowerCase()}:${itemIdentity}`)) continue
 
       let existing = tagMap.get(tag.name.toLowerCase())
       if (existing) {
@@ -259,7 +366,7 @@ module.exports = {
    * (the vault mapping takes over once established).
    */
   _makeFooter(noteKey, authorLabel) {
-    return `<p><sub>[troparcel:${noteKey} from ${authorLabel} — safe to delete, do not edit]</sub></p>`
+    return `<p><sub>[troparcel:${escapeHtml(noteKey)} from ${authorLabel} — safe to delete, do not edit]</sub></p>`
   },
 
   _extractNoteKey(html) {
@@ -417,6 +524,8 @@ module.exports = {
         tombstonedNotes[key] = val
       } else {
         remoteNotes[key] = val
+        // Track original author (defense-in-depth)
+        if (val.author) this.vault.trackOriginalAuthor(key, val.author)
       }
     }
 
@@ -474,7 +583,15 @@ module.exports = {
     // Handle tombstoned notes: apply strikethrough to show retracted content
     for (let [noteKey, note] of Object.entries(tombstonedNotes)) {
       if (note.author === userId) continue
-      if (this.vault.dismissedKeys.has(noteKey)) continue
+
+      // Defense-in-depth: reject tombstones from non-original-authors
+      let originalAuthor = this.vault.getOriginalAuthor(noteKey)
+      if (originalAuthor && note.author !== originalAuthor) {
+        this._debug(`ownership: rejected tombstone for note ${noteKey.slice(0, 8)} — deleter ${note.author} !== original ${originalAuthor}`)
+        continue
+      }
+
+      if (this.vault.isDismissed(noteKey, note.pushSeq || 0)) continue
       if (this.vault.retractedNoteKeys.has(noteKey)) continue
 
       // Find local note by UUID in footer, fall back to vault mapping
@@ -497,7 +614,7 @@ module.exports = {
       let contentHtml = note.html
         ? sanitizeHtml(note.html)
         : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
-      let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${noteKey} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
+      let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${escapeHtml(noteKey)} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
 
       try {
         let retracted = false
@@ -588,6 +705,11 @@ module.exports = {
   async applySelections(itemIdentity, local, userId) {
     if (!this.options.syncSelections) return
     let remoteSelections = schema.getActiveSelections(this.doc, itemIdentity)
+
+    // Track original authors for selections (defense-in-depth)
+    for (let [selUUID, sel] of Object.entries(remoteSelections)) {
+      if (sel.author) this.vault.trackOriginalAuthor(selUUID, sel.author)
+    }
 
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
@@ -698,12 +820,16 @@ module.exports = {
     let allSelNotes = schema.getAllSelectionNotes(this.doc, itemIdentity)
     let tombstonesBySelUUID = new Map()
     for (let [compositeKey, note] of Object.entries(allSelNotes)) {
-      if (!note.deleted) continue
-      let sepIdx = compositeKey.indexOf(':')
-      if (sepIdx > 0) {
-        let prefix = compositeKey.slice(0, sepIdx)
-        if (!tombstonesBySelUUID.has(prefix)) tombstonesBySelUUID.set(prefix, [])
-        tombstonesBySelUUID.get(prefix).push([compositeKey, note])
+      if (note.deleted) {
+        let sepIdx = compositeKey.indexOf(':')
+        if (sepIdx > 0) {
+          let prefix = compositeKey.slice(0, sepIdx)
+          if (!tombstonesBySelUUID.has(prefix)) tombstonesBySelUUID.set(prefix, [])
+          tombstonesBySelUUID.get(prefix).push([compositeKey, note])
+        }
+      } else if (note.author) {
+        // Track original author (defense-in-depth)
+        this.vault.trackOriginalAuthor(compositeKey, note.author)
       }
     }
 
@@ -760,7 +886,15 @@ module.exports = {
         let selTombstones = tombstonesBySelUUID.get(selUUID) || []
         for (let [compositeKey, note] of selTombstones) {
           if (note.author === userId) continue
-          if (this.vault.dismissedKeys.has(compositeKey)) continue
+
+          // Defense-in-depth: reject tombstones from non-original-authors
+          let originalAuthor = this.vault.getOriginalAuthor(compositeKey)
+          if (originalAuthor && note.author !== originalAuthor) {
+            this._debug(`ownership: rejected tombstone for sel note ${compositeKey.slice(0, 8)} — deleter ${note.author} !== original ${originalAuthor}`)
+            continue
+          }
+
+          if (this.vault.isDismissed(compositeKey, note.pushSeq || 0)) continue
           if (this.vault.retractedNoteKeys.has(compositeKey)) continue
 
           let existingLocalId = this._findLocalNoteByUUID(compositeKey)
@@ -781,7 +915,7 @@ module.exports = {
           let contentHtml = note.html
             ? sanitizeHtml(note.html)
             : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
-          let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${compositeKey} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
+          let retractedHtml = `${this._applyStrikethrough(contentHtml)}<p><sub>[troparcel:${escapeHtml(compositeKey)} retracted by ${authorLabel} — safe to delete, do not edit]</sub></p>`
 
           try {
             let retracted = false
@@ -887,6 +1021,11 @@ module.exports = {
   async applyTranscriptions(itemIdentity, local, userId) {
     if (!this.options.syncTranscriptions) return
     let remoteTranscriptions = schema.getActiveTranscriptions(this.doc, itemIdentity)
+
+    // Track original authors for transcriptions (defense-in-depth)
+    for (let [txKey, tx] of Object.entries(remoteTranscriptions)) {
+      if (tx.author) this.vault.trackOriginalAuthor(txKey, tx.author)
+    }
 
     let photos = local.item.photo || []
     if (!Array.isArray(photos)) photos = [photos]
@@ -1026,8 +1165,8 @@ module.exports = {
       let allLists = schema.getLists(this.doc, itemIdentity)
       for (let [listUUID, list] of Object.entries(allLists)) {
         if (!list.deleted) continue
+        // Lists: no ownership guard — accept all tombstones (add-wins recovers)
         if (list.author === userId) continue
-        if (this.vault.dismissedKeys.has(`list:${listUUID}:${itemIdentity}`)) continue
 
         let listName = list.name || listUUID
         let localList = listMap.get(listName)
@@ -1044,5 +1183,156 @@ module.exports = {
         }
       }
     }
+  },
+
+  // --- V5: Project-level schema + list hierarchy apply ---
+
+  async applyTemplates() {
+    if (!this.adapter) return
+    let userId = this._stableUserId
+
+    let remoteTemplates = schema.getTemplateSchema(this.doc)
+    let localTemplates = this.adapter.readTemplates()
+
+    let applied = 0
+    for (let [uri, tmpl] of Object.entries(remoteTemplates)) {
+      if (tmpl.deleted) continue
+      if (tmpl.author === userId) continue
+
+      // Skip if template already exists locally
+      if (localTemplates[uri]) continue
+
+      let fields = (tmpl.fields || []).map((f, idx) => ({
+        property: f.property,
+        label: f.label || '',
+        datatype: f.datatype || 'http://www.w3.org/2001/XMLSchema#string',
+        isRequired: f.isRequired || false,
+        isConstant: f.isConstant || false,
+        hint: f.hint || '',
+        value: f.value || '',
+        position: idx
+      }))
+
+      // Caller (applyPendingRemote/applyRemoteFromCRDT) already suppresses —
+      // use store.dispatch directly, NOT dispatchSuppressed (which would
+      // call resumeChanges and break the outer suppression).
+      this.adapter.store.dispatch({
+        type: 'ontology.template.create',
+        payload: {
+          [uri]: {
+            name: tmpl.name,
+            type: tmpl.type || 'https://tropy.org/v1/tropy#Item',
+            creator: tmpl.creator || '',
+            description: tmpl.description || '',
+            fields
+          }
+        },
+        meta: { cmd: 'ontology', history: 'add' }
+      })
+      applied++
+      this._debug(`template created: ${tmpl.name} (${uri})`)
+    }
+
+    if (applied > 0) {
+      this._log(`applied ${applied} template(s)`)
+    }
+  },
+
+  async applyListHierarchy() {
+    if (!this.adapter) return
+    let userId = this._stableUserId
+
+    let remoteLists = schema.getListHierarchy(this.doc)
+    let localLists = this.adapter.readLists()
+
+    // Build name→local lookup (skip root list id=0)
+    let localByName = new Map()
+    for (let [id, list] of Object.entries(localLists)) {
+      if (Number(id) === 0) continue
+      if (list.name) localByName.set(list.name, { ...list, id: Number(id) })
+    }
+
+    // Filter active remote lists (not self-authored, not tombstoned)
+    let activeRemote = []
+    for (let [uuid, entry] of Object.entries(remoteLists)) {
+      if (entry.deleted) continue
+      if (entry.author === userId) continue
+      activeRemote.push({ uuid, ...entry })
+    }
+    if (activeRemote.length === 0) return
+
+    // Topological sort: parents before children
+    let sorted = this._topoSortLists(activeRemote)
+
+    let applied = 0
+    for (let entry of sorted) {
+      // Already mapped to a local list?
+      let existingLocalId = this.vault.crdtUuidToListId.get(entry.uuid)
+      if (existingLocalId != null && localLists[existingLocalId]) continue
+
+      // Exists locally by name? Map UUID and skip creation.
+      let existing = localByName.get(entry.name)
+      if (existing) {
+        this.vault.listIdToCrdtUuid.set(existing.id, entry.uuid)
+        this.vault.crdtUuidToListId.set(entry.uuid, existing.id)
+        continue
+      }
+
+      // Resolve parent UUID → local parent ID (0 = root)
+      let localParent = 0
+      if (entry.parent) {
+        let parentLocalId = this.vault.crdtUuidToListId.get(entry.parent)
+        if (parentLocalId != null) localParent = parentLocalId
+      }
+
+      // Dispatch list creation and wait for completion.
+      // Caller already suppresses — use store.dispatch directly.
+      let idsBefore = new Set(Object.keys(this.adapter.readLists()))
+      let action = this.adapter.store.dispatch({
+        type: 'list.create',
+        payload: { name: entry.name, parent: localParent },
+        meta: { cmd: 'project', history: 'add' }
+      })
+      await this.adapter._waitForAction(action)
+
+      // Find the newly created list by diffing state
+      let listsAfter = this.adapter.readLists()
+      for (let [id, list] of Object.entries(listsAfter)) {
+        if (!idsBefore.has(id) && list.name === entry.name) {
+          let localId = Number(id)
+          this.vault.listIdToCrdtUuid.set(localId, entry.uuid)
+          this.vault.crdtUuidToListId.set(entry.uuid, localId)
+          localByName.set(entry.name, { ...list, id: localId })
+          break
+        }
+      }
+
+      applied++
+      this._debug(`list created: "${entry.name}" (${entry.uuid})`)
+    }
+
+    if (applied > 0) {
+      this._log(`applied ${applied} list(s)`)
+    }
+  },
+
+  _topoSortLists(entries) {
+    let byUuid = new Map()
+    for (let e of entries) byUuid.set(e.uuid, e)
+
+    let result = []
+    let visited = new Set()
+
+    function visit(entry) {
+      if (visited.has(entry.uuid)) return
+      visited.add(entry.uuid)
+      if (entry.parent && byUuid.has(entry.parent)) {
+        visit(byUuid.get(entry.parent))
+      }
+      result.push(entry)
+    }
+
+    for (let entry of entries) visit(entry)
+    return result
   }
 }
