@@ -7,7 +7,9 @@ const options = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  external: ['electron'],
+  // 'fsevents' is a darwin-only optional dep of chokidar; mark external so
+  // Linux/Windows builds don't crash trying to bundle the native binding.
+  external: ['electron', 'fsevents'],
   minify: true,
   sourcemap: process.argv.includes('--watch'),
   logLevel: 'info'
