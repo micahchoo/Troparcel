@@ -968,6 +968,10 @@ function setTemplateSchema(doc, uri, templateDef, author, pushSeq) {
     version: templateDef.version || null,
     creator: templateDef.creator || null,
     description: templateDef.description || null,
+    // V5 (W2.T3, mx-b5b6b6): forward-compatible additive fields. Old peers
+    // ignore extra Y.Map keys, so NO room.schemaVersion bump required.
+    isProtected: !!templateDef.isProtected,
+    domain: templateDef.domain || null,
     fields: (templateDef.fields || []).map(f => ({
       property: f.property,
       label: f.label || null,
