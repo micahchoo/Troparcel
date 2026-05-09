@@ -92,17 +92,36 @@ function safeTokenCompare(a, b) {
 
 const ldb = new LeveldbPersistence(PERSISTENCE_DIR)
 
+// Origin marker for updates produced by replaying persisted state.
+// The persistence handler must skip these to avoid re-storing the
+// loaded bytes back into LevelDB on every reconnect.
+const BIND_STATE_ORIGIN = Symbol('bindState')
+
 setPersistence({
   bindState: async (docName, ydoc) => {
+    // Register the persistence handler BEFORE awaiting the LevelDB load.
+    // y-websocket's getYDoc() calls bindState without awaiting; sync
+    // messages arriving during the await window (the first peer's
+    // sync-step-2 carrying their writes) update the in-memory doc but
+    // bypass storage entirely if the handler isn't yet registered. The
+    // empirical signature was "schemaSize=N after Y.applyUpdate(2 bytes)"
+    // — the doc held pre-bindState writes that never reached LevelDB.
+    // Origin filter skips the self-trigger from replaying loaded state.
+    ydoc.on('update', async (update, origin) => {
+      if (origin === BIND_STATE_ORIGIN) return
+      await ldb.storeUpdate(docName, update)
+    })
     let stored = await ldb.getYDoc(docName)
     let update = Y.encodeStateAsUpdate(stored)
-    Y.applyUpdate(ydoc, update)
-    ydoc.on('update', (update) => {
-      ldb.storeUpdate(docName, update)
-    })
+    Y.applyUpdate(ydoc, update, BIND_STATE_ORIGIN)
   },
-  writeState: async () => {
-    // Updates are stored incrementally via the 'update' handler above
+  writeState: async (docName) => {
+    // y-websocket-utils calls writeState before doc.destroy() on
+    // last-peer-disconnect. Flush merges queued updates and ensures they
+    // are durably persisted (and clock-advanced) before the in-memory doc
+    // is evicted, so a late-joining peer reconstructed via getYDoc() sees
+    // all prior writes. Closes mx-c38ee9.
+    await ldb.flushDocument(docName)
   }
 })
 
