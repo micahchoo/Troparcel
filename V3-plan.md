@@ -1,0 +1,71 @@
+---
+shaping: true
+---
+
+# V3: "I can see who did what" — Attribution V-Plan
+
+Parent: [shaping.md](shaping.md) → [slices.md](slices.md)
+Source: [shaping.md](shaping.md) R4 → [slices.md](slices.md) V3
+
+## Demo Criterion
+
+Remote sync applies alice's annotations to 3 items. Each item gets an `@alice` tag (visible in item list and detail). Item metadata shows `troparcel:contributors = alice, bob` and `troparcel:lastSync = 2026-02-27T14:30:00Z`.
+
+## Affordances
+
+| # | Affordance | Type | Wires |
+|---|------------|------|-------|
+| N1 | `dispatchSuppressed(action)` in StoreAdapter | Non-UI | Wraps dispatch in suppressChanges/resumeChanges |
+| N2 | Attribution tag dispatch: create `@user` tag + assign to item | Non-UI | After apply per item, via dispatchSuppressed |
+| N3 | Contributor metadata dispatch: write `troparcel:contributors` + `troparcel:lastSync` | Non-UI | After apply per item, via dispatchSuppressed |
+| N4 | Push filter: skip `@*` tags and `troparcel:*` metadata URIs | Non-UI | In pushTags + pushMetadata |
+| U1 | `@alice` tag visible on item | UI | Created by N2 |
+| U2 | `troparcel:contributors` in metadata panel | UI | Written by N3 |
+| U3 | `troparcel:lastSync` in metadata panel | UI | Written by N3 |
+
+## File Scope
+
+| File | Changes |
+|------|---------|
+| `src/store-adapter.js` | Add `dispatchSuppressed(action)` method |
+| `src/apply.js` | After apply per item: dispatch attribution tag + contributor metadata. Add `attributionColor()` helper. |
+| `src/push.js` | Skip `@*` tags in pushTags. Skip `troparcel:*` / `https://troparcel.org/ns/*` metadata URIs in pushMetadata. |
+| `src/vault.js` | Cache `attributionTagIds` Map (tagName → tagId). Not persisted — rediscovered from store. |
+| `test/index.test.js` | dispatchSuppressed tests + attributionColor tests |
+
+## Build Sequence
+
+### Step 1: dispatchSuppressed() Helper (Task 5)
+
+1. Write 2 failing tests: normal dispatch + error recovery (finally restores)
+2. Add `dispatchSuppressed(action)` to StoreAdapter after `resumeChanges()`
+3. Run tests — expect pass
+
+### Step 2: Attribution Tags (Task 6)
+
+1. Write test for deterministic `attributionColor()` — same user → same color, different users → different colors
+2. Add `ATTRIBUTION_PALETTE` (15 colors) + `attributionColor(username)` hash function in apply.js
+3. Add `vault.attributionTagIds` Map + `getAttributionTagId()` / `setAttributionTagId()`
+4. After apply per item: check for contributor userId ≠ own userId → create/assign `@user` tag via dispatchSuppressed
+5. In push.js pushTags: `if (tagName.startsWith('@')) continue`
+6. Build + test
+
+### Step 3: Contributor Metadata (Task 7)
+
+1. After attribution tag dispatch: collect contributor set, write `troparcel:contributors` (sorted, comma-joined) and `troparcel:lastSync` (ISO timestamp) via dispatchSuppressed
+2. Metadata URIs: `https://troparcel.org/ns/contributors`, `https://troparcel.org/ns/lastSync`
+3. In push.js pushMetadata: `if (propUri.startsWith('https://troparcel.org/ns/')) continue`
+4. Build + test
+
+## Feedback Loop Prevention (Two Layers)
+
+1. **Dispatch layer:** `dispatchSuppressed()` wraps in suppressChanges/resumeChanges — prevents store.subscribe from firing
+2. **Push filter:** Push side skips `@*` tags and `troparcel:*` metadata URIs — attribution never enters CRDT even if suppression fails
+
+## Attribution Rules
+
+- Tag format: `@username` (e.g. `@alice`)
+- Color: deterministic hash of username → palette index
+- Created once per user, reused across items (cached in vault)
+- Local-only: never pushed to CRDT
+- Deleting `@user` tags is harmless — reappear on next sync

@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "project": "troparcel",
+  "shape": "library-with-server",
+  "mode": "synthesis-only",
+  "last_swept": "2026-05-08",
+  "swept_by": "codebase-diagnostics (synthesis + drift-check mode, user-selected)",
+  "canonical_docs_root": "..",
+  "files": {
+    "overview.md": {
+      "purpose": "single-page map pointing to canonical docs (README, audit, shaping, slices, design spec, plans)",
+      "regenerate_from": "README.md + canonical doc inventory",
+      "last_verified": "2026-05-08"
+    },
+    "subsystems.md": {
+      "purpose": "subsystem boundary table + inter-subsystem flow",
+      "regenerate_from": "src/ file listing + README §Architecture + shaping.md §Codebase Classification",
+      "last_verified": "2026-05-08"
+    },
+    "subsystems/v5-template-list-sync.md": {
+      "purpose": "drift detail for V5 (schema + apply written, push + wiring missing)",
+      "drift_verified": true,
+      "verification_method": "grep over src/sync-engine.js (no calls to applyTemplates/applyListHierarchy), src/store-adapter.js (no readTemplates/readLists), src/push.js (no pushTemplates/pushListHierarchy)",
+      "last_verified": "2026-05-08"
+    },
+    "subsystems/attribution.md": {
+      "purpose": "drift detail for V3 attribution (blocked by missing dispatchSuppressed)",
+      "drift_verified": true,
+      "verification_method": "grep -rn dispatchSuppressed src/ — 4 call sites in apply.js, 0 definitions",
+      "last_verified": "2026-05-08"
+    },
+    "risk-map.md": {
+      "purpose": "P0/P1/P2 issue list, drift-verified findings + carryover from troparcel-audit.md",
+      "last_verified": "2026-05-08"
+    }
+  },
+  "skipped_intentionally": {
+    "domain.md": "README §How it works + tropy design spec.md cover this; one-line pointer in overview.md is enough",
+    "ecosystem.md": "README + crdt-design.md cover Yjs/Tropy ecosystem",
+    "infrastructure.md": "README §Server + docker-compose.yml are sufficient",
+    "cross-cutting/": "no quality-linter or characterization-testing sweep run; canonical docs cover security (README §Security), config (package.json options), data (crdt-schema.js JSDoc), evolution (shaping.md baseline)",
+    "evolution.md": "no git in troparcel/ — shaping.md baseline + slices.md status table substitute"
+  },
+  "next_recommended_passes": [
+    "Targeted: V5 wiring fix (subsystems/v5-template-list-sync.md §Wiring chain)",
+    "Targeted: attribution fix (subsystems/attribution.md §Two viable fixes — Option B recommended)",
+    "Hardening: HTML sanitizer security review (audit §5)",
+    "Hardening: subdoc refactor (V7) before scale becomes a P0"
+  ]
+}
