@@ -20,7 +20,10 @@
     "pack": "node esbuild.config.mjs && zip -r troparcel.zip package.json index.js icon.svg",
     "watch": "node esbuild.config.mjs --watch",
     "server": "node server/index.js",
-    "test": "node --test test/index.test.js"
+    "test": "node --test --test-force-exit test/scenarios/",
+    "test:all": "node --test --test-force-exit test/scenarios/ test/integration/",
+    "test:integration": "node --test --test-force-exit test/integration/",
+    "test:flatpak": "bash test/tropy-flatpak/install.sh && echo 'Now: flatpak run org.tropy.Tropy --port=2019, then node test/tropy-flatpak/synthetic-peer.js'"
   },
   "hooks": {
     "export": true,
@@ -226,10 +229,11 @@
     "research"
   ],
   "dependencies": {
-    "yjs": "^13.6.0",
-    "y-websocket": "^1.5.0",
+    "chokidar": "^5.0.0",
+    "lib0": "^0.2.88",
     "y-utility": "^0.1.4",
-    "lib0": "^0.2.88"
+    "y-websocket": "^1.5.0",
+    "yjs": "^13.6.0"
   },
   "devDependencies": {
     "esbuild": "^0.20.0"

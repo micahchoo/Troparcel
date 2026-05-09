@@ -1,7 +1,39 @@
 'use strict'
 
+const crypto = require('crypto')
 const identity = require('./identity')
 const schema = require('./crdt-schema')
+const { normalizeNoteHtml } = require('./normalize-on-push')
+
+// V5 push helpers (W2.T6/T7) — internal, not exported
+
+/**
+ * Deterministic content hash for V5 dedup gating.
+ * Stable across runs: JSON.stringify with sorted keys.
+ */
+function _hashV5Content(obj) {
+  let json = JSON.stringify(obj, Object.keys(obj).sort())
+  return crypto.createHash('sha256').update(json).digest('hex').slice(0, 32)
+}
+
+/**
+ * Skip Tropy preset templates (built-in Item/Photo/Selection factory templates).
+ * These come from Tropy itself and are not user-created — pushing them would
+ * cause every peer to fight over duplicates. URI prefixes per
+ * tropy/src/ontology/template.js + Recon-plan W2.T6.
+ */
+const TROPY_PRESET_PREFIXES = [
+  'https://tropy.org/v1/templates/generic/',
+  'https://tropy.org/v1/templates/photo',
+  'https://tropy.org/v1/templates/selection'
+]
+function _isPresetTemplateUri(uri) {
+  if (!uri) return true
+  for (let p of TROPY_PRESET_PREFIXES) {
+    if (uri.startsWith(p)) return true
+  }
+  return false
+}
 
 /**
  * Push mixin — local → CRDT write methods (Schema v4).
@@ -203,6 +235,12 @@ module.exports = {
         // Skip notes applied by troparcel (have [author] prefix from sync)
         if (this._isSyncedNote(text, html)) continue
 
+        // Normalize non-canonical/dropped HTML tags (u, s, h1-h6, code, pre, div)
+        // into Tropy editor schema canonical form BEFORE hashing or CRDT write,
+        // so cross-peer formatting is preserved. Pairs with sanitize.js (receive
+        // side). See src/normalize-on-push.js + mulch mx-f3a517 / mx-a3caef.
+        html = normalizeNoteHtml(html)
+
         if (text || html) {
           // v4: UUID-based key — vault generates on first call, reuses thereafter
           let localNoteId = note['@id'] || note.id
@@ -264,6 +302,10 @@ module.exports = {
 
           // Skip notes applied by troparcel (have [author] prefix from sync)
           if (this._isSyncedNote(text, html)) continue
+
+          // Normalize non-canonical/dropped HTML tags into Tropy editor schema
+          // canonical form BEFORE hashing or CRDT write. See normalize-on-push.js.
+          html = normalizeNoteHtml(html)
 
           if (text || html) {
             let localNoteId = note['@id'] || note.id
@@ -991,5 +1033,131 @@ module.exports = {
         }
       }
     }, this.LOCAL_ORIGIN)
+  },
+
+  // --- V5: Project-level schema + list-hierarchy push (W2.T6/T7) ---
+
+  /**
+   * Push local templates to the CRDT `schema` Y.Map (project-level).
+   *
+   * Idempotency: vault.pushedTemplateHashes keys URI → content hash.
+   * If hash matches, skip the write (no-op CRDT mutation).
+   *
+   * URI preservation (mx-0ade81): we use the local template's `id` (its @id
+   * URI) verbatim — never re-mint via Template.identify() — so that the next
+   * apply on the originating peer sees the same key and doesn't duplicate.
+   *
+   * Field keying (mx-995aa5): fields are serialized by `property` URI, not
+   * by Tropy's local decrementing-counter `id` (which is meaningless across
+   * peers).
+   */
+  async pushTemplates(userId, pushSeq) {
+    if (!this.adapter) return
+    if (typeof this.adapter.readTemplates !== 'function') return
+
+    let local = this.adapter.readTemplates() || {}
+    let pushed = 0
+
+    this.doc.transact(() => {
+      for (let uri of Object.keys(local)) {
+        if (_isPresetTemplateUri(uri)) continue
+        let tmpl = local[uri]
+        if (!tmpl || !tmpl.name) continue
+
+        // Hash includes every field that round-trips through CRDT —
+        // critical for W2.T4: toggling isProtected/domain MUST trigger re-push.
+        let hashInput = {
+          uri,
+          name: tmpl.name,
+          type: tmpl.type || null,
+          version: tmpl.version || null,
+          creator: tmpl.creator || null,
+          description: tmpl.description || null,
+          isProtected: !!tmpl.isProtected,
+          domain: tmpl.domain || null,
+          fields: (tmpl.fields || []).map(f => ({
+            property: f.property,
+            label: f.label || null,
+            datatype: f.datatype || null,
+            isRequired: !!f.isRequired,
+            isConstant: !!f.isConstant,
+            hint: f.hint || null,
+            value: f.value || null
+          }))
+        }
+        let hash = _hashV5Content(hashInput)
+        if (this.vault.pushedTemplateHashes.get(uri) === hash) continue
+
+        schema.setTemplateSchema(this.doc, uri, hashInput, userId, pushSeq)
+        this.vault.pushedTemplateHashes.set(uri, hash)
+        pushed++
+      }
+    }, this.LOCAL_ORIGIN)
+
+    if (pushed > 0) this._log(`pushed ${pushed} template(s) to CRDT`)
+  },
+
+  /**
+   * Push local list hierarchy to the CRDT `projectLists` Y.Map (key
+   * `'projectLists'` per mx-2a349c — NOT `'lists'`).
+   *
+   * List identity: each non-root local list gets a stable CRDT UUID via
+   * vault.listIdToCrdtUuid (mints one if absent, persists bidirectionally).
+   * Parent references in the CRDT use the parent's CRDT UUID (or null for
+   * the synthetic root list, id=0).
+   *
+   * Idempotency: vault.pushedListHashes keys CRDT-UUID → content hash.
+   */
+  async pushListHierarchy(userId, pushSeq) {
+    if (!this.adapter) return
+    if (typeof this.adapter.readLists !== 'function') return
+
+    let local = this.adapter.readLists() || {}
+    let pushed = 0
+
+    // Pre-mint UUIDs for every non-root list so parent lookups always resolve.
+    for (let id of Object.keys(local)) {
+      let nid = Number(id)
+      if (nid === 0) continue
+      if (!this.vault.listIdToCrdtUuid.has(nid)) {
+        let uuid = crypto.randomUUID()
+        this.vault.listIdToCrdtUuid.set(nid, uuid)
+        this.vault.crdtUuidToListId.set(uuid, nid)
+      }
+    }
+
+    this.doc.transact(() => {
+      for (let id of Object.keys(local)) {
+        let nid = Number(id)
+        if (nid === 0) continue  // skip synthetic root
+        let list = local[id]
+        if (!list || !list.name) continue
+
+        let uuid = this.vault.listIdToCrdtUuid.get(nid)
+        let parentUuid = null
+        if (list.parent != null && Number(list.parent) !== 0) {
+          parentUuid = this.vault.listIdToCrdtUuid.get(Number(list.parent)) || null
+        }
+
+        // Children expressed as CRDT UUIDs so peers see a UUID-graph.
+        let childUuids = []
+        if (Array.isArray(list.children)) {
+          for (let cid of list.children) {
+            let cu = this.vault.listIdToCrdtUuid.get(Number(cid))
+            if (cu) childUuids.push(cu)
+          }
+        }
+
+        let entry = { name: list.name, parent: parentUuid, children: childUuids }
+        let hash = _hashV5Content({ uuid, ...entry })
+        if (this.vault.pushedListHashes.get(uuid) === hash) continue
+
+        schema.setListHierarchyEntry(this.doc, uuid, entry, userId, pushSeq)
+        this.vault.pushedListHashes.set(uuid, hash)
+        pushed++
+      }
+    }, this.LOCAL_ORIGIN)
+
+    if (pushed > 0) this._log(`pushed ${pushed} list(s) to CRDT`)
   }
 }

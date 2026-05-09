@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { sanitizeHtml, escapeHtml } = require('./sanitize')
+const { TAG, ITEM, METADATA, ONTOLOGY, LIST } = require('./tropy-action-types')
 
 const ATTRIBUTION_PALETTE = [
   '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
@@ -118,6 +119,21 @@ module.exports = {
   },
 
   /**
+   * V3: Resolve a peer userId to its human-readable display name.
+   * Reads from vault.userDisplayNames (populated by awareness handler in
+   * sync-engine). Falls back to the userId itself when no mapping is known
+   * — never returns null/undefined so attribution dispatches always have
+   * a non-empty label.
+   */
+  _resolveDisplayName(userId) {
+    if (!userId) return userId
+    let name = this.vault && this.vault.getDisplayName
+      ? this.vault.getDisplayName(userId)
+      : null
+    return name || userId
+  },
+
+  /**
    * V3: Attribution tags + contributor metadata.
    * Collects all non-self authors from CRDT annotations for this item,
    * dispatches @user tags and troparcel: metadata. All local-only.
@@ -151,7 +167,10 @@ module.exports = {
     // Dispatch @user tags per contributor
     let state = this.adapter._getState()
     for (let contributor of contributors) {
-      let tagName = `@${contributor}`
+      // V3 a646: resolve userId → human displayName before building the tag.
+      // Falls back to userId if no mapping registered (never crashes).
+      let displayName = this._resolveDisplayName(contributor)
+      let tagName = `@${displayName}`
       let tagId = this.vault.attributionTagIds.get(tagName)
 
       if (!tagId) {
@@ -164,32 +183,45 @@ module.exports = {
 
       if (!tagId) {
         tagId = crypto.randomUUID()
-        this.adapter.dispatchSuppressed({
-          type: 'tag.create',
-          payload: { id: tagId, color: attributionColor(contributor) },
+        this.adapter.store.dispatch({
+          type: TAG.CREATE,
+          payload: { id: tagId, color: attributionColor(displayName) },
           meta: { cmd: 'project', history: 'add' }
         })
         this.vault.attributionTagIds.set(tagName, tagId)
         // Set tag name after create (Tropy expects name in tag.create payload)
-        this.adapter.dispatchSuppressed({
-          type: 'tag.save',
+        this.adapter.store.dispatch({
+          type: TAG.SAVE,
           payload: { id: tagId, name: tagName },
           meta: { cmd: 'project' }
         })
       }
 
-      // Assign tag to item
-      this.adapter.dispatchSuppressed({
-        type: 'item.tags.add',
+      // Assign tag to item.
+      // ITEM.TAG.CREATE → AddTags saga → DB persist → ITEM.TAG.INSERT
+      // (mirrors `act.item.tags.create`; the saga arms reducer state via
+      // INSERT after persistence). Payload `{id: [localId], tags: [tagId]}`
+      // matches AddTags' `payload.id.map(...)` requirement (id is array).
+      // Meta mirrors the TAG.CREATE dispatch above: cmd:'project',
+      // history:'add' (the apply cycle is wrapped in history.tick merge so
+      // these collapse into one undo entry — see history-tick.js).
+      // FIXED 2256: was 'item.tags.add' (plural+add), a silent no-op with
+      // no registered handler in tropy. See tropy-action-types.js#ITEM.TAG.
+      this.adapter.store.dispatch({
+        type: ITEM.TAG.CREATE,
         payload: { id: [localId], tags: [tagId] },
-        meta: { cmd: 'project' }
+        meta: { cmd: 'project', history: 'add' }
       })
     }
 
-    // Dispatch contributor metadata
-    let contribText = Array.from(contributors).sort().join(', ')
-    this.adapter.dispatchSuppressed({
-      type: 'metadata.save',
+    // Dispatch contributor metadata — resolve each userId → displayName
+    // (sorted by displayName so the metadata text is stable and human-friendly).
+    let contribText = Array.from(contributors)
+      .map(c => this._resolveDisplayName(c))
+      .sort()
+      .join(', ')
+    this.adapter.store.dispatch({
+      type: METADATA.SAVE,
       payload: {
         id: localId,
         data: {
@@ -1215,19 +1247,25 @@ module.exports = {
 
       // Caller (applyPendingRemote/applyRemoteFromCRDT) already suppresses —
       // use store.dispatch directly, NOT dispatchSuppressed (which would
-      // call resumeChanges and break the outer suppression).
+      // call resumeChanges and break the outer suppression). See mx-9dea97
+      // and .claude/rules/troparcel-apply-suppression.md.
       this.adapter.store.dispatch({
-        type: 'ontology.template.create',
+        type: ONTOLOGY.TEMPLATE.CREATE,
         payload: {
           [uri]: {
             name: tmpl.name,
             type: tmpl.type || 'https://tropy.org/v1/tropy#Item',
             creator: tmpl.creator || '',
             description: tmpl.description || '',
+            // V5 W2.T8 (mx-57bcbc + mx-b5b6b6): isProtected is in
+            // Template.defaults; domain is preserved through the reducer
+            // spread `{...state, ...payload}` even though not in defaults.
+            isProtected: !!tmpl.isProtected,
+            domain: tmpl.domain || null,
             fields
           }
         },
-        meta: { cmd: 'ontology', history: 'add' }
+        meta: { cmd: 'ontology', history: 'add', done: true }
       })
       applied++
       this._debug(`template created: ${tmpl.name} (${uri})`)
@@ -1289,7 +1327,7 @@ module.exports = {
       // Caller already suppresses — use store.dispatch directly.
       let idsBefore = new Set(Object.keys(this.adapter.readLists()))
       let action = this.adapter.store.dispatch({
-        type: 'list.create',
+        type: LIST.CREATE,
         payload: { name: entry.name, parent: localParent },
         meta: { cmd: 'project', history: 'add' }
       })

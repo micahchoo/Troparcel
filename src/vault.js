@@ -106,6 +106,33 @@ class SyncVault {
     // v6: Synced list ID cache
     // Not persisted — rediscovered from store state
     this.syncedListId = null
+
+    // V3 attribution: peer userId -> human-readable display name.
+    // Populated from awareness state in sync-engine._awarenessHandler.
+    // NOT persisted — rediscovered each session via the Yjs awareness
+    // handshake (every peer broadcasts its name on join/update).
+    // Distinct from `originalAuthors` (which maps CRDT-entry-key -> userId).
+    this.userDisplayNames = new Map()
+  }
+
+  // --- V3 attribution: userId -> displayName resolution ---
+
+  /**
+   * Register a peer's display name. Called from awareness handler when a
+   * peer's user state arrives. Latest write wins (peers may rename mid-session).
+   */
+  setDisplayName(userId, name) {
+    if (!userId || !name) return
+    this.userDisplayNames.set(userId, name)
+  }
+
+  /**
+   * Look up a peer's display name. Returns null if unknown — callers must
+   * fall back to the userId itself rather than crashing or rendering 'undefined'.
+   */
+  getDisplayName(userId) {
+    if (!userId) return null
+    return this.userDisplayNames.get(userId) || null
   }
 
   markDirty() {

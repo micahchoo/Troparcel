@@ -12,12 +12,21 @@
  * injected into Tropy's Electron renderer (which has Node.js access).
  */
 
-// Tags ProseMirror supports for basic rich text
+// Tags Tropy's ProseMirror editor schema accepts (audit 2026-05-08, mulch mx-f3a517).
+// SUBSET of tropy/src/editor/serialize.js — anything outside this is silently
+// dropped by Tropy's `fromHTML` on round-trip, so accepting it here just
+// produces formatting that vanishes on the receiving instance.
+//
+// Notably stripped (vs. naive ProseMirror defaults):
+//   u, s          → Tropy uses span+text-decoration (canonical hard_break form)
+//   h1..h6        → no heading nodes in Tropy's note schema
+//   code, pre     → no code-block / inline-code nodes
+//   div           → not a node type (use p / blockquote)
+// Stripped wrappers leave their text-children intact (sanitizer's text pass).
 const SAFE_TAGS = new Set([
-  'p', 'br', 'em', 'i', 'strong', 'b', 'u', 's',
+  'p', 'br', 'em', 'i', 'strong', 'b',
   'a', 'ul', 'ol', 'li', 'blockquote', 'hr',
-  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-  'code', 'pre', 'sup', 'sub', 'span', 'div'
+  'sup', 'sub', 'span'
 ])
 
 // Tags whose content must be removed entirely (not just the tag itself)

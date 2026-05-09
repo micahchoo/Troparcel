@@ -2,7 +2,7 @@
 shaping: true
 ---
 
-# Troparcel — Batteries-Included Collaboration Shaping
+# Troparcel — Collaboration Shaping
 
 ## Frame
 
@@ -12,9 +12,12 @@ shaping: true
 > 2. You can only delete your own notes
 > 3. There's two ways to delete - just for yourself and for everyone else
 
-Directive: make this as generalizable and user-friendly as possible. Expand troparcel's scope by finding creative ways to work with Tropy's UI. Support sync via Nextcloud and other transports. Make setup radically simpler — "batteries included."
+> i want subdocs, can you sync the entire project using the redux store
+> shape aggressively, shared folder model for photos
 
-Constraint: ProseMirror strips most HTML on Tropy's side — attribution and collaboration UI must use Tropy-native channels (tags, metadata, lists), not embedded HTML in notes. Flash dispatch requires i18n key registration (= host modification = ruled out by R9).
+Directive: make this as generalizable and user-friendly as possible. Expand troparcel's scope — sync the full project (items, templates, lists, annotations) with safety, visibility, and simple setup. Support sync via Nextcloud and other transports. Make setup radically simpler — "batteries included."
+
+Constraint: ProseMirror strips most HTML on Tropy's side — attribution and collaboration UI must use Tropy-native channels (tags, metadata, lists), not embedded HTML in notes. Flash dispatch requires i18n key registration (= host modification = ruled out by R6). Tropy's Redux store exposes full CRUD for all entity types via dispatch.
 
 ### Problem
 
@@ -24,6 +27,8 @@ Troparcel syncs annotations between Tropy instances, but:
 3. Attribution is limited to plain-text note footers (ProseMirror strips richer HTML)
 4. Users have no native-UI way to see what changed or who contributed
 5. Setup requires running a server, configuring 20+ options, and manually sharing connection details — too many moving parts for non-technical researchers
+6. Only annotations sync — not items, templates, or lists. A new researcher joining sees nothing until they independently import the same photos and hope checksum-based identity matching kicks in.
+7. The entire CRDT loads into memory — no selective sync for large corpora
 
 ### Outcome
 
@@ -32,6 +37,9 @@ A "batteries-included" collaboration layer where:
 - The sync process is visible inside Tropy's native UI
 - Setup is a two-field configuration (connection string + your name)
 - Multiple transport options (WebSocket, shared folder, HTTP) are each a one-step choice
+- Full project sync: items, templates, lists, and annotations all propagate
+- Photo files reach collaborators via shared folder
+- Selective sync via subdocs keeps memory proportional to active items
 - Documentation reflects the new safety model and simplified setup
 
 ### Appetite
@@ -42,22 +50,35 @@ TBD — user to specify.
 
 ## Requirements (R)
 
-| ID | Requirement | Status |
-|----|-------------|--------|
-| R0 | Collaborative annotations form an additive stack — each user's authored content is protected from other users' deletions | Core goal |
-| R1 | Only the author of a note, selection, or transcription can retract it (tombstone propagating to all peers) | Must-have |
-| R2 | Deleting a non-authored annotation automatically becomes a local dismissal (hidden locally, CRDT untouched) | Must-have |
-| R3 | Ownership enforcement applies to authored content (notes, selections, transcriptions). Tags and list memberships use add-wins semantics without ownership guard. | Must-have |
-| R4 | Dismissals are persistent across restarts, non-destructive, and recoverable. Dismissals are pushSeq-aware — re-dismiss lifts when author revises content. | Must-have |
-| R5 | Visible in-app feedback about sync events and deletion scope via DOM notifications (not console-only) | Must-have |
-| R6 | Users can see who contributed which annotations via Tropy-native UI (attribution tags `@user`, contributor metadata) | Must-have |
-| R7 | Incoming changes are surfaced through Tropy's native UI (auto-lists, tags, metadata) so users know what arrived | Must-have |
-| R8 | Sync transport is pluggable — CRDT state can sync via WebSocket, shared folder (Nextcloud), or HTTP snapshot | Done |
-| R9 | No Tropy host modification; no CRDT schema version bump | Must-have |
-| R10 | Setup requires at most two fields: connection string + user name. All other options have safe defaults or are derived from the connection string. | Must-have |
-| R11 | Coordinator can generate a connection string via server output, monitor dashboard, npx, or deploy button — no manual URL construction | Must-have |
-| R12 | All documentation (GUIDE, SETUP, CONFLICTS) updated to reflect new safety model and simplified setup | Must-have |
-| R13 | Architecture supports future Yjs capabilities: subdocs for per-item sync, client-side persistence for offline-first, Y.XmlFragment for concurrent note editing. Current design must not close these doors. | Architecture |
+| ID | Requirement | Sub-Reqs | Status |
+|----|-------------|----------|--------|
+| **R0** | Additive stack — authored content protected from others' deletions | R0.1: Author-only retraction (notes/sel/tx). R0.2: Non-author delete → local dismissal. R0.3: Entity-type rules (authored guarded, add-wins for tags/lists). R0.4: pushSeq-aware persistent dismissals. | Core goal |
+| **R1** | Project structure (items, templates, lists) syncs across instances | R1.1: Items appear on all instances (given photos). R1.2: Template definitions sync. R1.3: List hierarchy syncs. R1.4: Missing-photo items queued, not lost. | Must-have |
+| **R2** | Photo files reach collaborators via shared folder | R2.1: Configurable shared folder path. R2.2: CRDT stores relative paths. R2.3: Missing-photo queue retried each cycle. | Must-have |
+| **R3** | Selective sync — only active items loaded | R3.1: Per-item subdocs on demand. R3.2: Memory proportional to active items. | Must-have |
+| **R4** | Sync activity visible inside Tropy's native UI | R4.1: DOM notifications (DONE). R4.2: Attribution @user tags. R4.3: Contributor metadata. R4.4: Auto-lists for recently synced items. | Must-have |
+| **R5** | Setup requires two fields (connection string + name) | R5.1: Connection string encodes transport/address/room/auth. R5.2: Coordinator generates string via server/npx/deploy. R5.3: Advanced overrides remain. | Must-have |
+| **R6** | No Tropy host modification; existing sync works without regression | R6.1: No Tropy source changes. R6.2: Annotation sync (v5.0) regression-free. Note: V7 subdoc migration (CRDT v4→v5) is internal to troparcel, not a Tropy change. | Must-have |
+| **R7** | All documentation reflects current safety model and setup | R7.1: GUIDE, SETUP, CONFLICTS updated. R7.2: New user can set up from docs alone. | Must-have |
+| **R8** | Pluggable transport (WebSocket, file, snapshot) | Atomic, DONE. | Done |
+
+### Requirement Traceability
+
+How the unified R0-R8 map to the original requirement sets:
+
+| Unified | Source: shaping.md (old) | Source: V5-shaping.md (old) |
+|---------|--------------------------|---------------------------|
+| R0 | R0-R4 (additive stack, author retraction, auto-dismiss, entity-type rules, pushSeq dismissals) | — |
+| R1 | — | R0-R3, R8 (items, templates, lists, missing-photo queue) |
+| R2 | — | R5 (photo distribution via shared folder) |
+| R3 | — | R4 (selective sync via subdocs) |
+| R4 | R5-R7 (DOM notifications, attribution, auto-lists) | — |
+| R5 | R10-R11 (two-field setup, connection string generation) | — |
+| R6 | R9 (no host modification) | R6-R7 (annotation regression-free, no host modification) |
+| R7 | R12 (documentation) | — |
+| R8 | R8 (pluggable transport) | — |
+
+**Dropped:** Old shaping R13 (Yjs future-proofing) demoted to architecture note in Future-Proofing section. Not testable as binary requirement. R3 captures the concrete subdoc deliverable.
 
 ---
 
@@ -65,15 +86,16 @@ TBD — user to specify.
 
 | Module | Bucket | Evidence | Implication |
 |--------|:------:|----------|-------------|
-| push.js | (a) LOAD-BEARING | pushDeletions works, no authorship check | Needs ownership guard for notes/selections/transcriptions |
-| apply.js | (a) LOAD-BEARING | Skips own notes, dismissedKeys checked | Needs dismiss routing + tombstone author validation + attribution dispatch |
-| vault.js | (a) LOAD-BEARING | dismissedKeys already persisted as Set | Extend to Map<key, pushSeq> for pushSeq-aware dismissals |
-| crdt-schema.js | (a) LOAD-BEARING | `author` field on every CRDT entry | No changes — foundation exists |
-| sync-engine.js | (a) LOAD-BEARING | Core orchestration, transport coupling removed | Transport adapter layer done. Needs notification wiring. |
-| plugin.js | (a) LOAD-BEARING | Entry point, hooks, lifecycle | Needs connection string parsing, transport option |
-| store-adapter.js | (a) LOAD-BEARING | Redux read/write abstraction | Needs `dispatchSuppressed()` for attribution writes |
-| notifications.js | (a) LOAD-BEARING | V1 DOM overlay complete | Wire retract/dismiss/attribution events |
-| adapters/*.js | (a) LOAD-BEARING | Transport adapter layer complete | No further changes |
+| push.js | (a) LOAD-BEARING | pushDeletions works, no authorship check | Needs ownership guard + item/template/list push |
+| apply.js | (a) LOAD-BEARING | Skips own notes, dismissedKeys checked. V5 apply code exists unwired. | Needs dismiss routing + tombstone validation + attribution + item/template/list apply |
+| vault.js | (a) LOAD-BEARING | dismissedKeys as Set, V5 fields defined unused | Extend to Map<key, pushSeq>, wire V5 tracking fields |
+| crdt-schema.js | (a) LOAD-BEARING | v4 schema, `author` field on every entry. V5 "schema"/"projectLists" maps exist. | Needs "items" map, subdoc refactor (V7) |
+| sync-engine.js | (a) LOAD-BEARING | Core orchestration, transport coupling removed | Needs V5/V6 orchestration wiring, subdoc lifecycle |
+| plugin.js | (a) LOAD-BEARING | Entry point, hooks, lifecycle | Needs connection string parsing, sharedFolder config |
+| store-adapter.js | (a) LOAD-BEARING | Redux read/write abstraction | Needs `dispatchSuppressed()`, readTemplates/readLists/readFullItem |
+| notifications.js | (a) LOAD-BEARING | V1 DOM overlay complete | Wire retract/dismiss/attribution/import events |
+| adapters/*.js | (a) LOAD-BEARING | Transport adapter layer complete | Needs subdoc-aware sync (V7) |
+| server/index.js | (a) LOAD-BEARING | y-websocket + y-leveldb | Needs subdoc persistence wiring (V7) |
 | All others | (a) LOAD-BEARING | Working, no deletion logic | Don't touch |
 
 ## Interrelationship Map
@@ -87,100 +109,21 @@ TBD — user to specify.
 | auto-lists | store-adapter | COUPLED | Need dispatchSuppressed for list create/item.add |
 | push (tags/metadata) | attribution | FILTER | Push must skip `@*` tags and `troparcel:*` metadata URIs |
 | connection-string | plugin.js | NEW | Parse `troparcel://` URI into transport options |
-
----
-
-## Original Design Concerns
-
-These concerns drove the conservative defaults in v5.0. Each is addressed explicitly in the new design.
-
-### OC1: Any user can tombstone any content
-
-**Original mitigation:** `syncDeletions` defaults OFF. Deletions are local-only and restored on next sync.
-
-**New design:** Ownership guard scopes retraction to authored content (notes, selections, transcriptions). Tags and list memberships are exempt because:
-- Their `author` field means "most recent pusher," not "creator" — multiple users independently add the same tag, last push wins the author field
-- Add-wins semantics already recovers from tombstones (a subsequent add clears the tombstone)
-- They are lightweight shared vocabulary, not authored content
-
-**syncDeletions default stays OFF.** Rationale:
-- Changing defaults on upgrade changes behavior for existing users
-- Author spoofing (OC2) means ON is not fully safe for untrusted environments
-- File-based sync has no auth layer — anyone writing to the folder can spoof
-- GUIDE's coordinator-centric safety model still applies for classroom settings
-
-But: language softened. Instead of "dangerous," docs say "safe for author-scoped retractions of your own notes, selections, and transcriptions."
-
-### OC2: No cryptographic identity
-
-**Original mitigation:** Room tokens protect WebSocket; `userId` is self-declared.
-
-**New design:** Unchanged. Author field is trust-based. A malicious user can set `userId` to match another's and tombstone their content. Room tokens protect WebSocket transport; file-based sync has no auth. Documented as known limitation.
-
-**Future enhancement (not in scope):** Coordinator `superUser` role that can tombstone any content. Cryptographic signing of CRDT entries.
-
-### OC3: Tag `author` field ≠ "creator"
-
-**Discovered during V2 design.** Tags are keyed by lowercase name with a single `author` field. When two users both add "Important," the most recent pusher becomes the author. A naive ownership guard would prevent the original creator from retracting their own tag.
-
-**Resolution:** Tags and list memberships use add-wins without ownership guard. Ownership guard applies only to UUID-keyed authored content (notes, selections, transcriptions).
-
-### OC4: Tombstone GC window
-
-**Original mitigation:** Server purges tombstones older than `TOMBSTONE_MAX_DAYS` (default 30). Clients offline >30 days may resurrect deleted items.
-
-**New design:** Unchanged. V2 ownership guard doesn't alter tombstone lifecycle. Document recommendation: connect at least once per 30 days.
-
-### OC5: Coordinator-only permanent deletion
-
-**Original mitigation:** 5-step coordinator dance — enable syncDeletions, restart, delete, disable, restart.
-
-**New design:** Simplified for authored content. Author can retract their own notes/selections/transcriptions directly (syncDeletions ON). For departed authors — nobody can tombstone their content; users dismiss locally, or coordinator resets CRDT state.
-
-**Future enhancement (not in scope):** `superUser` coordinator role.
-
-### OC6: Ghost note prevention
-
-**Original mitigation:** `failedNoteKeys` gives up after 3 retries.
-
-**New design:** Dismissed note keys must NOT count toward `failedNoteKeys`. Dismissed = user chose to hide. Failed = technical failure. Different buckets. Apply-side checks `dismissedKeys` before retrying.
-
-### OC7: Dismissal lifecycle
-
-**New concern from V2 design.** When dismissed content gets updated by the original author, should the dismissal persist?
-
-**Resolution: pushSeq-aware dismissals.** `vault.dismissedKeys` stores `Map<key, pushSeqAtDismissal>` instead of `Set<key>`. Apply-side checks: if `entry.pushSeq > dismissedPushSeq`, un-dismiss and show the updated content. This matches "mute this thread" semantics — you're pulled back in when there's new activity.
-
-### OC8: Attribution feedback loops
-
-**Concern from V3 design.** Attribution writes (tags, metadata) must not trigger push.
-
-**Resolution — two layers:**
-1. **Dispatch layer:** `dispatchSuppressed()` wraps attribution dispatches in `suppressChanges()/resumeChanges()` — prevents store.subscribe from firing
-2. **Push filter:** Push side skips `@*` tags and `troparcel:*` / `https://troparcel.org/ns/*` metadata URIs — attribution never enters the CRDT even if suppression fails
-
-Attribution is local-only by design. It's re-created on each apply cycle from CRDT author fields.
-
-### OC9: Setup complexity
-
-**Original mitigation:** 20+ flat options in Tropy preferences. GUIDE has a "settings card" concept (coordinator fills in values, shares with team). SETUP.md has 3 scenarios with 5-8 steps each.
-
-**New design: Connection string.** All transport/address/room/auth collapsed into one URI:
-```
-troparcel://ws/server.edu:2468/room-name?token=secret
-troparcel://file/home/alice/Nextcloud/tropy-collab
-troparcel://snapshot/https://r2.example.com/crdt/state.yjs?auth=Bearer+tok
-```
-
-Researcher configures 2 fields: connection string + your name. Individual fields remain as `[Advanced]` overrides for backward compatibility.
+| Item sync | Photo distribution | COUPLED | Can't import items without photo files present |
+| Item sync | Subdocs | COUPLED | Subdocs ARE the per-item isolation — same refactor |
+| Schema sync (templates) | Item sync | SEQUENTIAL | Templates must exist before items reference them |
+| List hierarchy sync | Item sync | SEQUENTIAL | Lists must exist before items are assigned to them |
+| Schema sync | List sync | ORTHOGONAL | Independent — different state slices, different dispatch |
+| Subdoc refactor | Adapter layer | COUPLED | Adapters must handle subdoc lifecycle |
+| Subdoc refactor | Server | COUPLED | Server must persist subdocs |
 
 ---
 
 ## Shapes
 
-### CURRENT + T1: Baseline + Transport Adapters (DONE)
+### CURRENT: Baseline (updated 2026-02-28)
 
-Transport adapter layer implemented. Pluggable sync via WebSocket, shared folder, or HTTP snapshot.
+Annotation overlay (v5.0), transport adapters, notifications, connection string parsing. V5 schema/apply code exists but is **NOT wired** into sync cycle. Attribution code exists but crashes at runtime (missing `dispatchSuppressed`). No item sync, no subdocs.
 
 | Part | Mechanism | Status |
 |------|-----------|:------:|
@@ -189,12 +132,20 @@ Transport adapter layer implemented. Pluggable sync via WebSocket, shared folder
 | T3 | File adapter (poll-based shared folder) | Done |
 | T4 | Snapshot adapter (HTTP GET/PUT) | Done |
 | T5 | `transport` option in plugin.js + package.json | Done |
+| N1 | DOM notification overlay — status pill + toasts | Done |
+| CS1 | Connection string parser (`troparcel://` URIs → transport options) | Done |
+| V5-S | CRDT Y.Map "schema" + "projectLists" maps in crdt-schema.js | 🟡 Schema only — no push, apply not wired |
+| V5-V | Vault: pushedTemplateHashes, pushedListHashes, listIdToCrdtUuid | 🟡 Fields defined, unused |
+| V5-A | `applyTemplates()` + `applyListHierarchy()` in apply.js | 🟡 Code exists, never called from sync-engine |
+| AT1 | `_applyAttribution()` in apply.js | 🟡 Called from applyRemoteAnnotations, crashes (missing `dispatchSuppressed`) |
 
 ---
 
-### Shape C+: Batteries-Included (Selected)
+### Selected Shape: Batteries-Included + Full Project Sync
 
-Shape C from the original shaping, extended with transport adapters (done), connection string UX, and entity-type-specific ownership rules. Incorporates all original concern resolutions.
+Shape C+ (batteries-included safety/UX) combined with Shape A (subdocs + full project sync). Delivers all R0-R8.
+
+#### Batteries-Included Parts (Safety + UX)
 
 | Part | Mechanism | Status |
 |------|-----------|:------:|
@@ -202,13 +153,113 @@ Shape C from the original shaping, extended with transport adapters (done), conn
 | **C2** | **Apply-side tombstone validation**: reject incoming tombstones where `tombstone.author !== original.author` for notes/selections/transcriptions. Accept all tag/list tombstones (add-wins recovers). | Planned |
 | **C3** | **pushSeq-aware dismissals**: vault.dismissedKeys stores `Map<key, pushSeq>`. Auto-undismiss when author revises content (`entry.pushSeq > dismissedPushSeq`). Dismissed keys excluded from `failedNoteKeys`. | Planned |
 | **C4** | **DOM notification overlay**: status pill + toast notifications. Connect, disconnect, apply, retract, dismiss events. | Done (V1) |
-| **C5** | **Attribution tags**: on apply, create/assign `@user` tags per contributor. Deterministic color from username hash. Cached in vault. Local-only (never pushed to CRDT). Push side skips `@*` tags. | Planned |
-| **C6** | **Auto-lists**: auto-create "Synced items" list, populate with items that received remote annotations. Local-only (never pushed). Accumulated, user-curated removal. | Planned |
-| **C7** | **Sync metadata**: write `troparcel:contributors` and `troparcel:lastSync` to item metadata. Local-only (push skips `troparcel:*` URIs). Wrapped in `dispatchSuppressed()`. | Planned |
-| **C8** | **Connection string**: `troparcel://` URI encodes transport + address + room + auth. Two-field researcher config. Server prints string on startup. Monitor dashboard shows copyable string. | Planned |
+| **C5** | **Attribution tags**: on apply, create/assign `@user` tags per contributor. Deterministic color from username hash. Local-only (never pushed). Push side skips `@*` tags. | 🟡 Unwired — code in apply.js, needs `dispatchSuppressed` on StoreAdapter |
+| **C6** | **Auto-lists**: auto-create "Synced items" list, populate with items that received remote annotations. Local-only (never pushed). | Planned |
+| **C7** | **Sync metadata**: write `troparcel:contributors` and `troparcel:lastSync` to item metadata. Local-only. | 🟡 Unwired — code in apply.js, needs `dispatchSuppressed` on StoreAdapter |
+| **C8** | **Connection string**: `troparcel://` URI encodes transport + address + room + auth. Two-field researcher config. | 🟡 Parsing done. Generation not built. |
 | **C9** | **npx server**: `npx troparcel-server` zero-config server start. Prints connection string. | Planned |
-| **C10** | **Deploy templates**: Render `render.yaml`, Railway `railway.json`, Cloudflare Workers template. One-click deploy → get connection string. | Planned |
-| **C11** | **Documentation rewrite**: GUIDE, SETUP, CONFLICTS updated for ownership model, connection string, transport options. Settings presets simplified. | Planned |
+| **C10** | **Deploy templates**: Render, Railway, Cloudflare Workers. One-click deploy → connection string. | Planned |
+| **C11** | **Documentation rewrite**: GUIDE, SETUP, CONFLICTS updated for ownership model, connection string, transport options. | Planned |
+
+#### Full Project Sync Parts (Items + Structure + Subdocs)
+
+| Part | Mechanism | Status |
+|------|-----------|:------:|
+| **A1** | **Root doc structure**: Y.Map "items" (identity → {template, checksums, author}), Y.Map "schema" (templates), Y.Map "projectLists" (hierarchy), Y.Map "tags" (definitions). | 🟡 PARTIAL — "schema" + "projectLists" exist. "items" NOT built. |
+| **A2** | **Per-item subdocs**: Each item's annotations in a Y.Doc with guid = identity hash. Loaded on demand. | NOT STARTED |
+| **A3** | **Item push**: Read `state.items` + `state.photos` → CRDT items index with template URI + photo checksums + relative paths. | NOT STARTED |
+| **A4** | **Item apply**: Compare CRDT items index vs local items. Missing items: check photo existence → dispatch `item.import` → load subdoc → apply annotations. Queue items without photos. | NOT STARTED |
+| **A5** | **Template sync**: Push reads `state.ontology.template` → CRDT "schema" map. Apply dispatches `ontology.template.create/save`. Runs BEFORE item apply. | 🟡 PARTIAL — apply code exists, push NOT built, not wired in sync-engine. |
+| **A6** | **List sync**: Push reads `state.lists` → CRDT "projectLists" map. Apply dispatches `list.create/list.move`, topologically sorted. Runs BEFORE item apply. | 🟡 PARTIAL — apply code exists, push NOT built, not wired in sync-engine. |
+| **A7** | **Photo path resolution**: `sharedFolder` config. CRDT stores relative paths. Apply-side resolves + checks existence. Queue + retry for missing photos. | NOT STARTED |
+| **A8** | **Subdoc provider management**: WebSocket — one provider per loaded subdoc (A8-A naive strategy). File — per-subdoc files in `items/`. Snapshot — per-subdoc URLs. | NOT STARTED |
+
+---
+
+## Original Design Concerns
+
+### OC1: Any user can tombstone any content
+
+**Original mitigation:** `syncDeletions` defaults OFF.
+
+**New design:** Ownership guard scopes retraction to authored content (notes, selections, transcriptions). Tags and list memberships are exempt — `author` means "most recent pusher," not "creator." Add-wins semantics recovers from tombstones.
+
+**syncDeletions default stays OFF.** Changing defaults on upgrade changes behavior for existing users. Author spoofing (OC2) means ON is not fully safe for untrusted environments. Language softened: "safe for author-scoped retractions of your own notes, selections, and transcriptions."
+
+### OC2: No cryptographic identity
+
+**Original mitigation:** Room tokens protect WebSocket; `userId` is self-declared.
+
+**New design:** Unchanged. Author field is trust-based. A malicious user can set `userId` to match another's. Documented as known limitation.
+
+### OC3: Tag `author` field ≠ "creator"
+
+Tags are keyed by lowercase name with a single `author` field. Multiple users adding "Important" means last pusher becomes author.
+
+**Resolution:** Tags and list memberships use add-wins without ownership guard. Ownership guard applies only to UUID-keyed authored content (notes, selections, transcriptions).
+
+### OC4: Tombstone GC window
+
+Server purges tombstones older than `TOMBSTONE_MAX_DAYS` (default 30). Clients offline >30 days may resurrect deleted items.
+
+**New design:** Unchanged. Document recommendation: connect at least once per 30 days.
+
+### OC5: Coordinator-only permanent deletion
+
+**New design:** Simplified for authored content. Author can retract their own notes/selections/transcriptions directly (syncDeletions ON). For departed authors — nobody can tombstone their content; users dismiss locally, or coordinator resets CRDT state.
+
+### OC6: Ghost note prevention
+
+**New design:** Dismissed note keys must NOT count toward `failedNoteKeys`. Dismissed = user chose to hide. Failed = technical failure. Different buckets.
+
+### OC7: Dismissal lifecycle
+
+When dismissed content gets updated by the original author, should the dismissal persist?
+
+**Resolution: pushSeq-aware dismissals.** `vault.dismissedKeys` stores `Map<key, pushSeqAtDismissal>`. Apply-side checks: if `entry.pushSeq > dismissedPushSeq`, un-dismiss and show updated content.
+
+### OC8: Attribution feedback loops
+
+Attribution writes (tags, metadata) must not trigger push.
+
+**Resolution — two layers:**
+1. `dispatchSuppressed()` wraps attribution dispatches in `suppressChanges()/resumeChanges()`
+2. Push side skips `@*` tags and `troparcel:*` / `https://troparcel.org/ns/*` metadata URIs
+
+Attribution is local-only — re-created on each apply cycle from CRDT author fields.
+
+### OC9: Setup complexity
+
+**New design: Connection string.** All transport/address/room/auth collapsed into one URI:
+```
+troparcel://ws/server.edu:2468/room-name?token=secret
+troparcel://file/home/alice/Nextcloud/tropy-collab
+troparcel://snapshot/https://r2.example.com/crdt/state.yjs?auth=Bearer+tok
+```
+
+Researcher configures 2 fields: connection string + your name. Individual fields remain as `[Advanced]` overrides.
+
+### OC10: Subdoc migration from monolithic doc
+
+Existing CRDT data (v4 schema) stores all items as Y.Map entries under `annotations`. Y.Map entries cannot be "promoted" to subdoc ContentDoc structs.
+
+**Resolution:** Schema version bump to v5. Server-side migration: read item data from annotations Y.Map → create subdocs → populate → delete old entries. Vault data (keyed by identity hash) is preserved.
+
+### OC11: Cross-doc atomicity loss
+
+Monolithic doc: `transact()` spans all items. Subdocs: each item is independent.
+
+**Resolution:** Acceptable. Annotation sync is eventually consistent by design. Root doc is atomic within itself. Per-item subdocs are atomic per item.
+
+### OC12: Template identity across instances
+
+`ontology.template.create` assigns a local ID. Different instances may assign different IDs for the same template.
+
+**Resolution:** Templates keyed by URI in CRDT (globally unique by convention). Apply-side checks if template with same URI exists locally before creating.
+
+### OC13: Item deletion across instances
+
+**Resolution:** Extend V2 ownership guard to item index entries. Author field on items index. Non-author deletions become dismissals. Same pushSeq-aware pattern as notes/selections.
 
 ---
 
@@ -216,294 +267,94 @@ Shape C from the original shaping, extended with transport adapters (done), conn
 
 ### S1: Flash Message Dispatch — PARTIAL FAILURE
 
-**Mechanism works, content doesn't.** Flash is i18n-bound:
+Flash is i18n-bound. Plugin dispatching `{ type: 'flash.show', payload: { id: 'troparcel-sync' } }` looks up a translation key that doesn't exist. React-intl shows raw key as fallback.
 
-```javascript
-// Flash component renders:
-<FormattedMessage id={`flash.${id}.message`} values={values}/>
-```
+**Verdict:** Flash NOT suitable for plugin notifications. Requires i18n key registration = host modification = violates R6.
 
-The `id` maps to a translation key in Tropy's string resources. A plugin dispatching
-`{ type: 'flash.show', payload: { id: 'troparcel-sync' } }` looks up
-`flash.troparcel-sync.message` — which doesn't exist. React-intl shows the raw key
-as fallback text. Ugly, not user-friendly. Only used once in Tropy (app updates).
-
-| Question | Answer |
-|----------|--------|
-| Payload shape | `{ id: string, values?: object }` — id is i18n key, not message text |
-| Renders in project window? | Yes — `useSelector(state => state.flash)` |
-| Lifecycle | Manual dismiss only — confirm + X close, no auto-timer |
-
-**Verdict:** Flash NOT suitable for plugin notifications. Requires i18n key registration = host modification = violates R9.
-
-**Alternative (implemented):** Direct DOM injection via `src/notifications.js`. Plugin has `context.window` access. Status pill + toast overlay. CSS-isolated, z-index layered, auto-dismiss.
+**Alternative (implemented):** Direct DOM injection via `src/notifications.js`. Status pill + toast overlay. CSS-isolated, z-index layered, auto-dismiss.
 
 ### S2: Tag/Metadata Dispatch — PASS
 
-| Question | Answer | Risk |
-|----------|--------|------|
-| Create tag? | **YES** — `{ type: 'tag.create', payload: { id, color }, meta: { cmd: 'project', history: 'add' } }` | Low |
-| Custom metadata URIs? | **YES** — arbitrary URIs like `troparcel:contributors` work | Low |
-| Saga triggers? | **YES** — cmd saga persists to DB, tag appears in UI immediately | Low |
-| Feedback loop? | **HIGH RISK** — must wrap in `suppressChanges()/resumeChanges()` | Solvable (mechanism exists) |
+Tags and custom metadata URIs work via store.dispatch. Saga persists to DB. Must wrap in `suppressChanges()/resumeChanges()` to prevent feedback loops.
 
 ### S3: Transport Decoupling — PASS (IMPLEMENTED)
 
-| Question | Answer |
-|----------|--------|
-| Yjs coupling zones in sync-engine.js | 5 zones (~100 lines): imports, construction, event wiring, waitForConnection, cleanup |
-| `Y.encodeStateAsUpdate()` / `Y.applyUpdate()` transport-agnostic? | **YES** — work over any byte transport |
-| Awareness protocol required? | **NO** — only WebSocket adapter provides awareness; file/snapshot return null |
-| Build size impact | 258.9KB (from 250KB baseline) — within 260KB budget |
-| Test regression | 149/159 pass (same 10 pre-existing failures) |
+Yjs binary encoding is transport-agnostic. Awareness optional (WebSocket only). Build size: 258.9KB (within 260KB budget). Test regression: same pre-existing failures.
+
+### S4: Full Project Sync via Redux — PASS (from spike-yjs-fullcap.md)
+
+`item.import`, `ontology.template.create/save`, `list.create/list.move` all work via dispatch. Per-item Yjs subdocs enable selective sync. Photo files distributed via shared folder.
 
 ---
 
 ## Fit Check
 
-| Req | Requirement | Status | CURRENT | C+ |
-|-----|-------------|--------|:-------:|:--:|
-| R0 | Additive stack — authored content protected | Core goal | ❌ | ✅ |
-| R1 | Author-only retraction (notes/selections/transcriptions) | Must-have | ❌ | ✅ |
-| R2 | Auto-dismiss for non-author deletions | Must-have | ❌ | ✅ |
-| R3 | Entity-type-specific ownership (authored content guarded, add-wins for tags/lists) | Must-have | ❌ | ✅ |
-| R4 | pushSeq-aware persistent dismissals | Must-have | ✅ (partial) | ✅ |
-| R5 | Visible in-app feedback via DOM notifications | Must-have | ❌ | ✅ (done) |
-| R6 | Attribution visibility via tags + metadata | Must-have | ❌ | ✅ |
-| R7 | Change surfacing via auto-lists + tags | Must-have | ❌ | ✅ |
-| R8 | Pluggable transport (WebSocket, file, snapshot) | Done | ❌ | ✅ (done) |
-| R9 | No host modification, no schema bump | Must-have | ✅ | ✅ |
-| R10 | Two-field setup (connection string + name) | Must-have | ❌ | ✅ |
-| R11 | Connection string generation (server, dashboard, npx, deploy) | Must-have | ❌ | ✅ |
-| R12 | Documentation updated | Must-have | ❌ | ✅ |
+| Req | Requirement | CURRENT | Selected |
+|-----|-------------|:-------:|:--------:|
+| R0 | Additive stack — authored content protected | ❌ | ✅ |
+| R1 | Project structure syncs (items, templates, lists) | ❌ | ✅ |
+| R2 | Photo files via shared folder | ❌ | ✅ |
+| R3 | Selective sync — subdocs on demand | ❌ | ✅ |
+| R4 | Sync activity visible in native UI | 🟡 (notifications only) | ✅ |
+| R5 | Two-field setup (connection string + name) | 🟡 (parsing only) | ✅ |
+| R6 | No host modification; annotation sync regression-free | ✅ | ✅ |
+| R7 | Documentation updated | ❌ | ✅ |
+| R8 | Pluggable transport | ✅ (Done) | ✅ (Done) |
 
-**S × R Profile: C+ (12/12)** — All requirements pass.
+**S × R Profile:**
+- CURRENT (3/9): R6, R8 done. R4, R5 partial. Gap: R0, R1, R2, R3, R7.
+- Selected (9/9): All requirements pass when fully built.
 
 ---
 
 ## Decision
 
-**Shape C+ selected.** Extends original Shape C with transport adapters (done), connection string UX, entity-type-specific ownership, pushSeq-aware dismissals, and documentation rewrite.
+**Combined shape selected.** C+ (batteries-included) + A (subdocs + full project sync). Delivers safety (R0), full project sync (R1-R3), visibility (R4), simple setup (R5), compatibility (R6), documentation (R7), and pluggable transport (R8).
 
-### Why not original Shape C unchanged?
+### Why combined?
 
-1. **R3 was wrong.** "Uniform across all annotation types" is not achievable because tags and list memberships have multi-author semantics (the `author` field means "last pusher," not "creator"). Entity-type-specific rules are the correct design.
-2. **R8 was undecided.** Transport adapters are now implemented.
-3. **Setup pain was unaddressed.** Original Shape C solved visibility and safety but not onboarding. Connection string UX closes this gap.
-4. **Dismissal lifecycle was underspecified.** pushSeq-aware dismissals handle the "author revises dismissed content" edge case.
+1. **Safety alone is incomplete.** If annotations are protected but new researchers can't discover items, the collaboration is one-sided.
+2. **Project sync alone is incomplete.** If items arrive but any collaborator can silently tombstone your work, the additions-stack guarantee is broken.
+3. **Both tracks share infrastructure.** `dispatchSuppressed()`, vault persistence, CRDT schema extensions, notification overlay — built once, used by both.
 
----
+### Deferred to future cycles
 
-## Slices
-
-Build order:
-
-```
-V1 (notifications) ──────── DONE
-Transport adapters ──────── DONE
-                      ┌──→ V2 (ownership guard)
-Connection string ────┤
-                      └──→ V3 (attribution) ──→ V4 (auto-lists)
-Deploy templates ──────────────────────────────→ (parallel)
-Documentation ─────────────────────────────────→ (after V2-V4)
-```
-
-### V1: "I can see it's alive" — DONE
-
-DOM notification overlay. Status pill + toasts. `src/notifications.js`.
-
-### Transport Adapters — DONE
-
-`src/adapters/{base,index,websocket,file,snapshot}.js`. sync-engine.js refactored. plugin.js + package.json updated.
-
-### Connection String (new)
-
-**Demo:** Researcher pastes `troparcel://ws/server.edu:2468/room?token=abc` into plugin settings. Plugin auto-configures transport, server URL, room, and token. Two fields total.
-
-| File | Changes |
-|------|---------|
-| `src/connection-string.js` | **NEW** — parse/generate `troparcel://` URIs |
-| `src/plugin.js` | Parse `connectionString` before `mergeOptions()`. Individual fields override. |
-| `package.json` | Add `connectionString` field at top of options. Reorder: essential fields first, `[Advanced]` prefix on rest. |
-
-### V2: "My work is protected" — Ownership Guard
-
-**Demo:** Alice creates a note. Bob sees it via sync. Bob deletes it locally. Instead of tombstoning, Bob's troparcel notifies "Dismissed alice's note (hidden locally)" and alice's note remains in the CRDT. If Bob deletes his OWN note, it retracts normally. If alice later edits the note Bob dismissed, the updated version reappears for Bob.
-
-| File | Changes |
-|------|---------|
-| `src/push.js` | `pushDeletions()` — author check for notes, selections, transcriptions (3 entity types). Tags and lists: unchanged (no ownership check). |
-| `src/apply.js` | Tombstone author validation for notes, selections, transcriptions. Tags/lists: accept all tombstones (add-wins recovers). |
-| `src/vault.js` | `dismissedKeys` becomes `Map<key, pushSeq>`. Entity-type prefix (`note:`, `sel:`, `tx:`). `failedNoteKeys` exclusion for dismissed keys. |
-| `src/sync-engine.js` | Wire notification calls for retract/dismiss events |
-
-#### Edge cases
-
-| Scenario | Expected behavior |
-|---|---|
-| Bob dismisses alice's note, alice edits it | Bob sees updated note (pushSeq advanced past dismissal) |
-| Alice leaves project, her notes need removal | Other users dismiss locally. Coordinator can reset CRDT. No one can tombstone alice's notes. |
-| Bob spoofs userId="alice" | Bob can tombstone alice's content. Known limitation (OC2). Room tokens mitigate for WebSocket. |
-| Both alice and bob add tag "Important" | Tag `author` = last pusher. Either can tombstone (no ownership guard on tags). Add-wins recovers. |
-| Tag tombstoned, then re-added by different user | Add-wins: tombstone cleared. Tag reappears. |
-| Dismissed note key retried by ghost note prevention | Dismissed keys excluded from `failedNoteKeys`. Not retried. |
-
-### V3: "I can see who did what" — Attribution Tags + Metadata
-
-**Demo:** Remote sync applies alice's annotations to 3 items. Each item gets an `@alice` tag (visible in item list and detail panel). Item metadata shows `troparcel:contributors = alice, bob` and `troparcel:lastSync = 2026-02-27T14:30:00Z`.
-
-| File | Changes |
-|------|---------|
-| `src/apply.js` | After apply per item: dispatch `@user` tag + contributor metadata via `dispatchSuppressed()` |
-| `src/push.js` | Skip `@*` tags and `troparcel:*` / `https://troparcel.org/ns/*` metadata URIs during push |
-| `src/store-adapter.js` | Add `dispatchSuppressed(action)` helper |
-| `src/vault.js` | Cache attribution tag IDs to avoid duplicate creation |
-
-#### Attribution rules
-
-- Tags: `@username` format, deterministic color (hash username → palette), created once per user, reused across items
-- Metadata URIs: `https://troparcel.org/ns/contributors`, `https://troparcel.org/ns/lastSync`
-- Local-only: attribution never enters CRDT (push filter + suppressChanges)
-- Re-created on each apply cycle from CRDT author fields
-- Deleting `@user` tags is harmless — they reappear on next sync
-
-### V4: "I can find what changed" — Auto-Lists
-
-**Demo:** Remote sync applies changes. Sidebar shows a "Synced items" list containing the items that received remote annotations. List updates on each sync cycle.
-
-| File | Changes |
-|------|---------|
-| `src/apply.js` | After apply cycle: collect affected item IDs, dispatch `list.item.add` via `dispatchSuppressed()` |
-| `src/store-adapter.js` | Uses `dispatchSuppressed()` from V3 |
-| `src/vault.js` | Cache list ID to avoid duplicate creation |
-
-#### List rules
-
-- List name: "Synced items" (configurable via options)
-- Created once on first apply, reused thereafter
-- Items ADDED on each sync cycle (accumulative, not replacing)
-- User curates removal manually (removing items they've reviewed)
-- Local-only: list membership dispatches never pushed to CRDT
-
-### Deploy Templates
-
-**Demo:** Coordinator clicks "Deploy to Render" in README → gets URL → shares connection string.
-
-| File | Changes |
-|------|---------|
-| `render.yaml` | **NEW** — Render blueprint |
-| `railway.json` | **NEW** — Railway deploy config |
-| `server/cloudflare/` | **NEW** — Durable Objects worker template |
-| `server/index.js` | Print connection string on startup |
-| `server/package.json` | Add `bin` field for `npx troparcel-server` |
-
-### Documentation Rewrite
-
-All docs updated to reflect new safety model, connection string UX, and transport options.
-
-| Doc | Key changes |
-|------|------------|
-| **GUIDE.md §1 Key Concepts** | Add: connection string, transport, retract vs dismiss, attribution tags, auto-lists |
-| **GUIDE.md §3 Data Protection** | Rewrite "Deletions stay local" → "Deletions are author-scoped for notes/selections/transcriptions. Tags/lists use add-wins." Soften syncDeletions warning. |
-| **GUIDE.md §5 Coordinator Setup** | Replace settings card with connection string. Add: generate via server output, dashboard, npx, deploy button. |
-| **GUIDE.md §6 Settings Presets** | Simplify all presets: connection string + name + sync mode. Remove 20-field tables. Add `syncDeletions` note about author-scoping. |
-| **GUIDE.md §7 Contributor Setup** | Replace 6-step settings entry with: paste connection string, enter name, restart. |
-| **GUIDE.md §9.7 Handling Unwanted Annotations** | Replace 5-step coordinator dance with: author retracts own content (syncDeletions ON), others dismiss locally, coordinator resets CRDT for departed authors. |
-| **GUIDE.md §10 Conflict Avoidance** | Update Rule 3: "`@` tags reserved for attribution." Update Rule 5: soften syncDeletions warning. Add Rule 11: "attribution tags/lists are managed by Troparcel — deleting them is harmless." |
-| **GUIDE.md §11 Troubleshooting** | Add file/snapshot transport errors. Replace "server unreachable" with transport-aware messages. |
-| **SETUP.md** | Add file transport scenario (shared folder). Add snapshot transport scenario. Add connection string to all scenarios. Add deploy button instructions. |
-| **CONFLICTS.md §Per-Data-Type: Tags** | Add: "Attribution tags (`@user`) are local-only and never enter the CRDT. Tags/lists use add-wins without ownership guard." |
-| **CONFLICTS.md §Known Limitations** | Update "Author ID Spoofing" — ownership guard mitigates but doesn't eliminate risk. Add "Departed Authors" limitation. |
-| **CHANGELOG.md** | v6.0 entry for batteries-included release |
+| Capability | Why deferred |
+|------------|-------------|
+| XmlFragment (character-level note editing) | Needs ProseMirror schema reconstruction, Tropy dependency |
+| Client-side persistence (offline) | Additive — layers on top of subdocs |
+| Vocabulary sync | Low priority — Tropy ships with standard vocabs |
+| Provider multiplexing (A8-C) | Optimization — not needed at current scale |
 
 ---
 
-## Future-Proofing: Full Yjs Capabilities (R13)
+## Future-Proofing (Architecture Note)
 
-The current design uses ~20% of Yjs's capabilities (Y.Map, Y.Array, YKeyValue, awareness, binary encoding). Three major Yjs features would transform Troparcel's architecture. The batteries-included design must not close these doors.
-
-### F1: Subdocs — Per-Item CRDT Isolation
-
-**What it is:** `Y.Doc` supports nested subdocuments that load and sync independently. Instead of one monolithic `Y.Doc` for the entire room, each item (or group of items) gets its own subdoc.
-
-**Why it matters:**
-- **Selective sync:** A researcher studying only 50 of 5,000 photos loads only those 50 subdocs
-- **Memory:** Current design loads entire CRDT into memory. With 10,000 items × 20 fields, the Y.Doc becomes large. Subdocs load on demand.
-- **Granular permissions:** Different subdocs could have different access controls (future)
-- **Parallel apply:** Independent subdocs can be applied concurrently without mutex contention
-
-**Current design compatibility:**
-- The `annotations` Y.Map is already keyed by item identity hash — each item's data is a separate Y.Map. This is structurally similar to subdocs.
-- **Door-closing risk: LOW.** Migration path: wrap each item's Y.Map in a subdoc. The adapter interface (`connect/disconnect/destroy`) already abstracts transport lifecycle. Subdocs would add `loadSubdoc(itemHash)` / `unloadSubdoc(itemHash)` to the adapter interface.
-
-**Affordance to add now:** None required in code. Document the migration path in DEVELOPER.md. Ensure new code doesn't assume all items are loaded simultaneously (e.g., don't iterate all CRDT items in hot paths without pagination).
-
-### F2: Client-Side Persistence — Offline-First
-
-**What it is:** `y-indexeddb` (browser) or a Node.js equivalent persists the Y.Doc locally. The plugin works fully offline, syncing when transport reconnects.
-
-**Why it matters:**
-- **No server dependency at startup.** Current design: if WebSocket is unreachable, the plugin has no CRDT state. With client persistence: plugin loads last-known CRDT from disk, works offline, syncs deltas on reconnect.
-- **File transport natural fit.** The FileAdapter already writes `Y.encodeStateAsUpdate()` to disk — this is essentially client-side persistence. Formalizing it means the file adapter and offline mode share the same storage layer.
-- **Faster startup.** No need to download entire CRDT state on every launch. Apply `Y.encodeStateVector()` diff only.
-
-**Current design compatibility:**
-- The vault already persists key mappings to `~/.troparcel/vault/`. Client-side CRDT persistence would live alongside it.
-- The adapter interface's `connect()` currently means "connect AND load initial state." With offline persistence, it would mean "load from local persistence, THEN connect for deltas."
-- **Door-closing risk: LOW.** The adapter interface separates transport from CRDT document. Adding persistence means: `doc` loads from disk before `adapter.connect()`, and `adapter.connect()` sends a state vector instead of requesting full state.
-
-**Affordance to add now:**
-- Ensure `Y.Doc` is created and usable BEFORE `transport.connect()` resolves (already true in current design — doc is created in `start()` before `createAdapter()`).
-- Add `Y.encodeStateVector(doc)` / `Y.encodeStateAsUpdate(doc, stateVector)` to the adapter vocabulary for delta-only sync. Not wired yet, but the adapter interface should reserve these methods.
-
-### F3: Y.XmlFragment — Concurrent Rich Text Editing
-
-**What it is:** Yjs has first-class support for concurrent rich text editing via `Y.XmlFragment`, with bindings for ProseMirror (`y-prosemirror`), TipTap, Quill, and others. Two users editing the same note would see each other's cursor and edits merge character-by-character.
-
-**Why it matters:**
-- **True collaborative editing** instead of whole-note-replace. Current design: if alice and bob both edit the same synced note, local-wins and the other edit is lost (logged as conflict). With Y.XmlFragment: both edits merge at the character level.
-- **Tropy uses ProseMirror.** The `y-prosemirror` binding exists and is production-grade. The gap is that Tropy's ProseMirror instance is internal — the plugin can't easily inject a Y.XmlFragment binding into it.
-
-**Current design compatibility:**
-- Notes are currently stored as `{ text, html, author, pushSeq }` in a Y.Map — a flat snapshot model. Y.XmlFragment would replace this with a structured document type.
-- **Door-closing risk: MEDIUM.** The note content model would need to change from snapshot-based (push entire HTML) to CRDT-native (Y.XmlFragment per note). This is a schema change, but since notes already use stable UUID keys (`n_` prefix), the migration path is: for each note UUID, swap the Y.Map entry for a Y.XmlFragment subdoc.
-- **Biggest blocker is Tropy, not Troparcel.** The plugin would need to inject `y-prosemirror` into Tropy's editor instance, which requires either:
-  a. Tropy exposing the ProseMirror EditorView via plugin context (requires Tropy change = R9 violation), or
-  b. Troparcel intercepting keystrokes and replaying them into a shadow Y.XmlFragment (fragile), or
-  c. Tropy adopting y-prosemirror natively (ideal but out of our control)
-
-**Affordance to add now:**
-- Use `Y.Doc.getXmlFragment(noteKey)` as a no-op today — just ensure the method doesn't conflict with existing Y.Map usage.
-- In the CRDT schema, reserve a `noteFormat` field on note entries: `'snapshot'` (current) vs `'xmlfragment'` (future). Apply-side can branch on this.
-- Document the Tropy dependency in DEVELOPER.md.
-
-### Summary: What to do now vs later
+The current design uses ~20% of Yjs's capabilities. Three major Yjs features would transform the architecture. The selected shape must not close these doors.
 
 | Capability | Door-closing risk | Affordance now | Implementation later |
 |---|---|---|---|
-| **Subdocs** | Low | Document migration path. Don't assume all items loaded. | Per-item subdocs, adapter `loadSubdoc()` |
+| **Subdocs** | Low | R3 delivers this directly. Document migration path. | Per-item subdocs, adapter `loadSubdoc()` |
 | **Client persistence** | Low | Ensure doc created before connect. Reserve state vector methods on adapter. | y-indexeddb or fs persistence, delta sync |
 | **XmlFragment** | Medium | Reserve `noteFormat` field in CRDT schema. Document Tropy dependency. | y-prosemirror binding, schema migration |
 
 ---
 
-## R × V Fit Check
+## Slicing Direction
 
-| Req | Requirement | Transport | ConnStr | V1 | V2 | V3 | V4 | Deploy | Docs |
-|-----|-------------|:---------:|:------:|:--:|:--:|:--:|:--:|:------:|:----:|
-| R0 | Additive stack | | | | ✅ | | | | |
-| R1 | Author-only retraction | | | | ✅ | | | | |
-| R2 | Auto-dismiss non-author | | | | ✅ | | | | |
-| R3 | Entity-type-specific ownership | | | | ✅ | | | | |
-| R4 | pushSeq-aware dismissals | | | | ✅ | | | | |
-| R5 | Visible in-app feedback | | | ✅ | | | | | |
-| R6 | Attribution visibility | | | | | ✅ | | | |
-| R7 | Change surfacing | | | ✅ | | | ✅ | | |
-| R8 | Pluggable transport | ✅ | | | | | | | |
-| R9 | No host modification | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| R10 | Two-field setup | | ✅ | | | | | | |
-| R11 | Connection string generation | | ✅ | | | | | ✅ | |
-| R12 | Documentation updated | | | | | | | | ✅ |
-| R13 | Yjs future-proofing | ✅ | | | | | | | ✅ |
+All slices defined in [slices.md](slices.md).
 
-R13 coverage: Transport adapter interface supports future subdoc/persistence methods (Transport column). Migration paths documented (Docs column). `noteFormat` field reserved in CRDT schema (V2 column, deferred to schema work).
+```
+V1 (notifications) ──── DONE
+Transport adapters ──── DONE
+ConnStr (parse) ──────── DONE (generation: Deploy slice)
+         ┌──→ V2 (ownership guard) ──── PLANNED
+         └──→ V3 (attribution) ──── 🟡 UNWIRED
+              └──→ V4 (auto-lists) ──── PLANNED
+V5 (templates + lists) ──→ V6 (items + photos) ──→ V7 (subdocs)
+Deploy templates ──── PLANNED
+Documentation ──── PLANNED (after V2-V7)
+Vtest (test infra) ──── PLANNED
+```
+
+**Wiring gap:** C5 (attribution) and C7 (sync metadata) have working code in apply.js but need `dispatchSuppressed()` added to StoreAdapter. Single method addition unblocks both features.

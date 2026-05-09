@@ -1,0 +1,75 @@
+---
+shaping: true
+---
+
+# V2: "My work is protected" — Ownership Guard V-Plan
+
+Parent: [shaping.md](shaping.md) → [slices.md](slices.md)
+Source: [shaping.md](shaping.md) R0 → [slices.md](slices.md) V2
+
+## Demo Criterion
+
+Alice creates a note. Bob sees it via sync. Bob deletes it locally. Instead of tombstoning, Bob's troparcel notifies "Dismissed alice's note (hidden locally)" and alice's note remains in the CRDT. If Bob deletes his OWN note, it retracts normally. If alice later edits the note Bob dismissed, the updated version reappears for Bob.
+
+## Affordances
+
+| # | Affordance | Type | Wires |
+|---|------------|------|-------|
+| N1 | Push-side author guard in `pushDeletions` | Non-UI | Reads CRDT `entry.author` before tombstone |
+| N2 | Dismiss routing: non-author → `vault.dismissKey(key, pushSeq)` | Non-UI | Skips `schema.removeX()`, calls vault |
+| N3 | Apply-side tombstone validation | Non-UI | Rejects tombstones where author ≠ original author |
+| N4 | pushSeq-aware dismissals in vault | Non-UI | `Map<key, pushSeq>`, auto-undismiss on revision |
+| N5 | `vault.shouldSkipNote()` — dismissed ≠ failed | Non-UI | Dismissed keys excluded from failedNoteKeys |
+| U1 | "Retracted your note" notification | UI | On own-content tombstone (V1 infra) |
+| U2 | "Dismissed alice's note" notification | UI | On non-author dismiss routing (V1 infra) |
+
+## File Scope
+
+| File | Changes |
+|------|---------|
+| `src/vault.js` | `dismissedKeys` Set→Map. Add `dismissKey()`, `isDismissed()`, `shouldSkipNote()`. Serialization round-trip. `originalAuthors` Map for apply-side validation. |
+| `src/push.js` | `pushDeletions()` — author check for notes/selections/transcriptions. Tags/lists: unchanged. Update `.dismissedKeys.add()` → `.vault.dismissKey()`. |
+| `src/apply.js` | Tombstone author validation for notes/selections/transcriptions. Update `.vault.dismissedKeys.has()` → `.vault.isDismissed()`. |
+| `test/index.test.js` | pushSeq-aware dismissal tests + ownership guard tests |
+
+## Build Sequence
+
+### Step 1: Vault — pushSeq-Aware Dismissals (Task 2)
+
+1. Write 6 failing tests for vault dismissals
+2. Change `dismissedKeys` from `Set` to `Map<key, pushSeq>`
+3. Add `dismissKey(key, pushSeq)`, `isDismissed(key, currentPushSeq)`, `shouldSkipNote(noteKey, pushSeq)`
+4. Add `_serializeDismissedKeys()` / `_deserializeDismissedKeys()` — backward-compat with old Set format
+5. Update `persistToFile` / `loadFromFile` for Map entries format
+6. Run tests — expect pass
+
+### Step 2: Push-Side Ownership Guard (Task 3)
+
+1. Write tests for push-side behavior (own note → tombstone, non-author note → dismiss, tags → always tombstone)
+2. In `pushDeletions()`: for notes/selections/transcriptions/selectionNotes — check `entry.author === userId`
+   - Match → tombstone (existing behavior)
+   - Mismatch → `vault.dismissKey(key, pushSeq)`, skip tombstone
+3. For tags/lists — remove author guard if present (always tombstone, add-wins recovers)
+4. Update all `this.vault.dismissedKeys.add(key)` → `this.vault.dismissKey(key, pushSeq)` (6 call sites)
+5. Wire notifications for retract/dismiss events
+6. Run tests
+
+### Step 3: Apply-Side Tombstone Validation (Task 4)
+
+1. Write tests for apply-side validation
+2. Add `vault.originalAuthors` Map + `trackAuthor(key, author)` + `getOriginalAuthor(key)`
+3. In apply methods for notes/selections/transcriptions: before applying tombstone, validate `tombstone.author === originalAuthor`
+4. Update all `this.vault.dismissedKeys.has(key)` → `this.vault.isDismissed(key, entry.pushSeq || 0)`
+5. Add serialization for `originalAuthors`
+6. Build + test. Bundle ≤ 265KB.
+
+## Entity-Type Rules
+
+| Entity | Ownership | Push behavior | Apply behavior |
+|--------|-----------|---------------|----------------|
+| Notes | Author-guarded | Own → tombstone. Others' → dismiss. | Reject mismatched author tombstones. |
+| Selections | Author-guarded | Same as notes | Same as notes |
+| Transcriptions | Author-guarded | Same as notes | Same as notes |
+| Selection Notes | Author-guarded | Same as notes | Same as notes |
+| Tags | No guard (add-wins) | Always tombstone | Accept all tombstones |
+| List memberships | No guard (add-wins) | Always tombstone | Accept all tombstones |

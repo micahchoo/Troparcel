@@ -70,6 +70,41 @@ class TroparcelPlugin {
   }
 
   /**
+   * User-facing notification via Tropy's FLASH.SHOW pipeline.
+   *
+   * `context.dialog.notify(messageKey, params)` is the blessed plugin surface
+   * (per tropy/src/dialog.js:283-292 export list; reference usage in
+   * plugins/tropiiify/src/plugin.js:43,282). It internally dispatches a
+   * `flash.show` action whose payload is rendered by Tropy's FlashContainer
+   * and translated via i18n with the provided messageKey.
+   *
+   * IMPORTANT: do NOT call `context.dialog.info` or `.warning` — those names
+   * are NOT exported from tropy/src/dialog.js and will silently no-op. See
+   * mulch convention mx-4d2828 and mx-864ee7. The reference plugin
+   * tropy-crdt-collab is buggy in this regard; troparcel must not copy that
+   * pattern.
+   *
+   * Guard: dialog may be missing in non-project windows or under harness
+   * test stubs — fall back to logger so a missing dialog never crashes sync.
+   */
+  notify(messageKey, params) {
+    try {
+      let dialog = this.context && this.context.dialog
+      if (dialog && typeof dialog.notify === 'function') {
+        dialog.notify(messageKey, params || {})
+        return
+      }
+    } catch (err) {
+      try { this.context.logger.warn(`Troparcel: dialog.notify failed — ${err.message}`) } catch { /* ignore */ }
+    }
+    // Fallback path (no dialog available): log so the event is still observable.
+    try {
+      this.context.logger.info({ flash: messageKey, params: params || {} },
+        `Troparcel notify (no dialog): ${messageKey}`)
+    } catch { /* ignore */ }
+  }
+
+  /**
    * Wait for the Redux store and project state before starting sync.
    *
    * context.window.store is set after window.load() completes.
@@ -205,6 +240,10 @@ class TroparcelPlugin {
       this.context.logger.info(
         `Troparcel: connected to room "${this.options.room}" ` +
         `(${store ? 'store' : 'API'} mode, sync: ${this.options.syncMode})`)
+      this.notify('plugin.troparcel.sync.started', {
+        room: this.options.room,
+        mode: this.options.syncMode
+      })
     } catch (err) {
       let msg = err.message || String(err)
       let isConnError = msg.includes('timeout') || msg.includes('ECONNREFUSED')
@@ -217,6 +256,10 @@ class TroparcelPlugin {
           `Troparcel: sync failed to start — ${msg}. ` +
           'Use File > Export/Import to sync manually.')
       }
+      this.notify('plugin.troparcel.sync.error', {
+        room: this.options.room,
+        message: msg
+      })
       await this.engine.stop()
       this.engine = null
 
@@ -233,6 +276,10 @@ class TroparcelPlugin {
               await this.engine.start()
               this.context.logger.info(
                 `Troparcel: connected to room "${this.options.room}" (after retry)`)
+              this.notify('plugin.troparcel.sync.started', {
+                room: this.options.room,
+                mode: this.options.syncMode
+              })
             } catch {
               if (this.engine) {
                 try { await this.engine.stop() } catch {}
@@ -286,6 +333,11 @@ class TroparcelPlugin {
         this.engine.pushItems(items, jsonLdContext)
         this.context.logger.info(
           `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
+        this.notify('plugin.troparcel.sync.complete', {
+          op: 'export',
+          count: items.length,
+          room: this.options.room
+        })
         return
       }
 
@@ -296,6 +348,11 @@ class TroparcelPlugin {
 
       this.context.logger.info(
         `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
+      this.notify('plugin.troparcel.sync.complete', {
+        op: 'export',
+        count: items.length,
+        room: this.options.room
+      })
 
       setTimeout(() => { tempEngine.stop() }, 5000)
 
@@ -308,6 +365,11 @@ class TroparcelPlugin {
       } else {
         this.context.logger.error(`Troparcel Export: failed — ${msg}`)
       }
+      this.notify('plugin.troparcel.sync.error', {
+        op: 'export',
+        room: this.options.room,
+        message: msg
+      })
     }
   }
 
@@ -377,9 +439,19 @@ class TroparcelPlugin {
       if (result) {
         this.context.logger.info(
           `Troparcel Import: done — applied changes to ${result.applied} item(s) from "${this.options.room}"`)
+        this.notify('plugin.troparcel.sync.complete', {
+          op: 'import',
+          count: result.applied,
+          room: this.options.room
+        })
       } else {
         this.context.logger.info(
           'Troparcel Import: done — no pending changes to apply')
+        this.notify('plugin.troparcel.sync.complete', {
+          op: 'import',
+          count: 0,
+          room: this.options.room
+        })
       }
 
       if (tempEngine) await engine.stop()
@@ -393,6 +465,11 @@ class TroparcelPlugin {
       } else {
         this.context.logger.error(`Troparcel Import: failed — ${msg}`)
       }
+      this.notify('plugin.troparcel.sync.error', {
+        op: 'import',
+        room: this.options.room,
+        message: msg
+      })
     } finally {
       if (this.engine) this.engine.resume()
     }

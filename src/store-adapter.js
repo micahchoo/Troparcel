@@ -1,5 +1,7 @@
 'use strict'
 
+const { SELECTION, NOTE, LIST } = require('./tropy-action-types')
+
 /**
  * StoreAdapter — reads from and writes to Tropy's Redux store.
  *
@@ -38,7 +40,7 @@
 class StoreAdapter {
   static EXPECTED_SLICES = [
     'items', 'photos', 'selections', 'notes',
-    'metadata', 'tags', 'lists'
+    'metadata', 'tags', 'lists', 'ontology'
   ]
 
   constructor(store, logger) {
@@ -293,6 +295,35 @@ class StoreAdapter {
     }))
   }
 
+  // --- V5 raw-slice readers (W2.T5, mx-780c7d) ---
+  // CRDT push/apply MUST see the raw Redux slice — NOT the resolved selectors
+  // (getAllTemplates / getListTree). Selectors flatten trees and resolve URI
+  // references, breaking CRDT-side identity. See
+  // troparcel/docs/architecture/subsystems/v5-template-list-sync.md §State paths.
+
+  /**
+   * Raw `state.ontology.template` map keyed by template URI.
+   * Each value: { id, name, type, creator, description, fields, isProtected,
+   *   domain, version }. Evidence: tropy/src/reducers/ontology.js TEMPLATE.CREATE
+   *   reducer spreads payload directly into this slice.
+   * @returns {Object<string, Object>} raw template slice (URI → template def)
+   */
+  readTemplates() {
+    let state = this._getState()
+    return (state.ontology && state.ontology.template) || {}
+  }
+
+  /**
+   * Raw `state.lists` map keyed by local numeric ID.
+   * Each value: { id, parent, name, children, items? }. Root list is id=0
+   * with parent=null. Evidence: tropy/src/reducers/lists.js.
+   * @returns {Object<number, Object>} raw list slice (local id → list)
+   */
+  readLists() {
+    let state = this._getState()
+    return state.lists || {}
+  }
+
   /**
    * Check if the store is still usable (always true when we have a store ref).
    */
@@ -310,7 +341,7 @@ class StoreAdapter {
     let idsBefore = new Set(Object.keys(this._getState().selections))
 
     let action = this.store.dispatch({
-      type: 'selection.create',
+      type: SELECTION.CREATE,
       payload: { photo, x, y, width, height, angle: angle || 0 },
       meta: { cmd: 'project' }
     })
@@ -356,7 +387,7 @@ class StoreAdapter {
     if (language) payload.language = language
 
     let action = this.store.dispatch({
-      type: 'note.create',
+      type: NOTE.CREATE,
       payload,
       meta: { cmd: 'project', history: 'add' }
     })
@@ -447,7 +478,7 @@ class StoreAdapter {
    */
   async deleteNote(id) {
     let action = this.store.dispatch({
-      type: 'note.delete',
+      type: NOTE.DELETE,
       payload: [id],
       meta: { cmd: 'project', history: 'add' }
     })
@@ -459,7 +490,7 @@ class StoreAdapter {
    */
   async addItemsToList(listId, itemIds) {
     let action = this.store.dispatch({
-      type: 'list.item.add',
+      type: LIST.ITEM.ADD,
       payload: { id: listId, items: Array.isArray(itemIds) ? itemIds : [itemIds] },
       meta: { cmd: 'project', history: 'add', search: true }
     })
@@ -471,7 +502,7 @@ class StoreAdapter {
    */
   async removeItemsFromList(listId, itemIds) {
     let action = this.store.dispatch({
-      type: 'list.item.remove',
+      type: LIST.ITEM.REMOVE,
       payload: { id: listId, items: Array.isArray(itemIds) ? itemIds : [itemIds] },
       meta: { cmd: 'project', history: 'add', search: true }
     })

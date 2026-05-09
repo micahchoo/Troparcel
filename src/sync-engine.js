@@ -1,7 +1,7 @@
 'use strict'
 
-const fs = require('fs')
 const os = require('os')
+const chokidar = require('chokidar')
 const Y = require('yjs')
 const { WebsocketProvider } = require('y-websocket')
 const WS = require('ws')
@@ -11,6 +11,7 @@ const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { BackupManager } = require('./backup')
 const { SyncVault } = require('./vault')
+const { withHistoryMerge } = require('./history-tick')
 
 /**
  * Sync Engine v5.0 — Store-First Architecture + Schema v4.
@@ -29,7 +30,7 @@ const { SyncVault } = require('./vault')
  *   - R3:  waitForConnection cleans up listener on timeout
  *   - R5:  Exponential backoff on consecutive errors
  *   - R7:  Vault pruning on each sync cycle
- *   - R9:  File watcher health monitoring and restart (API fallback only)
+ *   - R9:  Superseded — chokidar handles its own restart/error recovery (was: fs.watch health monitor + manual restart)
  *   - S3:  Validation failures block apply
  *   - P1:  Parallel sub-resource fetching in enrichItem (API fallback only)
  *   - P4:  checksumMap computed once per item in pushLocal
@@ -42,7 +43,7 @@ const { SyncVault } = require('./vault')
  * New in v4.0:
  *   - SF1: Reads from Redux store via StoreAdapter (no HTTP GET calls)
  *   - SF2: Writes via store.dispatch() for selections, notes, lists
- *   - SF3: Change detection via store.subscribe() (replaces fs.watch)
+ *   - SF3: Change detection via store.subscribe() (replaces chokidar)
  *   - SF4: ProseMirror-to-HTML conversion for note content in push path
  *   - SF5: Adapter.suppressChanges() prevents feedback loops during apply
  *
@@ -111,10 +112,6 @@ class SyncEngine {
 
     // R2: Async mutex — chains async operations to prevent concurrent access
     this._syncLock = Promise.resolve()
-
-    // R9: File watcher health — track last event time (fs.watch fallback only)
-    this._lastWatcherEvent = 0
-    this._watcherHealthTimer = null
 
     // Transaction origin marker
     this.LOCAL_ORIGIN = 'troparcel-local'
@@ -267,16 +264,31 @@ class SyncEngine {
 
       // Set presence via Awareness protocol (replaces registerUser + heartbeat)
       if (this.provider.awareness) {
+        // V3 a646: prefer an explicit displayName option so peers see a human
+        // label (e.g. "alice") rather than the cryptic stableUserId
+        // ("alice@host:2019"). Falls back to userId when no name is set.
+        let localDisplayName = this.options.displayName || this._stableUserId
+        // Register our own displayName locally too, so self-attribution
+        // (if it ever fires) resolves consistently.
+        this.vault.setDisplayName(this._stableUserId, localDisplayName)
+
         this.provider.awareness.setLocalStateField('user', {
           userId: this._stableUserId,
-          name: this._stableUserId,
+          name: localDisplayName,
           joinedAt: Date.now()
         })
 
         this._awarenessHandler = ({ added, updated, removed }) => {
           this.peerCount = 0
           this.provider.awareness.getStates().forEach((state, clientId) => {
-            if (clientId !== this.doc.clientID && state.user) this.peerCount++
+            if (clientId !== this.doc.clientID && state.user) {
+              this.peerCount++
+              // V3 a646: cache peer displayName so _applyAttribution can
+              // resolve userId → human label when building @tags + contributors.
+              if (state.user.userId && state.user.name) {
+                this.vault.setDisplayName(state.user.userId, state.user.name)
+              }
+            }
           })
         }
         this.provider.awareness.on('change', this._awarenessHandler)
@@ -397,6 +409,29 @@ class SyncEngine {
     }
   }
 
+  /**
+   * a542: wrap the apply cycle in a HISTORY.TICK merge bracket so all
+   * downstream dispatches (metadata.save, tag.create, note.create, etc.)
+   * collapse into ONE undo entry. Builds a context shim around adapter.store
+   * and delegates to the re-entrant withHistoryMerge helper. Safe to call
+   * when no adapter is present (HTTP-only mode) — falls through to fn.
+   */
+  _withApplyHistoryMerge(fn) {
+    if (!this.adapter || !this.adapter.store) return fn()
+    let shim = { window: { store: this.adapter.store } }
+    return withHistoryMerge(shim, fn)
+  }
+
+  /**
+   * a542: prototype-level alias so external callers (and the
+   * history-tick-undo-merge.test.js Tier 1 anchor via SyncEngine.prototype)
+   * can resolve a stable wrap surface without going through a method on
+   * this.adapter. Same semantics as _withApplyHistoryMerge.
+   */
+  applyWithHistoryMerge(fn) {
+    return this._withApplyHistoryMerge(fn)
+  }
+
   async stop() {
     this._stopping = true
     await this._persistVault(true)
@@ -407,7 +442,7 @@ class SyncEngine {
       this._storeUnsubscribe = null
     }
 
-    this.stopWatching()
+    await this.stopWatching()
 
     if (this.safetyNetTimer) {
       clearInterval(this.safetyNetTimer)
@@ -417,11 +452,6 @@ class SyncEngine {
     if (this._statusLogTimer) {
       clearInterval(this._statusLogTimer)
       this._statusLogTimer = null
-    }
-
-    if (this._watcherHealthTimer) {
-      clearInterval(this._watcherHealthTimer)
-      this._watcherHealthTimer = null
     }
 
     if (this._localDebounceTimer) {
@@ -526,7 +556,11 @@ class SyncEngine {
       return
     }
 
-    // Fallback: fs.watch on project file
+    // Fallback: chokidar on project file (mirrors tropy/src/common/watch.js).
+    // chokidar with {awaitWriteFinish, alwaysStat} defers the 'change' event
+    // until SQLite has finished its commit — defeats the SQLITE_BUSY race
+    // that fs.watch suffered from (mulch mx-67d331). chokidar also handles
+    // its own error/restart recovery, replacing the old R9 health-check loop.
     if (this.fileWatcher) return
 
     try {
@@ -545,75 +579,46 @@ class SyncEngine {
     if (!this.projectPath) return
 
     this._startFileWatcher()
-
-    // R9: Monitor watcher health — restart if no events for too long
-    this._lastWatcherEvent = Date.now()
-    this._watcherHealthTimer = setInterval(() => {
-      this._checkWatcherHealth()
-    }, 60000)
   }
 
   _startFileWatcher() {
     try {
-      this.fileWatcher = fs.watch(this.projectPath, { persistent: false }, (eventType) => {
-        if (eventType === 'change') {
-          this._lastWatcherEvent = Date.now()
-          this.handleLocalChange()
-        }
+      this.fileWatcher = chokidar.watch(this.projectPath, {
+        usePolling: false,
+        awaitWriteFinish: true,
+        alwaysStat: true,
+        ignoreInitial: true,
+        followSymlinks: false,
+        depth: 0,
+        persistent: false
+      })
+
+      this.fileWatcher.on('change', () => {
+        this.handleLocalChange()
       })
 
       this.fileWatcher.on('error', (err) => {
-        this._debug('File watcher error', { error: err.message })
-        // R9: Try to restart the watcher
-        this._restartFileWatcher()
+        this._debug('File watcher error', { error: err && err.message })
+        // chokidar recovers from transient errors internally. We log and
+        // continue — no manual restart required (was the R9 cycle).
+      })
+
+      this.fileWatcher.on('ready', () => {
+        this._debug('File watcher ready', { path: this.projectPath })
       })
     } catch (err) {
       this._debug('Could not start file watcher', { error: err.message })
     }
   }
 
-  // R9: Restart dead watcher
-  _restartFileWatcher() {
+  async stopWatching() {
     if (this.fileWatcher) {
-      try { this.fileWatcher.close() } catch (err) {
+      try {
+        await this.fileWatcher.close()
+      } catch (err) {
         this.logger.warn('Failed to close file watcher', { error: String(err.message || err) })
       }
       this.fileWatcher = null
-    }
-    // Clear old health timer to prevent accumulation
-    if (this._watcherHealthTimer) {
-      clearInterval(this._watcherHealthTimer)
-      this._watcherHealthTimer = null
-    }
-    if (this.projectPath) {
-      this._log('Restarting file watcher')
-      this._startFileWatcher()
-      this._lastWatcherEvent = Date.now()
-      this._watcherHealthTimer = setInterval(() => {
-        this._checkWatcherHealth()
-      }, 60000)
-    }
-  }
-
-  // R9: If watcher hasn't fired in 5 minutes and safety-net has seen changes, restart
-  _checkWatcherHealth() {
-    if (!this.fileWatcher) return
-    let silenceMs = Date.now() - this._lastWatcherEvent
-    // If silent for > 5 minutes, the watcher might be dead
-    if (silenceMs > 5 * 60 * 1000) {
-      this.logger.info('File watcher silent for >5min, restarting')
-      this._restartFileWatcher()
-    }
-  }
-
-  stopWatching() {
-    if (this.fileWatcher) {
-      this.fileWatcher.close()
-      this.fileWatcher = null
-    }
-    if (this._watcherHealthTimer) {
-      clearInterval(this._watcherHealthTimer)
-      this._watcherHealthTimer = null
     }
   }
 
@@ -725,6 +730,11 @@ class SyncEngine {
       this._resetApplyStats()
 
       try {
+        // a542: wrap the entire apply cycle so all dispatches collapse into
+        // ONE undo entry. Without this, every metadata.save / tag.create /
+        // note.create from a remote peer's batch becomes its own undo step.
+        // Helper is re-entrant; nested wraps inside apply mixins are no-ops.
+        await this._withApplyHistoryMerge(async () => {
         // First pass: exact matches (these take priority over fuzzy matches)
         let processedLocalIds = new Set()
         let exactMatchedIdentities = new Set()
@@ -812,6 +822,26 @@ class SyncEngine {
             })
           }
         }
+
+        // V5 (W2.T10, seed tropy-plugin-4541): project-level template +
+        // list-hierarchy apply. Inside _withApplyHistoryMerge so the new
+        // dispatches collapse into the same single undo entry as the rest of
+        // the apply cycle (mx-11fd28). Caller's suppressChanges still active.
+        if (this.adapter && typeof this.applyTemplates === 'function') {
+          try {
+            await this.applyTemplates()
+          } catch (err) {
+            this.logger.warn(`applyTemplates failed: ${err.message}`)
+          }
+        }
+        if (this.adapter && typeof this.applyListHierarchy === 'function') {
+          try {
+            await this.applyListHierarchy()
+          } catch (err) {
+            this.logger.warn(`applyListHierarchy failed: ${err.message}`)
+          }
+        }
+        }) // end _withApplyHistoryMerge
       } finally {
         this._logApplyStats()
         this.vault.markDirty()
@@ -1023,6 +1053,16 @@ class SyncEngine {
         if (this.adapter) this.adapter.suppressChanges()
         try {
           await this.pushLocal(items, pushSeq)
+          // V5 (W2.T10, seed tropy-plugin-4541): project-level template +
+          // list-hierarchy push. Once per sync cycle (NOT per-item). Templates
+          // before lists is conventional but not load-bearing — they live in
+          // separate CRDT root maps (`schema` vs `projectLists`).
+          if (this.adapter && typeof this.pushTemplates === 'function') {
+            await this.pushTemplates(this._stableUserId, pushSeq)
+          }
+          if (this.adapter && typeof this.pushListHierarchy === 'function') {
+            await this.pushListHierarchy(this._stableUserId, pushSeq)
+          }
         } finally {
           if (this.adapter) this.adapter.resumeChanges()
         }
