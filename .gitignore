@@ -10,3 +10,14 @@ package-lock.json
 .DS_Store
 .fuse_hidden*
 .npmrc
+
+# Built bundle — produced by `npm run build`, not committed
+index.js
+
+# Session-local artifacts (Claude Code handoff notes)
+HANDOFF.md
+HANDOFF-expertise.md
+
+# Stray local symlinks
+chrome
+
