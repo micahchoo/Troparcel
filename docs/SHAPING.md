@@ -281,7 +281,7 @@ Tags and custom metadata URIs work via store.dispatch. Saga persists to DB. Must
 
 Yjs binary encoding is transport-agnostic. Awareness optional (WebSocket only). Build size: 258.9KB (within 260KB budget). Test regression: same pre-existing failures.
 
-### S4: Full Project Sync via Redux — PASS (from spike-yjs-fullcap.md)
+### S4: Full Project Sync via Redux — PASS (from [spikes/yjs-fullcap.md](spikes/yjs-fullcap.md))
 
 `item.import`, `ontology.template.create/save`, `list.create/list.move` all work via dispatch. Per-item Yjs subdocs enable selective sync. Photo files distributed via shared folder.
 
@@ -342,7 +342,7 @@ The current design uses ~20% of Yjs's capabilities. Three major Yjs features wou
 
 ## Slicing Direction
 
-All slices defined in [slices.md](slices.md).
+All slices defined in [design/slices.md](design/slices.md).
 
 ```
 V1 (notifications) ──── DONE

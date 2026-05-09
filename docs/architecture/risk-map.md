@@ -1,6 +1,6 @@
 # Troparcel — Risk Map
 
-Audit-grade list of known issues. Drift findings from this synthesis cycle (2026-05-08) are marked **DRIFT-VERIFIED**; carryovers from `troparcel-audit.md` and `shaping.md` are marked **CARRYOVER**.
+Audit-grade list of known issues. Drift findings from this synthesis cycle (2026-05-08) are marked **DRIFT-VERIFIED**; carryovers from [docs/AUDIT.md](../AUDIT.md) and [docs/SHAPING.md](../SHAPING.md) are marked **CARRYOVER**.
 
 ## P0 — runtime crashes (block selected shape)
 
@@ -21,9 +21,9 @@ Audit-grade list of known issues. Drift findings from this synthesis cycle (2026
 - **Symptom:** Template + project-level list hierarchy never sync between peers (the named demo criterion of V5).
 - **Fix:** Wiring chain in [subsystems/v5-template-list-sync.md §Wiring chain](./subsystems/v5-template-list-sync.md#wiring-chain-to-make-this-live).
 
-## P1–P2 — design-spec gaps (CARRYOVER from `troparcel-audit.md`)
+## P1–P2 — design-spec gaps (CARRYOVER from [docs/AUDIT.md](../AUDIT.md))
 
-`troparcel-audit.md` is comprehensive — read it directly. Highlights cross-referenced here so they're not lost:
+[docs/AUDIT.md](../AUDIT.md) is comprehensive — read it directly. Highlights cross-referenced here so they're not lost:
 
 | Audit § | Concern | Severity |
 |---|---|---|
@@ -32,7 +32,7 @@ Audit-grade list of known issues. Drift findings from this synthesis cycle (2026
 | §3 Metadata Sync | Metadata uses YKeyValue (Y.Array); historical-value retention behaviour differs from spec — see audit suggestions | P2 |
 | §4 Tag Sync | Tag-name normalization (`_migrateTagKeysToLowercase`) is one-shot; verify idempotency on re-run after schema-version bump | P2 |
 | §5 Note Sync | UUID-keyed `Y.Map` with HTML footer for soft-delete; HTML sanitizer is state-machine custom (not a library) — security review needed. **Reconciliation 2026-05-08:** found 6 over-permissive tags vs Tropy's editor schema (`u, s, h1-h6, code, pre, div`). Detail: [subsystems/notes-html-pipeline.md](./subsystems/notes-html-pipeline.md). | P1 |
-| §6 Selection Sync | Geometry-keyed merge (per `crdt-design.md`) — selection-near-duplicate behaviour deserves dedicated tests | P2 |
+| §6 Selection Sync | Geometry-keyed merge (per [docs/design/crdt-design.md](../design/crdt-design.md)) — selection-near-duplicate behaviour deserves dedicated tests | P2 |
 
 ## P2 — knowledge-store hygiene
 
@@ -48,8 +48,8 @@ Audit-grade list of known issues. Drift findings from this synthesis cycle (2026
 
 ## Out of scope for this audit
 
-- No git in `troparcel/` directory (workspace lives at parent). Evolution lens (churn hotspots, era strata) is not applicable here; `shaping.md` baseline + `slices.md` status table substitute as the time axis.
-- No test-coverage / quality-linter sweep was performed. `Vtest-plan.md` exists at repo root for the test campaign.
+- No git in `troparcel/` directory (workspace lives at parent). Evolution lens (churn hotspots, era strata) is not applicable here; [docs/SHAPING.md](../SHAPING.md) baseline + [docs/design/slices.md](../design/slices.md) status table substitute as the time axis.
+- No test-coverage / quality-linter sweep was performed. [docs/plans/test.md](../plans/test.md) exists for the test campaign.
 - Server-side (`server/index.js`, LevelDB persistence, monitor dashboard) was not drift-verified — README §Server is current and the server has not been a source of known bugs.
 
 ## Reconciliation findings (2026-05-08, follow-up to initial sweep)

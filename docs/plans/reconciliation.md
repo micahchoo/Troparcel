@@ -1,12 +1,12 @@
 # Troparcel — Reconciliation + V5 Completion Plan
 
-> **Status:** active plan (2026-05-08). Continues `V5-plan.md` (whose status table is now superseded by this document's task list) and incorporates the 9 reconciliation findings from the 2026-05-08 codebase-diagnostics sweep.
+> **Status:** active plan (2026-05-08). Continues [v5.md](v5.md) (whose status table is now superseded by this document's task list) and incorporates the 9 reconciliation findings from the 2026-05-08 codebase-diagnostics sweep.
 >
-> **Reads:** `docs/architecture/{overview,subsystems,risk-map}.md`, `docs/architecture/subsystems/{attribution,v5-template-list-sync,notes-html-pipeline}.md`, `shaping.md` (selected shape), `slices.md §V5` (demo criterion).
+> **Reads:** `docs/architecture/{overview,subsystems,risk-map}.md`, `docs/architecture/subsystems/{attribution,v5-template-list-sync,notes-html-pipeline}.md`, [SHAPING.md](../SHAPING.md) (selected shape), [design/slices.md §V5](../design/slices.md) (demo criterion).
 
 ## Goals
 
-1. **Make the selected shape work end-to-end.** *Batteries-Included + Full Project Sync* per `shaping.md`. V3 attribution must not crash; V5 templates + project-list-hierarchy must actually transit between peers.
+1. **Make the selected shape work end-to-end.** *Batteries-Included + Full Project Sync* per [SHAPING.md](../SHAPING.md). V3 attribution must not crash; V5 templates + project-list-hierarchy must actually transit between peers.
 2. **Replace archeology with citation.** Every load-bearing convention in `troparcel/src/` should trace to a file in `tropy/src/` via mulch `--evidence-file`. Drift detection becomes mechanical.
 3. **Ship a smaller, more reliable plugin.** Less custom code, more upstream-aligned behavior — particularly file-watching, HTML sanitization, and notification UX.
 
@@ -41,7 +41,7 @@ Waves 1, 3, 4 are independently shippable. Wave 2 is the central feature epic. W
   - 2-instance test: Bob applies Alice's annotations without `TypeError`.
   - `@alice` tag appears on each item Alice contributed to.
   - `troparcel:contributors` and `troparcel:lastSync` metadata visible in metadata panel.
-  - V3 demo criterion in `slices.md §V3` passes.
+  - V3 demo criterion in `docs/design/slices.md §V3` passes.
 
 ### W1.T2 — Update mulch `mx-ddbf09` (seed `tropy-plugin-d8ba` · P2, atomic with W1.T1)
 - **What:** After W1.T1 lands, amend the convention record. New text: *"`suppressChanges()` / `resumeChanges()` are caller-managed via the bracket on `applyRemoteAnnotations`. Apply-mixin functions reached from there must use `this.adapter.store.dispatch(...)` directly. `dispatchSuppressed` is not implemented on the adapter — references in older docs predate its removal."*
@@ -159,11 +159,11 @@ Waves 1, 3, 4 are independently shippable. Wave 2 is the central feature epic. W
   5. **NEW:** `await this.applyTemplates()` (project-level — once)
   6. **NEW:** `await this.applyListHierarchy()` (project-level — once)
 - **Suppression:** all 4 NEW calls run inside the existing `adapter.suppressChanges() / resumeChanges()` bracket from `applyPendingRemote`. Confirm bracket spans both push and apply; if not, extend.
-- **Acceptance:** 2-instance V5 demo from `slices.md §V5` passes — Alice creates template + nested list, Bob sees both without manual creation.
+- **Acceptance:** 2-instance V5 demo from `docs/design/slices.md §V5` passes — Alice creates template + nested list, Bob sees both without manual creation.
 
 ### Sub-phase 2d — Documentation
-- Update `slices.md §V5` status from 🟡 PARTIALLY BUILT → DONE.
-- Update `shaping.md §Shapes > CURRENT: Baseline` to remove the V5-S/V5-V/V5-A "🟡" rows.
+- Update `docs/design/slices.md §V5` status from 🟡 PARTIALLY BUILT → DONE.
+- Update `docs/SHAPING.md §Shapes > CURRENT: Baseline` to remove the V5-S/V5-V/V5-A "🟡" rows.
 - Add CHANGELOG entry: "V5 template + project-list-hierarchy sync".
 
 ---
@@ -247,7 +247,7 @@ Waves 1, 3, 4 are independently shippable. Wave 2 is the central feature epic. W
 ## Cross-cutting concerns
 
 ### Testing
-`Vtest-plan.md` exists at repo root for the test campaign. This plan adds:
+[test.md](test.md) covers the broader test campaign. This plan adds:
 
 | Acceptance test | Wave | Type |
 |---|---|---|
@@ -265,8 +265,8 @@ Waves 1, 3, 4 are independently shippable. Wave 2 is the central feature epic. W
 
 ### Documentation
 After each wave:
-- Wave 1 → `shaping.md` baseline (mark AT1 done); CHANGELOG.md.
-- Wave 2 → `slices.md §V5` → DONE; `shaping.md §Shapes > CURRENT: Baseline` clear of yellows; CHANGELOG.md.
+- Wave 1 → `docs/SHAPING.md` baseline (mark AT1 done); CHANGELOG.md.
+- Wave 2 → `docs/design/slices.md §V5` → DONE; `docs/SHAPING.md §Shapes > CURRENT: Baseline` clear of yellows; CHANGELOG.md.
 - Wave 3 → README §Port-conflicts (chokidar behavior); CHANGELOG.md; `subsystems/notes-html-pipeline.md` updated.
 - Wave 4–5 → CHANGELOG.md per task.
 

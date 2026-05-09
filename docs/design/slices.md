@@ -4,7 +4,7 @@ shaping: true
 
 # Troparcel — Slices
 
-Parent: [shaping.md](shaping.md)
+Parent: [SHAPING.md](../SHAPING.md)
 
 ## Slice Strategy
 
@@ -320,7 +320,7 @@ All docs updated to reflect new safety model, connection string UX, transport op
 
 ## Vtest: Test Infrastructure
 
-Layered test infrastructure (builders + units + selective roundtrips). See [Vtest-plan.md](Vtest-plan.md).
+Layered test infrastructure (builders + units + selective roundtrips). See [test.md](../plans/test.md).
 
 ---
 

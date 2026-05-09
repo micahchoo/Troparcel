@@ -4,8 +4,8 @@ shaping: true
 
 # Deploy Templates — V-Plan
 
-Parent: [shaping.md](shaping.md) → [slices.md](slices.md)
-Source: [shaping.md](shaping.md) R5 → [slices.md](slices.md) Deploy
+Parent: [SHAPING.md](../SHAPING.md) → [slices.md](../design/slices.md)
+Source: [SHAPING.md](../SHAPING.md) R5 → [slices.md](../design/slices.md) Deploy
 
 ## Demo Criterion
 

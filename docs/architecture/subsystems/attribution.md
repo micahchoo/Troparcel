@@ -1,6 +1,6 @@
 # Subsystem: V3 Attribution (tags + contributor metadata)
 
-> **Drift status (2026-05-08):** Confirms shaping.md baseline 2026-02-28 — `_applyAttribution` is wired into `applyRemoteAnnotations` but blocks at runtime because `dispatchSuppressed` is missing from `store-adapter.js`.
+> **Drift status (2026-05-08):** Confirms [docs/SHAPING.md](../../SHAPING.md) baseline 2026-02-28 — `_applyAttribution` is wired into `applyRemoteAnnotations` but blocks at runtime because `dispatchSuppressed` is missing from `store-adapter.js`.
 
 ## Goal
 
@@ -10,7 +10,7 @@ When applying remote annotations, attribute who contributed:
 2. Write `troparcel:contributors` (comma-separated authors) and `troparcel:lastSync` (ISO timestamp) to item metadata.
 3. Skip these attribution-only writes when *pushing* back (`@*` tag names + `troparcel:*` / `https://troparcel.org/ns/*` URIs in `push.js`) so attribution doesn't echo across peers.
 
-Demo criterion (from `slices.md`): Bob's apply cycle attaches `@alice` to every item Alice has annotated, and the metadata panel shows `troparcel:contributors = alice`.
+Demo criterion (from [docs/design/slices.md](../../design/slices.md)): Bob's apply cycle attaches `@alice` to every item Alice has annotated, and the metadata panel shows `troparcel:contributors = alice`.
 
 ## Components
 
@@ -67,6 +67,6 @@ Option B is consistent with the load-bearing invariant from `mx-ddbf09` (suppres
 
 ## Related canonical docs
 
-- [slices.md §V3](../../../slices.md) — affordances, attribution rules, file scope
-- [shaping.md §AT1](../../../shaping.md) — current state row
+- [docs/design/slices.md §V3](../../design/slices.md) — affordances, attribution rules, file scope
+- [docs/SHAPING.md §AT1](../../SHAPING.md) — current state row
 - [docs/CONFLICTS.md] — resolution rules per data type (attribution does not change merge semantics, only adds derived UI metadata)

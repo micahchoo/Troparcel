@@ -98,5 +98,5 @@ Plugins would need to ship ProseMirror to use these. troparcel doesn't, and shou
 ## Related canonical docs
 
 - `troparcel/docs/CONFLICTS.md §Notes` — merge semantics (append-only)
-- `troparcel/troparcel-audit.md §5 Note Sync` — flagged HTML sanitizer for security review
-- `troparcel/slices.md §V*` — note sync was completed in V2 era; reconciliation does not change merge semantics
+- [troparcel/docs/AUDIT.md §5 Note Sync](../../AUDIT.md) — flagged HTML sanitizer for security review
+- [troparcel/docs/design/slices.md §V*](../../design/slices.md) — note sync was completed in V2 era; reconciliation does not change merge semantics

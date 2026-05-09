@@ -1,12 +1,12 @@
 # Subsystem: V5 Template + List Hierarchy Sync
 
-> **Drift status (2026-05-08):** Confirms shaping.md baseline 2026-02-28 — V5 schema and apply functions exist; push and wiring still missing.
+> **Drift status (2026-05-08):** Confirms [docs/SHAPING.md](../../SHAPING.md) baseline 2026-02-28 — V5 schema and apply functions exist; push and wiring still missing.
 
 ## Goal
 
 Synchronize **project-level** templates (custom item templates with field schemas) and **project-level** list hierarchy (nested folders in Tropy's sidebar). Per-item lists already work via `pushLists`/`applyLists`; this subsystem covers the project-level structure that lives outside individual items.
 
-Demo criterion (from `slices.md`): Alice creates template "Field Notes" + list hierarchy "2026 Campaign / Site A / Trench 1" → Bob connects → Bob sees both without manual creation.
+Demo criterion (from [docs/design/slices.md](../../design/slices.md)): Alice creates template "Field Notes" + list hierarchy "2026 Campaign / Site A / Trench 1" → Bob connects → Bob sees both without manual creation.
 
 ## Components
 
@@ -35,7 +35,7 @@ $ grep -n "pushTemplates\|pushListHierarchy\|pushSchema" src/push.js
 (no output)
 ```
 
-The `shaping.md` baseline statement is current: V5 is exactly as it was on 2026-02-28.
+The [docs/SHAPING.md](../../SHAPING.md) baseline statement is current: V5 is exactly as it was on 2026-02-28.
 
 ## Wiring chain to make this live
 
@@ -44,7 +44,7 @@ In dependency order (each must precede the next):
 1. **`store-adapter.js`** — add `readTemplates()` and `readLists()`. Return raw state slices (`state.ontology.template`, `state.lists`) — **not** the `getAllTemplates`/`getListTree` selectors (they resolve URIs to objects / flatten trees, breaking CRDT-side identity). See [`## State paths`](#state-paths) for the contract and the load-bearing reason.
 2. **`push.js`** — add `pushTemplates(userId, pushSeq)` and `pushListHierarchy(userId, pushSeq)`. Hash before push, gate by `vault.pushedTemplateHashes`/`pushedListHashes` to avoid loops. Use `crdtUuidToListId`/`listIdToCrdtUuid` for stable list identity across instances. Suppress `@*` and `troparcel:*` URIs (V3 attribution rule still applies).
 3. **`sync-engine.js syncOnce()`** — invoke push (`pushTemplates`/`pushListHierarchy`) before `applyRemoteAnnotations` loop; invoke `applyTemplates()` and `applyListHierarchy()` once per cycle (project-level, not per-item).
-4. **Test** — V5-plan.md and shaping.md `slices.md §V5` define the affordances + edge cases.
+4. **Test** — [docs/plans/v5.md](../../plans/v5.md) and [docs/design/slices.md §V5](../../design/slices.md) define the affordances + edge cases.
 
 ## Mulch records to consult before editing
 
@@ -236,7 +236,7 @@ The mirror approach is safer; pair with the tropy-plugin-b4eb seeds task ("Actio
 
 ## Related canonical docs
 
-- [V5-plan.md](../../../V5-plan.md) — execution plan
-- [slices.md §V5](../../../slices.md) — affordances, status, demo criterion
-- [shaping.md §Selected Shape](../../../shaping.md) — Full Project Sync = V5 + V6 + V7
-- [crdt-design.md](../../../crdt-design.md) — Template = LWW
+- [docs/plans/v5.md](../../plans/v5.md) — execution plan
+- [docs/design/slices.md §V5](../../design/slices.md) — affordances, status, demo criterion
+- [docs/SHAPING.md §Selected Shape](../../SHAPING.md) — Full Project Sync = V5 + V6 + V7
+- [docs/design/crdt-design.md](../../design/crdt-design.md) — Template = LWW

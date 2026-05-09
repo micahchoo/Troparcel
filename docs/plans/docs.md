@@ -4,8 +4,8 @@ shaping: true
 
 # Documentation Rewrite — V-Plan
 
-Parent: [shaping.md](shaping.md) → [slices.md](slices.md)
-Source: [shaping.md](shaping.md) R7 → [slices.md](slices.md) Docs
+Parent: [SHAPING.md](../SHAPING.md) → [slices.md](../design/slices.md)
+Source: [SHAPING.md](../SHAPING.md) R7 → [slices.md](../design/slices.md) Docs
 
 ## Demo Criterion
 

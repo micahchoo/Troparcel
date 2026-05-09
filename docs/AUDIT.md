@@ -1,6 +1,6 @@
 # Troparcel Audit: Benchmark, Critique, and Improvement Proposals
 
-This document evaluates Troparcel (v5.0, ~7,700 lines across 12 source files) against the CRDT design spec (`crdt-design.md`) and the Tropy plugin feasibility analysis (`crdt-feasibility.md`). Each section benchmarks what the design envisioned, what Troparcel actually implemented, where it exceeded or fell short, and what could be improved.
+This document evaluates Troparcel (v5.0, ~7,700 lines across 12 source files) against the CRDT design spec ([design/crdt-design.md](design/crdt-design.md)) and the Tropy plugin feasibility analysis ([design/crdt-feasibility.md](design/crdt-feasibility.md)). Each section benchmarks what the design envisioned, what Troparcel actually implemented, where it exceeded or fell short, and what could be improved.
 
 ❯ tropy's codebase is here /media/2TA/DevStuff/BIIIF/tropy-plugin/tropy/
 ❯ troparcel's codebase is here /media/2TA/DevStuff/BIIIF/tropy-plugin/troparcel/

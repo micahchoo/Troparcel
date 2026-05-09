@@ -6,7 +6,7 @@ shaping: true
 
 ### Context
 
-Troparcel uses ~15-20% of Yjs's API surface. The entire CRDT is used as a replicated key-value store — Y.Map values are plain JS objects, never nested Yjs types. Three major Yjs capabilities (subdocs, client persistence, XmlFragment) were identified in shaping.md §R13 as future-proofing targets. This spike investigates the concrete mechanics of each, plus additional capabilities discovered during audit, plus whether Yjs opens the door to full project sync with concurrent users.
+Troparcel uses ~15-20% of Yjs's API surface. The entire CRDT is used as a replicated key-value store — Y.Map values are plain JS objects, never nested Yjs types. Three major Yjs capabilities (subdocs, client persistence, XmlFragment) were identified in [SHAPING.md §R13](../SHAPING.md) as future-proofing targets. This spike investigates the concrete mechanics of each, plus additional capabilities discovered during audit, plus whether Yjs opens the door to full project sync with concurrent users.
 
 ### Goal
 

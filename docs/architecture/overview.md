@@ -28,13 +28,13 @@ A second tree, `troparcel/server/`, is a small Node service: y-websocket relay +
 | [docs/GUIDE.md](../GUIDE.md) | Group-collaboration end-user guide | UX / docs work |
 | [docs/API.md](../API.md) | Tropy HTTP API reference (used by `api-client.js`) | Touching enrichment / fallback path |
 | [docs/CHANGELOG.md](../CHANGELOG.md) | Version history + migration notes | Release work |
-| `tropy design spec.md` *(repo root)* | Tropy entity model reverse-engineered from its test suite | Touching identity, entity shapes, RDF metadata |
-| `troparcel-audit.md` *(repo root)* | Section-by-section critique vs. design spec | Hardening / catching drift |
-| `shaping.md` *(repo root)* | Shape-Up shaping doc — current baseline + selected shape (Batteries-Included + Full Project Sync) | Scope decisions |
-| `slices.md` *(repo root)* | V1–V5 vertical slices with status per part | Tracking implementation progress |
-| `crdt-design.md`, `crdt-feasibility.md` | Foundational CRDT design + feasibility analysis | Yjs document layout decisions |
-| `spike-sync-architecture.md`, `spike-yjs-fullcap.md` | Spike write-ups | Background on architectural choices |
-| `V2-plan.md` … `V5-plan.md`, `Vtest-plan.md`, `Deploy-plan.md`, `Docs-plan.md`, `ConnStr-plan.md` | Per-slice execution plans | Active implementation work |
+| [docs/design/tropy-design-spec.md](../design/tropy-design-spec.md) | Tropy entity model reverse-engineered from its test suite | Touching identity, entity shapes, RDF metadata |
+| [docs/AUDIT.md](../AUDIT.md) | Section-by-section critique vs. design spec | Hardening / catching drift |
+| [docs/SHAPING.md](../SHAPING.md) | Shape-Up shaping doc — current baseline + selected shape (Batteries-Included + Full Project Sync) | Scope decisions |
+| [docs/design/slices.md](../design/slices.md) | V1–V5 vertical slices with status per part | Tracking implementation progress |
+| [docs/design/crdt-design.md](../design/crdt-design.md), [docs/design/crdt-feasibility.md](../design/crdt-feasibility.md) | Foundational CRDT design + feasibility analysis | Yjs document layout decisions |
+| [docs/spikes/sync-architecture.md](../spikes/sync-architecture.md), [docs/spikes/yjs-fullcap.md](../spikes/yjs-fullcap.md) | Spike write-ups | Background on architectural choices |
+| [docs/plans/v2.md](../plans/v2.md) … [v5.md](../plans/v5.md), [test.md](../plans/test.md), [deploy.md](../plans/deploy.md), [docs.md](../plans/docs.md), [connection-string.md](../plans/connection-string.md) | Per-slice execution plans | Active implementation work |
 
 ## Architecture in one sentence
 
@@ -57,7 +57,7 @@ For drift findings (audit claims verified against current code): [risk-map.md](.
 | Source | Authority |
 |---|---|
 | README + docs/ | Author-maintained, user-facing |
-| `tropy design spec.md` | Reverse-engineered from `tropy/test/` fixtures — high fidelity but not author-of-Tropy |
-| `troparcel-audit.md` | Critique against the design spec |
-| `shaping.md` baseline (2026-02-28) | Last hand-verified state-of-the-world |
+| `docs/design/tropy-design-spec.md` | Reverse-engineered from `tropy/test/` fixtures — high fidelity but not author-of-Tropy |
+| `docs/AUDIT.md` | Critique against the design spec |
+| `docs/SHAPING.md` baseline (2026-02-28) | Last hand-verified state-of-the-world |
 | This `docs/architecture/` tree | Synthesis 2026-05-08, drift-verified against `src/` HEAD |
