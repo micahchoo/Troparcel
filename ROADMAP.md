@@ -15,6 +15,7 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | 4 · Shared project | Done (6.1), one follow-up | Passed in real Tropy | A received photo has no name in the photo list |
 | 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
 | 6 · Publishable rooms | IIIF export done (6.1) | Half: export passes; no viewer opened yet | Open a published folder in a IIIF viewer |
+| 7 · Easy for beginners | Mostly done (6.1) | The setup page passes in real Tropy | Hosted relay: not planned (folder-first instead) |
 
 6.1 is everything on `main` since 6.0.0; it is not released yet. A 68-second film of real Tropy (`npm run film`, `docs/media/troparcel.mp4`) shows what 6.1 does; filming it found a real bug (attribution credited people for entries that changed nothing locally), now fixed. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
 
@@ -106,3 +107,21 @@ Known limit: trust on first use. A member who first joins while someone has put 
 Built: `src/iiif.js` turns Tropy's own export JSON-LD into Presentation 3 manifests with web annotations (`#xywh=` regions); a Troparcel entry with "Publish as IIIF to" set writes them on **File > Export**. Checked by `test/iiif.test.js` and the IIIF community parser (`@iiif/parser`), and in real Tropy: `test/e2e/iiif.e2e.js` runs **File > Export** through the driver plugin, and the manifest from Tropy's real export has the note on its canvas and the image copied. Not yet checked: opening a published folder in a IIIF viewer.
 
 Not built: the `/monitor` web view of a room. A server cannot read an encrypted room, and for an open room a static IIIF export does the same job with less to maintain; it is dropped unless a group asks for it.
+
+## Phase 7 · Easy for beginners
+
+Tropy gives a plugin no place to draw, so everything Troparcel shows had to fit into tags, a list and a note footer, and setting it up meant running a server. This phase makes setup and everyday use work for someone who has never heard of a CRDT.
+
+Done:
+
+- **Troparcel's page** (`src/dashboard.js`): a local web page, opened from **File › Export** with the Troparcel entry, and by itself the first time. It sets Troparcel up (your name, then join with an invite or start a room), and shows whether sync works, who is online, what arrived, conflicts to settle ("use theirs" / "keep mine"), items with no match (different photo files), and the invite for new members.
+- **Folder-first rooms:** `troparcel://folder/<name>` finds the room's folder in whichever sync app each member has, so one invite works for everyone, with no server.
+- **Settings apply live:** Tropy re-creates the plugin; Troparcel closes its old connection cleanly (this was broken).
+- **The installer:** `npx github:micahchoo/Troparcel install` finds every Tropy and installs.
+- **Plain words:** settings, problems and the note footer ("— alice") rewritten for people; the README starts from the basics.
+- **Project rooms carry photo names.**
+
+Not planned: a hosted relay with short invite codes. It would be the easiest setup of all, but it is a running service someone must pay for and answer for. Folder-first rooms give most of the benefit at no cost.
+
+**Exit test:** a newcomer installs, sets up from the page and syncs without a restart (`test/e2e/dashboard.e2e.js`, `test/installer.test.js`). Passes.
+
