@@ -12,8 +12,8 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | 1 · Trustworthy overlay | Code done; the two-person trial is open |
 | 2 · Upstream track | Proposal drafted, not sent |
 | 3 · Scale | In progress |
-| 4 · Shared project | Built; real-Tropy test pending |
-| 5 · Verifiable authorship, private rooms | Not started |
+| 4 · Shared project | Done: exit test passes in real Tropy |
+| 5 · Verifiable authorship, private rooms | In progress |
 | 6 · Publishable rooms | Not started |
 
 ## Phase 0 · Ground truth — done
@@ -74,7 +74,9 @@ Remaining:
 - Import them with `item.import`; an item whose photos have not arrived waits.
 - A room is an *overlay room* (photos stay local) or a *project room* (photos travel).
 
-**Exit test:** a new researcher pastes one string into an empty Tropy and gets the whole project: items, templates, lists, photos and annotations.
+**Exit test:** a new researcher pastes one string into an empty Tropy and gets the whole project: items, templates, lists, photos and annotations. Passes: `test/e2e/project-room.e2e.js` (2026-10-05).
+
+Built as `src/project-room.js`: a connection string ending in `photos=1` makes a project room. Tropy's own JSON-LD import (`item.import` with `payload.data`) creates the item; its annotations follow by ordinary sync.
 
 ## Phase 5 · Verifiable authorship and private rooms
 

@@ -3113,3 +3113,37 @@ describe('connection-string: project rooms', () => {
     }
   })
 })
+
+describe('vault: what survives a restart', () => {
+  const { SyncVault } = require('../src/vault')
+
+  it('keeps push hashes, so an unchanged item is not pushed again after a restart', async () => {
+    let root = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'troparcel-vault-'))
+    let a = new SyncVault()
+    for (let i = 0; i < 12000; i++) a.markPushed(`item-${i}`, `h${i}`)
+    a.markDirty()
+    await a.persistToFile('room', 'alice', root)
+    let b = new SyncVault()
+    b.loadFromFile('room', 'alice', root)
+    assert.equal(b.pushedHashes.size, 12000, 'every item, past the old 5,000 cap')
+    assert.equal(b.pushedHashes.get('item-0'), 'h0')
+  })
+})
+
+describe('store-adapter: whenLoaded', () => {
+  const { StoreAdapter } = require('../src/store-adapter')
+  const { fakeTropy } = require('./harness/fake-tropy')
+
+  it('waits while Tropy is still loading the project', async () => {
+    let tropy = fakeTropy()
+    tropy.replace({ ...tropy.state(), activities: { 7: { id: 7, type: 'item.load' } } })
+    let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
+    let done = false
+    let wait = adapter.whenLoaded().then(() => { done = true })
+    await new Promise(r => setTimeout(r, 50))
+    assert.equal(done, false)
+    tropy.replace({ ...tropy.state(), activities: {}, items: { 1: { id: 1, photos: [] } } })
+    await wait
+    assert.equal(done, true)
+  })
+})

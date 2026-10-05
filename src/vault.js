@@ -23,7 +23,6 @@ const Y = require('yjs')
  * eviction to prevent unbounded memory growth.
  */
 
-const MAX_PUSHED_ITEMS = 5000
 
 /** Where vaults and backups live unless the `dataDir` option says. */
 function defaultRoot() {
@@ -230,8 +229,13 @@ class SyncVault {
     return { changed: last !== hash, hash }
   }
 
+  /**
+   * Record what was pushed for an item. Kept on disk and never capped: a
+   * missing entry makes the item look changed, and before 6.1 every start
+   * pushed every item again (and a project over 5,000 items, half of them
+   * on every cycle).
+   */
   markPushed(identity, hash) {
-    this._evictIfNeeded(this.pushedHashes, MAX_PUSHED_ITEMS)
     this.pushedHashes.set(identity, hash)
   }
 
@@ -557,6 +561,7 @@ class SyncVault {
         timestamp: new Date().toISOString(),
         pushSeq: this.pushSeq,
         appliedNoteKeys: Array.from(this.appliedNoteKeys),
+        pushedHashes: Array.from(this.pushedHashes),
         appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
         appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys),
         sharedPhotos: Array.from(this.sharedPhotos),
@@ -607,6 +612,9 @@ class SyncVault {
       // Accept all vault versions (1-4) — missing fields default to empty
       if (data.version !== 1 && data.version !== 2 && data.version !== 3 && data.version !== 4) return false
 
+      if (Array.isArray(data.pushedHashes)) {
+        for (let [k, v] of data.pushedHashes) this.pushedHashes.set(k, v)
+      }
       if (Array.isArray(data.appliedNoteKeys)) {
         for (let k of data.appliedNoteKeys) this.appliedNoteKeys.add(k)
       }

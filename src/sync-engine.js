@@ -229,6 +229,7 @@ class SyncEngine {
       if (this.options.clearTombstones) this.purgeTombstones()
 
       if (!opts.skipInitialSync) {
+        await this.adapter.whenLoaded()
         await this.syncOnce()
         this._log(
           `initial sync complete — ${this.localIndex.size} local items, ` +

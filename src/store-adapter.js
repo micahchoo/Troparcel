@@ -257,6 +257,35 @@ class StoreAdapter {
     return this._getState().notes[id] || null
   }
 
+  /**
+   * Resolves once Tropy has loaded the project into its state. On opening a
+   * project Tropy runs item.load, photo.load, note.load and the rest as
+   * commands; before they finish, a 10,000-item project looks empty. Done
+   * when no load is running and either one was seen or 3 s have passed
+   * (the loads finished before we looked).
+   */
+  whenLoaded({ grace = 3000 } = {}) {
+    let start = Date.now()
+    let seen = false
+    let loading = s => Object.values(s.activities || {}).some(a => /load$/i.test(String(a && a.type)))
+    return new Promise(resolve => {
+      let timer = null
+      let unsub = () => {}
+      let check = () => {
+        let s = this._getState()
+        if (loading(s)) { seen = true; return }
+        if (seen || Object.keys(s.items || {}).length > 0 || Date.now() - start >= grace) {
+          clearTimeout(timer)
+          unsub()
+          resolve()
+        }
+      }
+      unsub = this.store.subscribe(check)
+      timer = setTimeout(check, grace)
+      check()
+    })
+  }
+
   /** A photo as Tropy holds it, with its absolute `path` and file facts. */
   getPhoto(id) {
     return this._getState().photos[id] || null
