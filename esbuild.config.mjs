@@ -3,7 +3,9 @@ import { build, context } from 'esbuild'
 const options = {
   entryPoints: ['src/plugin.js'],
   bundle: true,
-  outfile: 'index.js',
+  // --outfile=<path> builds elsewhere, e.g. a bundle for one test run that
+  // must not replace the one another run is using.
+  outfile: (process.argv.find(a => a.startsWith('--outfile=')) || '--outfile=index.js').slice(10),
   format: 'cjs',
   platform: 'node',
   target: 'node20',

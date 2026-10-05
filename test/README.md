@@ -40,3 +40,7 @@ node test/e2e/timeline.js .e2e/<run>/alice/timeline.jsonl
 ```
 
 which prints when the project opened, when loads ran, each command type with count, total and max duration, errored actions, and undo and nav changes. The observer reads actions with a saga that takes `'*'`, because sagas `put` past `store.dispatch`; it attaches when the window assigns its store, so the first few actions (`intl.load`, `keymap.load`) come before it.
+
+## Footage for the explainer
+
+`npm run film` records real Tropy windows (`test/e2e/film.js`: alice, bob and a newcomer, carol, each on a 1280×800 Xvfb display through `test/e2e/studio.js`), then cuts the film (`test/e2e/edit.js`: zooms, pans, captions and crossfades with ffmpeg; camera moves are the `SHOTS` table). It needs `ffmpeg`, `Xvfb` and `xdotool`. The letter scans are public domain (`test/fixtures/letters/SOURCES.md`). `--rehearse` takes screenshots instead of recording, to check each scene. `TROPARCEL_BUNDLE=<file>` films a bundle other than `./index.js`, e.g. while another run uses it.

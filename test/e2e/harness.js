@@ -168,7 +168,9 @@ class TropyInstance {
     let dest = path.join(this.dataDir, 'plugins', 'troparcel')
     fs.mkdirSync(dest, { recursive: true })
     for (let f of ['index.js', 'package.json', 'icon.svg']) {
-      fs.copyFileSync(path.join(ROOT, f), path.join(dest, f))
+      // TROPARCEL_BUNDLE: install that bundle instead of ./index.js
+      let src = f === 'index.js' && process.env.TROPARCEL_BUNDLE ? process.env.TROPARCEL_BUNDLE : path.join(ROOT, f)
+      fs.copyFileSync(src, path.join(dest, f))
     }
     for (let [from, name] of [['driver', 'troparcel-test-driver'], ['observer', 'troparcel-test-observer']]) {
       let dir = path.join(this.dataDir, 'plugins', name)
@@ -200,13 +202,19 @@ class TropyInstance {
     // launcher asks Electron for Wayland when XDG_SESSION_TYPE says so.
     let env = { ...process.env, XDG_SESSION_TYPE: 'x11' }
     delete env.WAYLAND_DISPLAY
-    this.proc = spawn('xvfb-run', [
-      '-a', 'dbus-run-session', '--',
+    let tropy = [
+      'dbus-run-session', '--',
       'flatpak', 'run', '--nosocket=wayland', '--socket=x11',
       'org.tropy.Tropy',
       `--data=${this.dataDir}`, `--logs=${this.logDir}`,
       `--port=${this.port}`, this.project
-    ], { detached: true, env, stdio: ['ignore', out, out] })
+    ]
+    // `display` set (e.g. ':91'): run on that X display, to record it.
+    // Otherwise a private Xvfb, which nobody sees.
+    if (this.display) env.DISPLAY = this.display
+    this.proc = this.display
+      ? spawn(tropy[0], tropy.slice(1), { detached: true, env, stdio: ['ignore', out, out] })
+      : spawn('xvfb-run', ['-a', ...tropy], { detached: true, env, stdio: ['ignore', out, out] })
     let pid = this.proc.pid
     let dataDir = this.dataDir
     process.on('exit', () => {
@@ -367,8 +375,9 @@ class Run {
     fs.mkdirSync(this.photosDir, { recursive: true })
   }
 
+  /** Start the server; started again, it keeps its port, so connection strings still work. */
   async startServer() {
-    this.serverPort = await freePort()
+    this.serverPort = this.serverPort || await freePort()
     let out = fs.openSync(path.join(this.dir, 'server.log'), 'a')
     this.server = spawn('node', [path.join(ROOT, 'server', 'index.js')], {
       env: {
@@ -385,6 +394,16 @@ class Run {
       (await fetch(`http://127.0.0.1:${this.serverPort}/health`)).ok)
     this.serverUrl = `ws://127.0.0.1:${this.serverPort}`
     return this
+  }
+
+  /** Stop the server, as a crash or a network outage would. Its data stays. */
+  async stopServer() {
+    let server = this.server
+    if (!server) return
+    this.server = null
+    let exited = new Promise(r => server.once('exit', r))
+    server.kill('SIGKILL')
+    await exited
   }
 
   peer(userId) {

@@ -73,6 +73,9 @@ class TestDriver {
     let sent = store.dispatch(action)
     let seq = sent && sent.meta && sent.meta.seq
     if (!action.meta || !action.meta.cmd || !seq) return Promise.resolve({ seq })
+    // Tropy adds the activity in the same dispatch that starts the command,
+    // so if it is already gone, the command has already finished.
+    if (!(store.getState().activities || {})[seq]) return Promise.resolve({ seq })
     return new Promise((resolve, reject) => {
       let seen = false
       let timer = setTimeout(() => { unsub(); reject(new Error(`${action.type} did not finish`)) }, 60000)

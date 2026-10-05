@@ -1,6 +1,6 @@
 # Troparcel
 
-> Written by an AI (Claude Opus). Tested against real Tropy, but not yet used by a group for real work. See [How far to trust it](#how-far-to-trust-it).
+> Written by an AI (Claude Opus 5.5). Tested against real Tropy, but not yet used by a group for real work. See [How far to trust it](#how-far-to-trust-it).
 
 Troparcel is a plugin for [Tropy](https://tropy.org) that lets a group work on the same photos together. A note, tag, title, selection or transcription one person adds appears in everyone else's project within seconds.
 
@@ -20,11 +20,11 @@ Their changes do not enter your undo history, and they never move what you are l
 
 A group shares one **room**. It lives on a small server you run, or in a folder you already sync (Nextcloud, Dropbox, Syncthing). There are three kinds:
 
-| Room | Choose it when | Photos |
-|---|---|---|
-| **Overlay** | your photos may not be copied, e.g. archive rules | Stay on each computer. Everyone imports the same files |
-| **Project** (6.1) | the group may share its photos | Travel with the room. A newcomer starts from an empty project |
-| **Encrypted** (6.1) | the server must not read the work | As in a project or overlay room, but the server holds only ciphertext |
+| Room                | Choose it when                                    | Photos                                                                |
+| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------- |
+| **Overlay**         | your photos may not be copied, e.g. archive rules | Stay on each computer. Everyone imports the same files                |
+| **Project** (6.1)   | the group may share its photos                    | Travel with the room. A newcomer starts from an empty project         |
+| **Encrypted** (6.1) | the server must not read the work                 | As in a project or overlay room, but the server holds only ciphertext |
 
 In an overlay room, Troparcel recognises an item by its photo files' checksums. Everyone must import the same files, byte for byte; a re-saved or converted copy is a different photo, and that item does not sync.
 
