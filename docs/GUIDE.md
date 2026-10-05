@@ -219,9 +219,9 @@ A reviewer who wants to read others' work without sharing their own uses `pull`.
 
 ### Deleting
 
-With **Share deletions** off (the default), nothing you delete leaves your computer. A collaborator's note or tag that you delete comes back at the next sync; that protects the group against accidents. Your own entries stay deleted.
+With **Share what I delete** off (the default), nothing you delete leaves your computer. A collaborator's note or tag that you delete comes back at the next sync; that protects the group against accidents. Your own entries stay deleted.
 
-With **Share deletions** on:
+With **Share what I delete** on:
 
 - a note you wrote and then delete is **struck through** for everyone, not removed. Only its author can retract a note.
 - a tag or list membership you remove is removed for everyone, unless someone adds it again.
@@ -240,7 +240,7 @@ Agree on these before you start:
 3. **Agree on tag names.** "Damaged" and "damage" are different tags.
 4. **Agree who edits which metadata fields.**
 5. **Answer a note with a new note.** Do not edit someone else's.
-6. **Leave Share deletions off** unless the coordinator turns it on for a cleanup.
+6. **Leave “Share what I delete” off** unless the coordinator turns it on for a cleanup.
 7. **Do not change the Connection field** without asking. Another room is another group.
 8. **Tell the coordinator** before you try to fix a sync problem yourself.
 
