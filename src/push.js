@@ -199,7 +199,9 @@ module.exports = {
     let photos = item.photo || item['https://tropy.org/v1/tropy#photo'] || []
     if (!Array.isArray(photos)) photos = [photos]
 
-    let existingNotes = schema.getNotes(this.doc, itemIdentity)
+    // An entry that fails its signature is treated as absent, so this
+    // member's own note, overwritten by someone posing as them, is rewritten.
+    let existingNotes = this._admitted(itemIdentity, 'notes', schema.getNotes(this.doc, itemIdentity))
 
     // Track all note keys we push, so we can clean up stale entries after
     let pushedNoteKeys = new Set()

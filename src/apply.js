@@ -141,11 +141,11 @@ module.exports = {
     let contributors = new Set()
     let add = v => { if (v && v.author && v.author !== userId && !v.deleted) contributors.add(v.author) }
 
-    Object.values(schema.getNotes(this.doc, itemIdentity)).forEach(add)
-    Object.values(schema.getActiveSelections(this.doc, itemIdentity)).forEach(add)
-    Object.values(schema.getActiveTranscriptions(this.doc, itemIdentity)).forEach(add)
+    Object.values(this._admitted(itemIdentity, 'notes', schema.getNotes(this.doc, itemIdentity))).forEach(add)
+    Object.values(this._admitted(itemIdentity, 'selections', schema.getActiveSelections(this.doc, itemIdentity))).forEach(add)
+    Object.values(this._admitted(itemIdentity, 'transcriptions', schema.getActiveTranscriptions(this.doc, itemIdentity))).forEach(add)
     schema.getActiveTags(this.doc, itemIdentity).forEach(add)
-    Object.values(schema.getMetadata(this.doc, itemIdentity)).forEach(add)
+    Object.values(this._admitted(itemIdentity, 'metadata', schema.getMetadata(this.doc, itemIdentity))).forEach(add)
 
     if (contributors.size === 0) return
 
@@ -223,12 +223,21 @@ module.exports = {
 
   /**
    * The entries of one section that inbound validation did not reject
-   * (`this._rejected`, set by the engine as it matches items).
+   * (`this._rejected`, set by the engine as it matches items) and whose
+   * signature, if their author has a key, is valid (`this.keyring`).
    */
   _admitted(itemIdentity, section, entries) {
     let rejected = this._rejected && this._rejected.get(itemIdentity)
-    if (!rejected) return entries
-    return Object.fromEntries(Object.entries(entries).filter(([k]) => !rejected.has(`${section}|${k}`)))
+    let ring = this.keyring
+    if (!rejected && !ring) return entries
+    return Object.fromEntries(Object.entries(entries).filter(([k, v]) => {
+      if (rejected && rejected.has(`${section}|${k}`)) return false
+      if (ring && ring.verify(section, schema.entryKey(itemIdentity, k), v) === false) {
+        this._debug(`authorship: ${section} ${k.slice(0, 8)} is not signed by ${v.author}; ignored`)
+        return false
+      }
+      return true
+    }))
   },
 
   async applyMetadata(itemIdentity, localId, userId, localItem) {
@@ -521,7 +530,7 @@ module.exports = {
   // Selections match by UUID, then by region (fingerprint) on the same photo.
   async applySelections(itemIdentity, local, userId) {
     if (!this.options.syncSelections) return
-    let remoteSelections = schema.getActiveSelections(this.doc, itemIdentity)
+    let remoteSelections = this._admitted(itemIdentity, 'selections', schema.getActiveSelections(this.doc, itemIdentity))
     let photos = arrayOf(local.item.photo)
 
     // Region fingerprint → local selection id, over every local selection
@@ -683,7 +692,7 @@ module.exports = {
     }
 
     if (this.options.syncSelections) {
-      for (let [key, sel] of Object.entries(schema.getSelections(this.doc, itemIdentity))) {
+      for (let [key, sel] of Object.entries(this._admitted(itemIdentity, 'selections', schema.getSelections(this.doc, itemIdentity)))) {
         if (!gone(key, sel)) continue
         let id = this.vault.getLocalSelId(key)
         let local = id && this.adapter.getSelection(id)
@@ -704,7 +713,7 @@ module.exports = {
     }
 
     if (this.options.syncTranscriptions) {
-      for (let [key, tx] of Object.entries(schema.getTranscriptions(this.doc, itemIdentity))) {
+      for (let [key, tx] of Object.entries(this._admitted(itemIdentity, 'transcriptions', schema.getTranscriptions(this.doc, itemIdentity)))) {
         if (!gone(key, tx)) continue
         let id = this.vault.getLocalTxId(key)
         if (!id || !this.adapter.getTranscription(id)) { if (id) handled(key); continue }

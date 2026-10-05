@@ -33,6 +33,7 @@ const { purgeTombstones } = require('./purge')
  *   Y.Array selectionMeta   YKeyValue: identity|s_uuid:property → { ... }
  *   Y.Map   schema          template URI → template definition
  *   Y.Map   projectLists    l_uuid → { uuid, name, parent, children }
+ *   Y.Map   members         name → { publicKey }: each member's signing key
  *   Y.Map   room            { schemaVersion: 5 }
  *
  * Values are plain JSON, written whole. Metadata uses YKeyValue so the doc
@@ -136,8 +137,21 @@ function _indexOf(doc, section) {
   return idx
 }
 
+// doc → Signer (authorship.js). An entry its signer authors is signed as it
+// is written, so nothing authored reaches the room unsigned.
+const _signers = new WeakMap()
+
+function setSigner(doc, signer) {
+  if (signer) _signers.set(doc, signer)
+  else _signers.delete(doc)
+}
+
 function _set(doc, section, identity, rest, value) {
   let key = keyOf(identity, rest)
+  let signer = _signers.get(doc)
+  if (signer && value && typeof value === 'object' && value.author === signer.userId) {
+    value = { ...value, sig: signer.sign(section, key, value) }
+  }
   _ensureItem(doc, identity)
   if (KV_SECTIONS.includes(section)) _kvOf(doc, section).set(key, value)
   else _map(doc, section).set(key, value)
@@ -189,7 +203,8 @@ function _mayRetract(existing, author) {
 }
 
 function _tombstone(existing, author, pushSeq) {
-  return { ...existing, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() }
+  let { sig, ...rest } = existing // the old signature does not cover this value
+  return { ...rest, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() }
 }
 
 // --- Metadata (item-level) -------------------------------------------------
@@ -631,6 +646,23 @@ function getSnapshot(doc) {
   return out
 }
 
+// --- Members: each name's public key (authorship.js) ---------------------------------
+
+function publishKey(doc, userId, publicKey) {
+  let members = doc.getMap('members')
+  let current = members.get(userId)
+  if (!current || current.publicKey !== publicKey) members.set(userId, { publicKey })
+}
+
+function getMembers(doc) {
+  return doc.getMap('members').toJSON()
+}
+
+/** The full room key of an entry: `<identity>|<rest>`, what a signature covers. */
+function entryKey(identity, rest) {
+  return keyOf(identity, rest)
+}
+
 // --- Room config -------------------------------------------------------------------------
 
 function setRoomConfig(doc, config) {
@@ -810,6 +842,11 @@ module.exports = {
   // Snapshots
   getSnapshot,
   getItemSnapshot,
+  // Authorship
+  setSigner,
+  publishKey,
+  getMembers,
+  entryKey,
   // Room
   setRoomConfig,
   getRoomConfig,

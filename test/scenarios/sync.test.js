@@ -367,3 +367,62 @@ test('overlay room (the default): no photos travel and nothing is imported', asy
   assert.equal(hub.blobs.size, 0)
   assert.equal(Object.keys(bob.tropy.state().items).length, 1, 'only the item bob already had')
 })
+
+// --- Authorship: signatures (ROADMAP Phase 5) ---
+
+const ITEM1 = identity.computeIdentity({ photo: [{ checksum: 'c1' }] })
+
+/** alice's one note in the room: its key and value. */
+function aliceNote(peer) {
+  return Object.entries(schema.getNotes(peer.engine.doc, ITEM1)).find(([, v]) => v.author === 'alice')
+}
+
+test('authorship: what alice writes is signed, and verifies against her published key', async (t) => {
+  let { alice, bob } = await pair(t)
+  await alice.engine.adapter.createNote({ photo: 101, html: '<p>signed</p>' })
+  await cycle(alice, bob)
+  let [key, note] = aliceNote(bob)
+  assert.ok(note.sig)
+  assert.equal(bob.engine.keyring.verify('notes', schema.entryKey(ITEM1, key), note), true)
+  assert.equal(schema.getMembers(bob.engine.doc).alice.publicKey, alice.engine.signer.publicKey)
+})
+
+test('authorship: someone posing as alice cannot retract her note, and alice writes it back', async (t) => {
+  let { alice, bob } = await pair(t)
+  await alice.engine.adapter.createNote({ photo: 101, html: '<p>mine</p>' })
+  await cycle(alice, bob)
+  let [key, note] = aliceNote(bob)
+
+  // mallory writes straight into the room, skipping every honest check.
+  bob.engine.doc.getMap('notes').set(schema.entryKey(ITEM1, key),
+    { ...note, deleted: true, deletedAt: Date.now(), sig: 'forged' })
+  await cycle(bob)
+  let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
+  assert.ok(texts.some(tx => tx.startsWith('mine') && !tx.includes('retracted')), texts.join(' | '))
+
+  await cycle(alice)
+  let [, back] = aliceNote(alice)
+  assert.ok(!back.deleted, 'alice wrote her note back')
+  assert.equal(alice.engine.keyring.verify('notes', schema.entryKey(ITEM1, key), back), true)
+})
+
+test('authorship: a note signed with the wrong key is ignored', async (t) => {
+  let { alice, bob } = await pair(t)
+  await cycle(alice, bob) // bob pins alice's key
+  let { Signer } = require('../../src/authorship')
+  let impostor = Signer.load(require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'k-')), 'alice')
+  let key = schema.entryKey(ITEM1, 'n_fake')
+  let value = { uuid: 'n_fake', text: 'fake', html: '<p>fake</p>', photo: 'c1', author: 'alice', pushSeq: 1 }
+  bob.engine.doc.getMap('notes').set(key, { ...value, sig: impostor.sign('notes', key, value) })
+  bob.engine.doc.getMap('items').set(ITEM1, { checksums: ['c1'] })
+  await cycle(bob)
+  assert.ok(!Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('fake')))
+})
+
+test('authorship: an unsigned entry by a name with no key (Troparcel 6.0) is still applied', async (t) => {
+  let { alice, bob } = await pair(t)
+  alice.engine.doc.getMap('notes').set(schema.entryKey(ITEM1, 'n_old'),
+    { uuid: 'n_old', text: 'from 6.0', html: '<p>from 6.0</p>', photo: 'c1', author: 'olga', pushSeq: 1 })
+  await cycle(alice, bob)
+  assert.ok(Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('from 6.0')))
+})

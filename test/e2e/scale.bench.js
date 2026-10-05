@@ -134,6 +134,12 @@ async function main() {
         { timeout: 600000, every: 1000 })
       console.log(`start with ${N} items: ${startSeconds(bob).toFixed(1)} s (project opened → first full cycle)`)
       await sleep(15000)
+      let session = bob.log().split('\n').map(l => { try { return JSON.parse(l) } catch { return {} } })
+      let last = session.map(j => j.msg || '').filter(Boolean)
+      let from = last.map(m => m.startsWith('Troparcel —')).lastIndexOf(true)
+      let mine = last.slice(from)
+      console.log(`  its first cycle saw: ${(mine.find(m => /initial sync complete/.test(m)) || '').replace(/^.*complete — /, '')}`)
+      console.log(`  items pushed again after the restart: ${mine.filter(m => /pushed \d+ item/.test(m)).map(m => m.match(/pushed (\d+)/)[1]).join(', ') || 'none'}`)
       console.log(`memory when idle after a restart: ${residentMB(bob).toFixed(0)} MB`)
     }
     let problems = bob.problems()

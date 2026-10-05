@@ -11,6 +11,7 @@ const { SyncVault, defaultRoot } = require('./vault')
 const { RECEIVED_LIST } = require('./local-only')
 const { Assignments } = require('./assignments')
 const { ProjectRoom } = require('./project-room')
+const { Signer, Keyring } = require('./authorship')
 const path = require('path')
 
 /**
@@ -186,6 +187,7 @@ class SyncEngine {
 
       this._migrateRoom()
       this._startPresence()
+      this._startAuthorship()
 
       if (this.options.sharePhotos) {
         this.projectRoom = new ProjectRoom({
@@ -405,8 +407,62 @@ class SyncEngine {
   handleRemoteChanges(changes) {
     this._remoteAnnotationsDirty = true
     for (let change of changes) this._pendingRemoteIdentities.add(change.identity)
+    this._repairForgeries(new Set(changes.map(c => c.identity)))
     this._debug(`remote change: ${changes.length} event(s), ${this._pendingRemoteIdentities.size} item(s) pending`)
     this._scheduleRemoteApply()
+  }
+
+  /**
+   * Sign what this member writes, and check what others write (see
+   * authorship.js). This member's key is published under their name; if the
+   * room shows another key under it, the name is already someone's, or
+   * someone is posing as them: the key is written back, and others, who
+   * pinned the first key they saw, keep trusting the right one.
+   */
+  _startAuthorship() {
+    this.signer = Signer.load(path.join(this.dataDir, 'keys'), this._stableUserId)
+    schema.setSigner(this.doc, this.signer)
+    this.keyring = new Keyring(this.vault.pinnedKeys, () => schema.getMembers(this.doc))
+    this.vault.pinnedKeys.set(this._stableUserId, this.signer.publicKey)
+
+    let claim = () => {
+      let mine = schema.getMembers(this.doc)[this._stableUserId]
+      if (mine && mine.publicKey === this.signer.publicKey) return
+      if (mine) {
+        this.logger.warn(`[troparcel] another key is published under your name "${this._stableUserId}". ` +
+          'If someone else in the group uses this name, choose another one in Troparcel\'s settings.')
+      }
+      this.doc.transact(() => schema.publishKey(this.doc, this._stableUserId, this.signer.publicKey), this.LOCAL_ORIGIN)
+    }
+    claim()
+    let members = this.doc.getMap('members')
+    this._membersHandler = (e, tr) => { if (tr.origin !== this.LOCAL_ORIGIN) claim() }
+    members.observe(this._membersHandler)
+  }
+
+  /**
+   * An item whose room entries include one that fails its signature check
+   * is pushed again, so this member's own entries, overwritten by someone
+   * posing as them, are written back.
+   */
+  _repairForgeries(identities) {
+    if (!this.keyring) return
+    let forged = false
+    for (let identity of identities) {
+      for (let section of ['notes', 'selections', 'selectionNotes', 'transcriptions']) {
+        let entries = section === 'notes' ? schema.getNotes(this.doc, identity)
+          : section === 'selections' ? schema.getSelections(this.doc, identity)
+            : section === 'transcriptions' ? schema.getTranscriptions(this.doc, identity)
+              : schema.getAllSelectionNotes(this.doc, identity)
+        for (let [rest, value] of Object.entries(entries)) {
+          if (this.keyring.verify(section, schema.entryKey(identity, rest), value) === false) {
+            this.vault.pushedHashes.delete(identity)
+            forged = true
+          }
+        }
+      }
+    }
+    if (forged) this._debounceSync(this.options.localDebounce)
   }
 
   _scheduleRemoteApply() {

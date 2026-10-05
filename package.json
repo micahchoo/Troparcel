@@ -20,7 +20,7 @@
     "pack": "node esbuild.config.mjs && zip -r troparcel.zip package.json index.js icon.svg",
     "watch": "node esbuild.config.mjs --watch",
     "server": "node server/index.js",
-    "test": "node --test --test-force-exit \"test/*.test.js\" \"test/scenarios/*.test.js\" \"test/integration/*.test.js\"",
+    "test": "node --test --test-force-exit --import ./test/setup.js \"test/*.test.js\" \"test/scenarios/*.test.js\" \"test/integration/*.test.js\"",
     "e2e": "node --test --test-force-exit --test-concurrency=1 \"test/e2e/*.e2e.js\""
   },
   "hooks": {
