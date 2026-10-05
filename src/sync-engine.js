@@ -44,7 +44,7 @@ class SyncEngine {
     // What happened recently, for the dashboard; warnings are recorded too.
     // The plugin passes its own journal, already watching its logger.
     this.journal = options.journal || new Journal()
-    this.logger = options.journal ? logger : this.journal.watch(logger)
+    this.logger = logger
     this.debug = options.debug === true
     this.peers = []
 
@@ -468,6 +468,7 @@ class SyncEngine {
       if (mine) {
         this.logger.warn(`[troparcel] another key is published under your name "${this._stableUserId}". ` +
           'If someone else in the group uses this name, choose another one in Troparcel\'s settings.')
+        this.journal.problem(`Someone else in this room uses the name “${this._stableUserId}”. Choose another name in Troparcel’s settings, so your work is not mixed up with theirs.`)
       }
       this.doc.transact(() => schema.publishKey(this.doc, this._stableUserId, this.signer.publicKey), this.LOCAL_ORIGIN)
     }
@@ -631,6 +632,7 @@ class SyncEngine {
     } catch (err) {
       this._consecutiveErrors++
       this.logger.warn({ error: err && err.message, stack: err && err.stack }, 'Sync cycle failed')
+      this.journal.problem('A sync did not finish; Troparcel will try again. If this keeps happening, turn on “Detailed log” in Troparcel’s settings and look in Help › Show Log Files.')
       this.state = prev === 'connected' ? 'connected' : 'error'
     } finally {
       this._syncing = false
@@ -679,6 +681,9 @@ class SyncEngine {
       if (!crdtItem) return
       let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
       for (let w of validation.warnings) this.logger.warn(`validation: ${w} — skipped`)
+      if (validation.warnings.length) {
+        this.journal.problem(`Skipped ${validation.warnings.length === 1 ? 'an entry' : `${validation.warnings.length} entries`} on ${this._titleOf(itemIdentity)} that ${validation.warnings.length === 1 ? 'is' : 'are'} too large (over 1 MB, or a field over 64 KB). Everything else on that item arrived.`)
+      }
       if (validation.rejected.size > 0) this._rejected.set(itemIdentity, validation.rejected)
       else this._rejected.delete(itemIdentity)
       matched.push({ itemIdentity, local })

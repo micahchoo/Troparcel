@@ -32,69 +32,69 @@
   "options": [
     {
       "field": "connection",
-      "label": "Connection — server address or shared folder",
+      "label": "Connection",
       "type": "string",
       "default": "",
       "placeholder": "troparcel://ws/host:2468/room?token=…  or  /path/to/shared/folder",
-      "hint": "Paste the connection string your coordinator gave you, a ws:// server address, or the path of a folder you all sync (Nextcloud, Dropbox, Syncthing). Everyone in a group uses the same one."
+      "hint": "The invite from your group: a troparcel:// link, or the path of a folder you all sync. Or leave it empty, choose File › Export with this entry, and set Troparcel up in your browser."
     },
     {
       "field": "userId",
-      "label": "Your name — shown on what you contribute",
+      "label": "Your name",
       "type": "string",
       "default": "",
       "placeholder": "alice",
-      "hint": "Collaborators see this name as an @tag on items you contributed to. Use a different name from everyone else in the group."
+      "hint": "Others see your work under this name. Choose one nobody else in the group uses."
     },
     {
       "field": "syncMode",
-      "label": "Mode — auto, review, push or pull",
+      "label": "When to sync",
       "type": "string",
       "default": "auto",
       "placeholder": "auto",
-      "hint": "auto: share and receive continuously. review: share continuously, receive when you choose File > Import > Troparcel. push: share only. pull: receive only, when you import."
+      "hint": "auto (recommended): share and receive as you work. review: share as you work; receive when you choose File › Import with this entry. push: share only. pull: receive only, when you import."
     },
     {
       "field": "syncDeletions",
-      "label": "Share deletions",
+      "label": "Share what I delete",
       "type": "boolean",
       "default": false,
-      "hint": "When on, a note you delete is struck through for everyone else (only its author can retract it), and a tag or list membership you remove is removed for them."
+      "hint": "Notes, selections and transcriptions you wrote and then delete are removed for everyone else; your notes show crossed out. Tags and list memberships you remove are removed for everyone too."
     },
     {
       "field": "syncLists",
       "label": "Share lists",
       "type": "boolean",
       "default": false,
-      "hint": "When on, your list tree and which items are in which list are shared."
+      "hint": "Your lists, and which items are in them, are shared with the group."
     },
     {
       "field": "syncPhotoAdjustments",
       "label": "Share photo and selection metadata",
       "type": "boolean",
       "default": false,
-      "hint": "When on, metadata on photos and selections is shared too, not only item metadata."
+      "hint": "Metadata on photos and selections is shared too, not only on items."
     },
     {
       "field": "iiifFolder",
       "label": "Publish as IIIF to",
       "type": "string",
       "default": "",
-      "hint": "A folder. When set, File > Export with this entry writes IIIF manifests and images there instead of sharing. Add a second Troparcel entry for publishing."
+      "hint": "A folder. With this set, File › Export with this entry writes IIIF manifests and images there, and shares nothing. Use a second Troparcel entry for publishing."
     },
     {
       "field": "iiifBaseUrl",
       "label": "IIIF web address",
       "type": "string",
       "default": "",
-      "hint": "Where that folder will be published, e.g. https://example.edu/letters. IIIF links need it."
+      "hint": "Where that folder will be on the web, such as https://example.edu/letters."
     },
     {
       "field": "debug",
-      "label": "Debug logging",
+      "label": "Detailed log",
       "type": "boolean",
       "default": false,
-      "hint": "Write detailed sync messages to Tropy's log files (Help > Show Log Files)."
+      "hint": "Write each sync step to Tropy’s log (Help › Show Log Files), to help report a problem."
     }
   ],
   "keywords": [

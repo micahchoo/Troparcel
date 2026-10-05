@@ -38,7 +38,7 @@ class TroparcelPlugin {
     // One journal per plugin instance, shared with its engine: the
     // dashboard shows what happened, including before an engine exists.
     this.journal = new Journal()
-    this.context = { ...context, logger: this.journal.watch(context.logger) }
+    this.context = context
     this.rawOptions = options
     this.options = this.mergeOptions(options)
     this.options.journal = this.journal
@@ -228,6 +228,7 @@ class TroparcelPlugin {
     }
     if (!this._unloading) {
       this.context.logger.warn('Troparcel: no project opened within a minute — not syncing')
+      this.journal.problem('No project opened within a minute, so Troparcel is not syncing. Open a project, then reopen this page.')
     }
   }
 
@@ -249,6 +250,7 @@ class TroparcelPlugin {
 
         if (!/timeout|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg)) {
           this.context.logger.warn(`Troparcel: not syncing — ${msg}`)
+          this.journal.problem(`Not syncing: ${msg.charAt(0).toUpperCase()}${msg.slice(1)}`)
           return
         }
         this.context.logger.info(

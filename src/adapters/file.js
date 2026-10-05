@@ -65,18 +65,18 @@ class FileAdapter extends SyncAdapter {
   async connect() {
     if (!this.options.syncDir && this.options.syncFolder) {
       let roots = require('../sync-folders').syncRoots().map(([label]) => label)
-      throw new Error(`no folder named "${this.options.syncFolder}" in ${roots.length ? roots.join(', ') : 'any sync folder on this computer'}. ` +
-        'Has it been shared with you, and has your sync client finished copying it?')
+      throw new Error(`no folder named “${this.options.syncFolder}” in ${roots.length ? roots.join(', ') : 'any sync folder on this computer'}. ` +
+        'Check that it has been shared with you and that your sync app has finished copying it.')
     }
-    if (!this.options.syncDir) throw new Error('the shared folder is not set')
+    if (!this.options.syncDir) throw new Error('no shared folder is set. Fill in Connection in Troparcel’s settings')
     let stat
     try {
       stat = fs.statSync(this.options.syncDir)
     } catch {
-      throw new Error(`the shared folder "${this.options.syncDir}" does not exist`)
+      throw new Error(`the shared folder “${this.options.syncDir}” is not on this computer. Check the path in Connection, or that your sync app has created it`)
     }
     if (!stat.isDirectory()) {
-      throw new Error(`"${this.options.syncDir}" is not a folder`)
+      throw new Error(`“${this.options.syncDir}” is a file, not a folder. Set Connection to the folder that holds it`)
     }
     fs.mkdirSync(this._dir, { recursive: true })
 

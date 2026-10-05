@@ -5,14 +5,15 @@
  * events in memory, newest first. Nothing here is saved or shared.
  *
  *   let journal = new Journal()
- *   journal.event('Received 3 notes from alice')
+ *   journal.event('alice added 3 notes, on one item')
  *   journal.problem('Cannot reach the server at …')
  *   journal.conflict({ identity, field, localValue, remoteValue, author })
  *   journal.recent()          // [{ at, text }]
  *   journal.openConflicts()   // one per item and field, latest kept
  *
- * `watch(logger)` returns a logger that also records its warnings and
- * errors as problems, so every warning Troparcel writes reaches the page.
+ * Problems are written for the person reading the dashboard, where each
+ * one happens; technical detail stays in Tropy's log. (Recording every
+ * log warning showed people lines like "applyTemplates failed".)
  */
 class Journal {
   constructor(size = 200) {
@@ -60,25 +61,6 @@ class Journal {
   _push(list, entry) {
     list.unshift(entry)
     if (list.length > this.size) list.length = this.size
-  }
-
-  /** A logger that also records warnings and errors here. */
-  watch(logger) {
-    let journal = this
-    let text = args => args.map(a => (typeof a === 'string' ? a : (a && a.message) || '')).filter(Boolean).join(' ')
-      .replace(/^\[troparcel\]\s*/, '')
-    return new Proxy(logger, {
-      get(target, prop) {
-        if (prop === 'warn' || prop === 'error') {
-          return (...args) => {
-            journal.problem(text(args))
-            return target[prop](...args)
-          }
-        }
-        let value = target[prop]
-        return typeof value === 'function' ? value.bind(target) : value
-      }
-    })
   }
 }
 
