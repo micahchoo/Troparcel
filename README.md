@@ -2,113 +2,109 @@
 
 > Written by an AI (Claude Opus 5.5). Tested against real Tropy, but not yet used by a group for real work. See [How far to trust it](#how-far-to-trust-it).
 
-Troparcel is a plugin for [Tropy](https://tropy.org) that lets a group work on the same photos together. A note, tag, title, selection or transcription one person adds appears in everyone else's project within seconds.
+## The problem
 
-Each person still has their own Tropy project. They can work offline; what they did merges when they reconnect, and nobody's work overwrites anyone else's.
+[Tropy](https://tropy.org) is a free program for researchers who work with photos of archival material: letters, ledgers, photographs. You import your photos into a Tropy *project*, then describe them: titles and dates, tags, notes, transcriptions, marked regions.
+
+A Tropy project belongs to one person on one computer. When several people research the same material, each one's notes stay in their own project. Nobody sees what the others found, unless someone exports files and someone else merges them by hand.
+
+## What Troparcel does
+
+Troparcel is a plugin that connects the projects of a group. When you add a note, a tag or a title, it appears in everyone else's project within seconds, and theirs appear in yours. Everyone keeps their own project and keeps working in Tropy as before. You can work offline; your work is sent when you reconnect, and nobody's work overwrites anyone else's.
 
 [![Alice writes a note in her Tropy; it arrives in bob's, marked "from alice"](docs/media/note-arrives.gif)](docs/media/troparcel.mp4)
 
-**[Watch the 68-second film](docs/media/troparcel.mp4)**: real Tropy windows, two people and a newcomer, filmed by the test harness (`npm run film`).
+**[Watch the 68-second film](docs/media/troparcel.mp4)** of two real Tropys and a newcomer.
 
-## What it looks like
+## How it works
 
-You keep using Tropy as before. A collaborator's work arrives as ordinary Tropy data, with a few marks so you can tell it apart:
+**A room.** The group shares a *room*: one place where each member's Troparcel writes what they add, and reads what the others added. A room can merge changes that several people make at the same moment, so nothing is lost and nobody waits for anyone.
 
-- items they worked on carry a tag with their name, such as **`@alice`**;
-- a list, **Troparcel: received**, gathers the items that changed;
-- their notes end with one small line: `[troparcel:… from alice — safe to delete, do not edit]`.
+**Where the room lives.** Either in a folder you already sync between computers (Nextcloud, Dropbox, Google Drive, Syncthing), or on a small Troparcel server that one person in the group runs. A shared folder needs nothing new; a server is faster and shows who is online.
 
-Their changes do not enter your undo history, and they never move what you are looking at.
+**An invite.** To join, a member pastes an *invite* into Troparcel: a short line such as `troparcel://folder/tropy-letters`. It says where the room is. One invite works for the whole group.
 
-## Choose a room
+**Your name.** Each member chooses a name. Others see it on everything you add: your notes end with "— alice", and items you worked on get a tag `@alice`.
 
-A group shares one **room**. It lives on a small server you run, or in a folder you already sync (Nextcloud, Dropbox, Syncthing). There are three kinds:
+**Matching items.** Troparcel knows that alice's item and bob's are the same one because they hold the same photo files. So everyone imports the same files, or, in a *project room*, Troparcel brings the photos to the members who lack them.
 
-| Room                | Choose it when                                    | Photos                                                                |
-| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------- |
-| **Overlay**         | your photos may not be copied, e.g. archive rules | Stay on each computer. Everyone imports the same files                |
-| **Project** (6.1)   | the group may share its photos                    | Travel with the room. A newcomer starts from an empty project         |
-| **Encrypted** (6.1) | the server must not read the work                 | As in a project or overlay room, but the server holds only ciphertext |
+## Get started
 
-In an overlay room, Troparcel recognises an item by its photo files' checksums. Everyone must import the same files, byte for byte; a re-saved or converted copy is a different photo, and that item does not sync.
+You need Tropy 1.17 or later, opened at least once, and [Node.js](https://nodejs.org) for the installer.
 
-## Set it up
-
-**1. One person starts a server** (skip this for a shared folder):
+**1. Install.** In a terminal:
 
 ```bash
-git clone https://github.com/micahchoo/Troparcel.git
-cd Troparcel
-docker compose up -d        # or: cd server && npm install && node index.js
+npx github:micahchoo/Troparcel install
 ```
 
-It prints a **connection string** for each room. Add `&photos=1` to make a project room, and `&key=…` to encrypt it (`node server/index.js --new-key` makes a key):
+It finds Tropy on your computer (also the Flatpak version on Linux) and installs Troparcel. Restart Tropy.
 
-```
-troparcel://ws/192.168.0.20:2468/letters?token=7f3k9q2mz8x1p4vw
-```
+No Node.js? Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help › Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy. (The current release, 6.0.0, does not have the setup page yet; the next one will.)
 
-For a shared folder, the connection is simply the folder's path on each computer.
+**2. Set up.** A page opens in your browser. Choose your name, then either:
 
-**2. Everyone installs the plugin** (Tropy 1.17 or later). Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help > Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy.
+- **Join a group:** paste the invite someone sent you, or
+- **Start a new room:** pick one of your sync folders (Nextcloud, Dropbox…) and name the room. Share that folder with your group in its own app, then send them the invite the page shows.
 
-**3. Everyone fills in two fields** in **Preferences > Plugins > Troparcel**, then restarts Tropy:
+That is all. Later, **File › Export › Troparcel** in Tropy opens the same page: it shows whether sync works, who is online, what arrived, anything that needs a decision, and the invite for new members.
 
-- **Connection**: the connection string, or the shared folder's path;
-- **Your name**: a name nobody else in the group uses.
+The [Group Guide](docs/GUIDE.md) covers the other setups (a server on your network or on the internet) and what a group should agree on.
 
-The [Group Guide](docs/GUIDE.md) covers each case in detail: one computer, a local network, the internet behind TLS, a shared folder, and what to agree on as a team.
+## Choose a kind of room
 
-> The release, 6.0.0, has overlay rooms only. Features marked **6.1** are on `main` and not yet released; to use them now, build the zip yourself: `npm install && npm run pack`.
+| Room | Photos | Choose it when |
+|---|---|---|
+| **Shared notes** (the default) | Stay on each computer. Everyone imports the same files | Your photos may not be copied, for example under archive rules |
+| **Project room** | Travel with the room. A newcomer can start from an empty project | The group may share its photos |
+| **Private room** | Encrypted: the server or folder holds nothing it can read | Others run the server or the sync service |
 
-## What leaves your computer
+The setup page and the Group Guide show how to make each one.
 
-Shared: item metadata, tags, notes, selections, transcriptions and the templates you made. On request: lists, metadata on photos and selections, and your deletions. In a project room, also the photo files.
+## What is shared
 
-Never shared: file paths, Tropy's internal ids, your preferences, and the `@name` tags, list and footers Troparcel adds for you.
+Shared: titles, dates and other fields; tags; notes; marked regions (selections); transcriptions; templates you made. If you turn them on: lists, fields on photos and regions, and what you delete. In a project room, also the photo files.
 
-Before Troparcel changes anything in your project, it saves a JSON copy of the items it will change in `~/.troparcel/backups/<room>/`.
+Never shared: where files are on your computer, your Tropy settings, and the marks Troparcel adds for you (`@name` tags, the **Troparcel: received** list).
 
-## When two people edit the same thing
+Before Troparcel changes anything in your project, it saves a copy of what it will change, in `~/.troparcel/backups/`.
 
-- **A field** (title, date…): fields merge one by one. If two people change the same field before they sync, each keeps their own value and the clash is logged. Agree who fills in which fields.
-- **Notes, selections, transcriptions**: nobody overwrites anyone. Everyone's stay side by side, and only the author can delete theirs for the others.
-- **Tags**: adding beats removing. Names match regardless of case, as in Tropy.
-- **Lists**: matched by name.
+## When two people change the same thing
 
-[docs/CONFLICTS.md](docs/CONFLICTS.md) has the full rules.
+- **Notes, regions and transcriptions** never overwrite each other: everyone's stay side by side. Only the person who wrote one can remove it for the others.
+- **A field** (a title, a date): each field merges on its own. If you and someone else change the same one before either sees the other's change, both values are kept, one in each project, and Troparcel's page asks you which to use.
+- **Tags:** adding beats removing. Names match regardless of capitals.
+
+[docs/CONFLICTS.md](docs/CONFLICTS.md) has the exact rules.
 
 ## Is it safe?
 
-- A **room token** in the connection string keeps strangers out.
-- Each member's work is **signed** (6.1) with a key made on their own computer. Nobody can delete your notes for the group or write in your name, not even someone with the token.
-- An **encrypted** room (6.1) leaves the server nothing readable: no notes, titles, tag names or photos. Whoever has the connection string can read the room, so send it like a password.
-- Notes from others are **cleaned** before they reach Tropy; only the formatting Tropy's editor knows gets through.
-- The server does not speak TLS itself. Across the internet, put it behind a TLS proxy and use a `troparcel://wss/…` string; the guide shows how with Caddy.
+- **The room is closed** to anyone without the invite (a server room has a password in it).
+- **Your work is signed** with a key made on your computer: nobody can remove your notes for the group or write in your name, even with the invite.
+- **A private room is encrypted** on your computer before anything leaves it, photos included.
+- **Notes from others are cleaned** before they reach Tropy: only formatting Tropy's editor knows gets through.
+- Over the internet, run the server behind HTTPS; the [Group Guide](docs/GUIDE.md) shows how.
 
-## Publish your work as IIIF (6.1)
+## Publish your work as IIIF
 
-When the work is ready to show, Troparcel can turn selected items into [IIIF](https://iiif.io) manifests, the format museum and library viewers read. Each photo becomes a canvas, each note and transcription a web annotation, and a note on a selection sits on that region. Add a second Troparcel entry in Tropy's plugin preferences, set **Publish as IIIF to** and **IIIF web address**, and use **File > Export** with it.
+When the work is ready to show, Troparcel can turn selected items into [IIIF](https://iiif.io), the format museum and library viewers read: each photo a page, each note and transcription an annotation, a note on a region placed on it. Add a second Troparcel entry in **Preferences › Plugins**, set **Publish as IIIF to** and **IIIF web address**, then use **File › Export** with it.
 
 ## How far to trust it
 
-Every part below has run in real Tropy instances, started headless by the test suite:
+Each item below has run in real Tropy, started by the test suite:
 
 - every kind of data travels both ways, once, and Tropy saves it;
-- an empty Tropy receives a whole project, photos and notes, from one connection string; also encrypted, with the server storing no plaintext;
+- a newcomer sets Troparcel up from the setup page, and settings take effect without restarting Tropy;
+- an empty project receives a whole project room, encrypted or not;
 - a forged deletion is ignored and repaired;
-- **File > Export** publishes IIIF that the IIIF parser reads;
-- a first sync of 10,000 items grows linearly with their number.
+- a 10,000-item project starts syncing 1.5 s after it opens.
 
 Not yet checked:
 
-- **use by real people.** No group has used it for real work. A long automated run of several Tropy instances (random edits, restarts, dropped connections) stands in for that; it finds sync bugs, not awkward workflows;
-- how fast a 10,000-item project starts after the latest fixes (being measured);
+- **use by real people.** No group has used it for real work. Long automated runs (several Tropys making random changes for an hour, with restarts and outages) stand in for that. They have found and fixed real bugs, and runs continue;
 - a published IIIF folder in an actual viewer.
 
-Tropy gives plugins no supported way to change a project, so Troparcel uses Tropy's internal store. Every change pushed to Troparcel is tested against the current Tropy release and Tropy's development branch, and a drift test checks each internal detail it relies on, so a breaking change in Tropy shows up before a release does.
-
-**Upgrade a whole group at once.** 6.0 rewrote the room's layout: it converts a room from 5.x, but 5.x cannot read the result.
+The released version, [6.0.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.0.0), lacks the setup page, project and private rooms, signing and IIIF. The installer installs the current version. **Upgrade a whole group at once:** a room written by 6.x cannot be read by 5.x.
 
 ## For developers
 
@@ -116,10 +112,11 @@ Tropy gives plugins no supported way to change a project, so Troparcel uses Trop
 npm install
 npm test        # unit, scenario and integration tests
 npm run e2e     # real Tropy instances, headless (Flatpak); see test/README.md
-npm run build   # bundle src/ into index.js
+npm run soak    # an hour of random changes, restarts and outages
+npm run film    # record the explainer from real Tropy
 ```
 
-[docs/DEVELOPER.md](docs/DEVELOPER.md) explains the design and the Tropy internals it depends on. [ROADMAP.md](ROADMAP.md) shows where it is going; [docs/CHANGELOG.md](docs/CHANGELOG.md), what changed. Server settings are in the [Group Guide](docs/GUIDE.md#3-coordinator-set-up-a-server).
+[docs/DEVELOPER.md](docs/DEVELOPER.md) explains the design, [ROADMAP.md](ROADMAP.md) the plan, [docs/CHANGELOG.md](docs/CHANGELOG.md) the changes.
 
 ## License
 
