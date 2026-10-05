@@ -1,6 +1,30 @@
 # Troparcel Changelog
 
-## Unreleased (6.1)
+## v6.1.0 (2026-10-05) — Set up from a page, rooms for every group
+
+### New
+
+- **A setup page.** Troparcel opens a page in your browser the first time:
+  choose a name, then join with an invite or start a room. Later, File ›
+  Export › Troparcel opens it again to show whether sync works, who is online,
+  what arrived, the conflicts to settle, and the invite for new members.
+- **Rooms in a folder you already sync** (`troparcel://folder/<name>`): the
+  page finds Nextcloud, Dropbox, Google Drive, OneDrive, Syncthing and others,
+  or any folder you name.
+- **Project rooms:** photos travel with the room, so a newcomer can start from
+  an empty project.
+- **Private rooms:** everything, photos too, is encrypted on your computer
+  (AES-256-GCM) before it reaches the server or the folder.
+- **Signed authorship:** each member signs what they write, so nobody can
+  remove another member's work for the group or write in their name.
+- **Publish as IIIF:** File › Export with a second Troparcel entry writes
+  manifests and annotations that museum and library viewers read.
+- **An installer:** `npx github:micahchoo/Troparcel install` finds Tropy,
+  including the Flatpak, and installs Troparcel.
+- **Settings apply without restarting Tropy**, and a 10,000-item project starts
+  syncing 1.5 s after it opens.
+- A received note ends with "— alice", not a line of internal key; problems
+  and settings read in plain words.
 
 ### Found by long soak runs (several Tropys, restarts, outages)
 

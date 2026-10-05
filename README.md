@@ -40,7 +40,7 @@ npx github:micahchoo/Troparcel install
 
 It finds Tropy on your computer (also the Flatpak version on Linux) and installs Troparcel. Restart Tropy.
 
-No Node.js? Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help › Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy. (The current release, 6.0.0, does not have the setup page yet; the next one will.)
+No Node.js? Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help › Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy.
 
 **2. Set up.** When Tropy starts, a setup page opens in your browser. The example below shows what to do on it.
 
@@ -54,7 +54,7 @@ Ada and Ben transcribe the same box of letters. Both have Nextcloud on their com
 
 1. Ada installs Troparcel and restarts Tropy. The setup page opens.
 2. Under **Your name**, Ada types `ada`. Others see this name on Ada's work.
-3. Under **Start a new room**, Ada chooses **In: Nextcloud**, types the room name `tropy-letters` and clicks **Start the room**. Troparcel makes the folder `~/Nextcloud/tropy-letters`. The room is the files in it.
+3. Under **Start a new room**, Ada chooses **In: Nextcloud**, types the room name `tropy-letters`, leaves **Photos** on **Shared notes** and clicks **Start the room**. Troparcel makes the folder `~/Nextcloud/tropy-letters`. The room is the files in it. (A folder Troparcel does not list, such as a network share, is under **Another folder…**.)
 4. In Nextcloud, Ada shares the folder `tropy-letters` with Ben, and lets Ben **edit** it. With a read-only share, Ben receives Ada's work but cannot send any.
 5. The page now shows the invite:
 
@@ -91,7 +91,7 @@ The [Group Guide](docs/GUIDE.md) covers the other setups (a server on your netwo
 | **Project room** | Travel with the room. A newcomer can start from an empty project | The group may share its photos |
 | **Private room** | Encrypted: the server or folder holds nothing it can read | Others run the server or the sync service |
 
-The setup page and the Group Guide show how to make each one.
+On the setup page, **Photos** chooses between shared notes and a project room, and **Private** encrypts either kind.
 
 ## What is shared
 
@@ -133,10 +133,10 @@ Each item below has run in real Tropy, started by the test suite:
 
 Not yet checked:
 
-- **use by real people.** No group has used it for real work. Long automated runs (several Tropys making random changes for an hour, with restarts and outages) stand in for that. They have found and fixed real bugs, and runs continue;
+- **use by real people.** No group has used it for real work. Long automated runs stand in for that: three Tropys and two scripted members make random changes for 30 to 60 minutes, while Tropys restart and the server or the sync app goes offline, on a server and in a shared folder, in project and private rooms. They found and fixed four real bugs; every run since passes;
 - a published IIIF folder in an actual viewer.
 
-The released version, [6.0.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.0.0), lacks the setup page, project and private rooms, signing and IIIF. The installer installs the current version. **Upgrade a whole group at once:** a room written by 6.x cannot be read by 5.x.
+The current release is [6.1.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.1.0). Coming from 5.x, **upgrade a whole group at once:** a room written by 6.x cannot be read by 5.x.
 
 ## For developers
 

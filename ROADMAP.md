@@ -9,15 +9,15 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | Phase | Status | Exit test | Next step |
 |---|---|---|---|
 | 0 · Ground truth | Done | Passed | — |
-| 1 · Trustworthy overlay | Released as 6.0.0 | Soak test built; first 60-minute run in progress | Read the run; fix what it finds |
+| 1 · Trustworthy overlay | Done (6.0, soak fixes in 6.1) | Passed: 30- and 60-minute soaks, on a server and in a shared folder, in overlay, project and private rooms | A soak where members share fields and settle conflicts on the page |
 | 2 · Stay compatible with Tropy | Done | Passed: CI against Tropy `main` | — |
 | 3 · Scale | Done, one follow-up | Start: passed (1.5 s for 10,000 items). Memory: no baseline | Keep Troparcel's own markings out of an item's hash |
-| 4 · Shared project | Done (6.1), one follow-up | Passed in real Tropy | A received photo has no name in the photo list |
+| 4 · Shared project | Done (6.1) | Passed in real Tropy | — |
 | 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
 | 6 · Publishable rooms | IIIF export done (6.1) | Half: export passes; no viewer opened yet | Open a published folder in a IIIF viewer |
 | 7 · Easy for beginners | Mostly done (6.1) | The setup page passes in real Tropy | Hosted relay: not planned (folder-first instead) |
 
-6.1 is everything on `main` since 6.0.0; it is not released yet. A 68-second film of real Tropy (`npm run film`, `docs/media/troparcel.mp4`) shows what 6.1 does; filming it found a real bug (attribution credited people for entries that changed nothing locally), now fixed. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
+6.1.0 is everything since 6.0.0. A 68-second film of real Tropy (`npm run film`, `docs/media/troparcel.mp4`) shows what 6.1 does; filming it found a real bug (attribution credited people for entries that changed nothing locally), now fixed. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
 
 ## Phase 0 · Ground truth — done
 
