@@ -6,6 +6,10 @@ Troparcel is a plugin for [Tropy](https://tropy.org) that lets a group work on t
 
 Each person still has their own Tropy project. They can work offline; what they did merges when they reconnect, and nobody's work overwrites anyone else's.
 
+[![Alice writes a note in her Tropy; it arrives in bob's, marked "from alice"](docs/media/note-arrives.gif)](docs/media/troparcel.mp4)
+
+**[Watch the 68-second film](docs/media/troparcel.mp4)**: real Tropy windows, two people and a newcomer, filmed by the test harness (`npm run film`).
+
 ## What it looks like
 
 You keep using Tropy as before. A collaborator's work arrives as ordinary Tropy data, with a few marks so you can tell it apart:
