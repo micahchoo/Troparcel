@@ -1,5 +1,84 @@
 # Troparcel Changelog
 
+## v6.0.0 (2026-10-05) — Room schema 5, writes Tropy can trust
+
+**Upgrade everyone in a group at the same time.** Troparcel 6 converts a
+room written by Troparcel 5 the first time it opens it, but Troparcel 5
+cannot read the new layout.
+
+### Data loss fixed
+
+- **Concurrent first writes lost a peer's annotations.** The v4 room nested a
+  map per item and per section, created on first write. When two peers first
+  wrote the same item (or the first note, tag, … on it) before seeing each
+  other's change, Yjs kept one map and discarded the other with its contents:
+  200 of 200 runs lost data. Schema 5 keeps every section top-level, keyed
+  `<item>|<key>`, so concurrent writes only ever compete for single entries.
+- **A collaborator's second edit to a field was reverted.** The merge base was
+  updated on push but not on apply, so after receiving a value a peer took its
+  own copy for a local edit, refused the next remote value and pushed the old
+  one back. The base is now recorded on apply too, and saved to disk, so a
+  restart no longer makes every field look locally edited.
+- **Shortened notes were never applied** (a "local text contains remote text"
+  shortcut). Applied notes are now tracked by the exact remote content.
+- **Shared-folder sync lost writes.** Every peer wrote one shared file. Each
+  peer now writes only its own file and reads the others'.
+- **Templates received from a room were never saved** (dispatched with
+  `meta.done`, which skips Tropy's database command); gone after a restart.
+
+### Tropy writes
+
+- Every write goes through the Redux store as a Tropy command, with the
+  payload shapes of Tropy's own action creators. Troparcel no longer uses
+  Tropy's HTTP API: no API port to configure, no port conflicts between two
+  Tropy instances. Before, remote tags, metadata and transcriptions failed
+  whenever Tropy's API was not on port 2019.
+- A collaborator's change is no longer added to your undo history. (The
+  "one undo entry per sync" wrapper crashed Tropy's history reducer.)
+- Receiving a note no longer moves your view to it.
+- At start, Troparcel checks that Tropy's state looks as expected and syncs
+  nothing if it does not.
+- No more empty dialog on every sync start (`dialog.notify` is a modal).
+
+### Attribution
+
+- `@name` tags now work: they were created without a name and failed. Their
+  colours are Tropy's preset colours.
+- Items that received a collaborator's change are added to the list
+  **Troparcel: received**.
+- Attribution tags, the received list and Troparcel's metadata fields are
+  never pushed back to the room.
+
+### Setup
+
+- Two fields: **Connection** (a connection string, a `ws://` address, or a
+  shared-folder path) and **Your name**. Seven options in all, down from 23.
+  Settings saved by Troparcel 5 are still read.
+- The server prints a ready-to-paste connection string per room. New
+  `PUBLIC_URL` sets the address it uses; `troparcel://wss/…` strings mean TLS.
+- The shared-folder transport works (it was written but never connected).
+  The HTTP snapshot transport is removed.
+
+### Server
+
+- Tombstone compaction purged a loaded copy and saved nothing. It now purges
+  the open room, or stores the purge for a closed one.
+- The Docker image builds from the repository root and runs on Node 24.
+
+### Removed
+
+- The HTTP-API fallback (`api-client.js`, `enrich.js`), the project-file
+  watcher (chokidar) and `rollback()`, which re-wrote each note's current
+  text and so restored nothing. Backups remain as JSON to read.
+
+### Tests
+
+- `npm run e2e`: two real Tropy instances (Flatpak, headless) and a synthetic
+  peer, end to end.
+- Scenario tests run real sync engines over a fake Tropy store that enforces
+  Tropy's command rules.
+- CI against Tropy 1.17.3 and `main`.
+
 ## v5.0.0 (2026-02-11) — Schema v4, Logic-Based Conflicts
 
 

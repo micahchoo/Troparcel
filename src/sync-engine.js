@@ -1,76 +1,53 @@
 'use strict'
 
 const os = require('os')
-const chokidar = require('chokidar')
 const Y = require('yjs')
-const { WebsocketProvider } = require('y-websocket')
-const WS = require('ws')
-const { ApiClient } = require('./api-client')
 const { StoreAdapter } = require('./store-adapter')
+const { createTransport } = require('./adapters')
 const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { BackupManager } = require('./backup')
-const { SyncVault } = require('./vault')
-const { withHistoryMerge } = require('./history-tick')
+const { SyncVault, defaultRoot } = require('./vault')
+const { RECEIVED_LIST } = require('./local-only')
+const { Assignments } = require('./assignments')
 
 /**
- * Sync Engine v5.0 — Store-First Architecture + Schema v4.
+ * SyncEngine — keeps one Tropy project and one room in step.
  *
- * When the Redux store is available (background sync in project window),
- * all reads come from store.getState() and writes use store.dispatch().
- * This eliminates the N+1 HTTP enrichment problem and fixes broken write
- * operations (selections, note updates, list item management).
+ * Reads and writes go through StoreAdapter (Tropy's Redux store); the room
+ * is a Yjs document carried by a transport (a Troparcel server or a shared
+ * folder, see adapters/). A cycle APPLIES what collaborators wrote, then
+ * PUSHES what the owner wrote:
  *
- * Falls back to the HTTP API when the store is not available (temp engines
- * created in export/import hooks, or if the store hasn't loaded yet).
+ *   local change  → store.subscribe → debounce → syncOnce (apply, push)
+ *   remote change → doc observer    → debounce → applyPendingRemote
+ *   safety net    → every N seconds → syncOnce
  *
- * Inherited from v3.1:
- *   - R1:  No double startup delay (accepts skipStartupDelay flag)
- *   - R2:  Async mutex prevents concurrent syncOnce/applyPendingRemote
- *   - R3:  waitForConnection cleans up listener on timeout
- *   - R5:  Exponential backoff on consecutive errors
- *   - R7:  Vault pruning on each sync cycle
- *   - R9:  Superseded — chokidar handles its own restart/error recovery (was: fs.watch health monitor + manual restart)
- *   - S3:  Validation failures block apply
- *   - P1:  Parallel sub-resource fetching in enrichItem (API fallback only)
- *   - P4:  checksumMap computed once per item in pushLocal
- *   - P5:  getStatus uses cached annotation count
- *   - P6:  Write delay only between items, not between individual fields
- *   - C1:  Stable note identity via vault mapping
- *   - C2:  List sync by name (not local ID)
- *   - C3:  Stable transcription identity via vault mapping
+ * One mutex serialises the cycles. While Troparcel writes to Tropy it
+ * suppresses change detection, so its own writes are not pushed back.
  *
- * New in v4.0:
- *   - SF1: Reads from Redux store via StoreAdapter (no HTTP GET calls)
- *   - SF2: Writes via store.dispatch() for selections, notes, lists
- *   - SF3: Change detection via store.subscribe() (replaces chokidar)
- *   - SF4: ProseMirror-to-HTML conversion for note content in push path
- *   - SF5: Adapter.suppressChanges() prevents feedback loops during apply
- *
- * Methods are organized into mixins:
- *   - push.js:   local → CRDT writes (pushLocal, pushMetadata, pushTags, etc.)
- *   - apply.js:  CRDT → local writes (applyRemoteAnnotations, applyNotes, etc.)
- *   - enrich.js: HTTP API item enrichment (fallback when store unavailable)
+ * The work itself is in three mixins on this prototype:
+ *   push.js   local → room
+ *   apply.js  room → local
  */
 class SyncEngine {
-  constructor(options, logger, store = null) {
+  constructor(options, logger, store) {
+    if (!store) throw new Error('SyncEngine needs the project window\'s Redux store')
+
     this.options = options
     this.logger = logger
     this.debug = options.debug === true
 
     this.doc = null
-    this.provider = null
-    this.api = new ApiClient(options.apiPort, logger)
-    this.adapter = store ? new StoreAdapter(store, logger) : null
+    this.transport = null
+    this.adapter = new StoreAdapter(store, logger)
     this.backup = null
 
     this.localIndex = new Map()
     this.previousSnapshot = new Map()
     this.safetyNetTimer = null
-    this.unsubscribe = null
+    this.unsubscribe = []
     this._storeUnsubscribe = null
-    this.fileWatcher = null
-    this.projectPath = null
 
     this.state = 'idle'
     this.lastSync = null
@@ -79,44 +56,31 @@ class SyncEngine {
     this._paused = false
     this._consecutiveErrors = 0
 
-    // Debounce timers
     this._localDebounceTimer = null
     this._remoteDebounceTimer = null
     this._pendingRemoteIdentities = new Set()
+    this._projectDirty = true
 
-    // Stable userId — includes apiPort so different Tropy instances on the
-    // same machine get distinct IDs (e.g. AppImage:2019 vs Flatpak:2021)
-    // Must be set before vault load so each instance gets its own vault file.
+    // Includes the API port so two Tropy instances on one machine differ.
     this._stableUserId = options.userId ||
       `${os.userInfo().username}@${os.hostname()}:${options.apiPort || 2019}`
 
-    // State tracker (load persisted keys to prevent ghost notes on restart)
+    this.dataDir = options.dataDir || defaultRoot()
     this.vault = new SyncVault()
-    this.vault.loadFromFile(this.options.room, this._stableUserId)
+    this.vault.loadFromFile(this.options.room, this._stableUserId, this.dataDir)
 
-    // Retry counter for failed note creates
-    this._applyFailureCount = 0
     this._failedNoteKeys = new Set()
-
-    // Event queue for local changes detected during apply phase
     this._applyingRemote = false
     this._queuedLocalChange = false
     this._syncRequested = false
     this._stopping = false
 
-    // Annotation-specific dirty flag — set by the annotations observer,
-    // cleared after a full apply in syncOnce. Replaces state-vector hashing
-    // for change detection (state vectors include heartbeat writes to the
-    // users map, which caused unnecessary apply cycles every safety-net poll).
-    this._remoteAnnotationsDirty = true  // true to force initial apply
+    // Set by the annotations observer, cleared after a full apply.
+    this._remoteAnnotationsDirty = true
 
-    // R2: Async mutex — chains async operations to prevent concurrent access
     this._syncLock = Promise.resolve()
-
-    // Transaction origin marker
     this.LOCAL_ORIGIN = 'troparcel-local'
 
-    // C2: List name cache (listId -> listName)
     this._listNameCache = new Map()
     this._listCacheRefreshedAt = 0
   }
@@ -124,20 +88,14 @@ class SyncEngine {
   // --- Logging ---
 
   _log(msg, data) {
-    if (data) {
-      this.logger.info(data, `[troparcel] ${msg}`)
-    } else {
-      this.logger.info(`[troparcel] ${msg}`)
-    }
+    if (data) this.logger.info(data, `[troparcel] ${msg}`)
+    else this.logger.info(`[troparcel] ${msg}`)
   }
 
   _debug(msg, data) {
     if (!this.debug) return
-    if (data) {
-      this.logger.info(data, `[troparcel:debug] ${msg}`)
-    } else {
-      this.logger.info(`[troparcel:debug] ${msg}`)
-    }
+    if (data) this.logger.info(data, `[troparcel:debug] ${msg}`)
+    else this.logger.info(`[troparcel:debug] ${msg}`)
   }
 
   _formatAge(date) {
@@ -151,12 +109,13 @@ class SyncEngine {
     this._applyStats = {
       notesCreated: 0, notesDeduped: 0, notesUpdated: 0, notesRetracted: 0,
       notesFailed: 0,
-      tagsAdded: 0, tagsDeduped: 0,
-      selectionsCreated: 0, selectionsDeduped: 0,
+      tagsAdded: 0,
+      selectionsCreated: 0,
       metadataUpdated: 0,
       transcriptionsCreated: 0,
       listsAdded: 0,
-      itemsProcessed: 0, itemsChanged: 0
+      itemsProcessed: 0, itemsChanged: 0,
+      receivedItemIds: new Set()
     }
   }
 
@@ -180,21 +139,13 @@ class SyncEngine {
     }
   }
 
-  /**
-   * Read all items fully enriched from the store adapter.
-   * Used by syncOnce and import hook when store is available.
-   */
-  readAllItemsFull() {
-    if (!this.adapter) return []
+  /** Every local item that has at least one photo, read from the store. */
+  readSyncableItems() {
     return this.adapter.getAllItemsFull()
+      .filter(item => (item.photo || []).some(p => p.checksum))
   }
 
-  // --- Async mutex (R2) ---
-
-  /**
-   * Acquire the sync lock. Returns a release function.
-   * Prevents concurrent syncOnce/applyPendingRemote operations.
-   */
+  /** Acquire the sync mutex. Resolves to a release function. */
   _acquireLock() {
     let release
     let prev = this._syncLock
@@ -207,176 +158,79 @@ class SyncEngine {
   async start(opts = {}) {
     if (this.state === 'connected' || this.state === 'connecting') return
 
+    let probe = this.adapter.probe()
+    if (!probe.ok) {
+      throw new Error(
+        `this Tropy does not look like one Troparcel supports — ${probe.problems.join('; ')}. ` +
+        'Nothing was synced.')
+    }
+
     this.state = 'connecting'
     this.logger.info({
-      server: this.options.serverUrl,
+      transport: this.options.transport || 'websocket',
       room: this.options.room,
       syncMode: this.options.syncMode
-    }, 'Sync engine v5.0 (schema v4) starting')
+    }, 'Troparcel sync engine starting')
 
     try {
       this.doc = new Y.Doc()
+      this.transport = createTransport(this.doc,
+        { ...this.options, peerId: this._stableUserId }, this.logger)
+      await this.transport.connect()
 
-      // Always use Node.js ws module — browser WebSocket is blocked by Tropy's CSP
-      let WSImpl = WS
+      this._migrateRoom()
+      this._startPresence()
 
-      this.provider = new WebsocketProvider(
-        this.options.serverUrl,
-        this.options.room,
-        this.doc,
-        {
-          connect: true,
-          params: this.options.roomToken
-            ? { token: this.options.roomToken }
-            : {},
-          maxBackoffTime: 10000,
-          resyncInterval: 30000,
-          WebSocketPolyfill: WSImpl
-        }
-      )
-
-      // Connection lifecycle logging
-      this.provider.on('status', (e) => {
-        if (e.status === 'connected') {
-          this.logger.info(`[troparcel] connected to ${this.options.serverUrl}`)
-        } else if (e.status === 'disconnected') {
-          this.logger.info('[troparcel] disconnected from server, reconnecting...')
-        }
-      })
-      this.provider.on('connection-error', (e) => {
-        this.logger.warn(
-          `[troparcel] connection error: ${e.message || String(e)} — ` +
-          'check that the Troparcel server is running')
-      })
-      this.provider.on('connection-close', (e) => {
-        if (e.code !== 1000) {
-          this.logger.info(`[troparcel] connection closed (code: ${e.code}${e.reason ? ', ' + e.reason : ''}), reconnecting...`)
-        }
+      this.backup = new BackupManager(this.options.room, this.logger, {
+        dataDir: this.dataDir,
+        maxBackups: this.options.maxBackups,
+        maxNoteSize: this.options.maxNoteSize,
+        maxMetadataSize: this.options.maxMetadataSize,
+        tombstoneFloodThreshold: this.options.tombstoneFloodThreshold
       })
 
-      await this.waitForConnection()
+      if (this.options.syncMode === 'auto') this._observeRoom()
 
-      // Stamp schema version in room map
-      schema.setSchemaVersion(this.doc)
-
-      // Migrate any mixed-case tag keys to lowercase (one-shot, idempotent)
-      this._migrateTagKeysToLowercase()
-
-      // Set presence via Awareness protocol (replaces registerUser + heartbeat)
-      if (this.provider.awareness) {
-        // V3 a646: prefer an explicit displayName option so peers see a human
-        // label (e.g. "alice") rather than the cryptic stableUserId
-        // ("alice@host:2019"). Falls back to userId when no name is set.
-        let localDisplayName = this.options.displayName || this._stableUserId
-        // Register our own displayName locally too, so self-attribution
-        // (if it ever fires) resolves consistently.
-        this.vault.setDisplayName(this._stableUserId, localDisplayName)
-
-        this.provider.awareness.setLocalStateField('user', {
-          userId: this._stableUserId,
-          name: localDisplayName,
-          joinedAt: Date.now()
-        })
-
-        this._awarenessHandler = ({ added, updated, removed }) => {
-          this.peerCount = 0
-          this.provider.awareness.getStates().forEach((state, clientId) => {
-            if (clientId !== this.doc.clientID && state.user) {
-              this.peerCount++
-              // V3 a646: cache peer displayName so _applyAttribution can
-              // resolve userId → human label when building @tags + contributors.
-              if (state.user.userId && state.user.name) {
-                this.vault.setDisplayName(state.user.userId, state.user.name)
-              }
-            }
-          })
-        }
-        this.provider.awareness.on('change', this._awarenessHandler)
-      }
-
-      // Set up backup manager
-      this.backup = new BackupManager(
-        this.options.room,
-        this.api,
-        this.logger,
-        {
-          maxBackups: this.options.maxBackups,
-          maxNoteSize: this.options.maxNoteSize,
-          maxMetadataSize: this.options.maxMetadataSize,
-          tombstoneFloodThreshold: this.options.tombstoneFloodThreshold
-        }
-      )
-
-      // Set up CRDT observer for remote changes
-      if (this.options.syncMode === 'auto') {
-        this.unsubscribe = schema.observeAnnotationsDeep(
-          this.doc,
-          (changes) => { this.handleRemoteChanges(changes) },
-          this.LOCAL_ORIGIN
-        )
-      }
-
-      // Monitor connection status for state tracking
       this._statusHandler = (event) => {
         if (event.status === 'connected') {
           this.state = 'connected'
-          this._log(`reconnected to room "${this.options.room}"`)
+          this._log(`connected to ${this.transport.displayAddress}`)
         } else if (event.status === 'disconnected') {
           this.logger.warn('[troparcel] lost connection, will retry automatically')
         }
       }
-      this.provider.on('status', this._statusHandler)
+      this.transport.on('status', this._statusHandler)
 
       this.state = 'connected'
-      this._log(`ready — room "${this.options.room}", client ${this.doc.clientID}`)
+      this._log(`ready — room "${this.options.room}" over ${this.transport.transportName}, client ${this.doc.clientID}`)
 
-      // R1: Only wait for startup if not already waited by plugin
-      if (!opts.skipStartupDelay) {
-        let startupDelay = this.options.startupDelay
-        if (startupDelay > 0) {
-          await new Promise(r => setTimeout(r, startupDelay))
-        }
+      if (!opts.skipStartupDelay && this.options.startupDelay > 0) {
+        await new Promise(r => setTimeout(r, this.options.startupDelay))
       }
 
-      // Purge tombstones if requested (one-shot cleanup)
-      if (this.options.clearTombstones) {
-        this.purgeTombstones()
-      }
+      if (this.options.clearTombstones) this.purgeTombstones()
 
-      // Initial full sync (skipped for temp engines used in export/import)
       if (!opts.skipInitialSync) {
         await this.syncOnce()
         this._log(
-          `initial sync complete — ${this.localIndex.size} local items indexed, ` +
-          `${this.vault.annotationCount} shared items in CRDT, ` +
-          `${this.peerCount} peer(s) online`)
+          `initial sync complete — ${this.localIndex.size} local items, ` +
+          `${this.vault.annotationCount} shared items, ${this.peerCount} peer(s) online`)
       }
 
-      // Start file watching
-      if (this.options.autoSync && !opts.skipInitialSync) {
-        await this.startWatching()
-      }
+      if (this.options.autoSync && !opts.skipInitialSync) this.startWatching()
 
-      // Safety-net periodic poll with backoff (R5)
       let safetyInterval = this.options.safetyNetInterval * 1000
       if (safetyInterval > 0) {
-        this.safetyNetTimer = setInterval(() => {
-          this._scheduleSafetyNet()
-        }, safetyInterval)
+        this.safetyNetTimer = setInterval(() => this._scheduleSafetyNet(), safetyInterval)
       }
 
-      // Periodic status log — lets users know sync is alive without DevTools
-      this._statusLogCount = 0
-      let statusInterval = this.debug ? 30000 : 300000 // 30s debug, 5min normal
       this._statusLogTimer = setInterval(() => {
         if (this.state !== 'connected') return
-        this._statusLogCount++
         this._log(
-          `sync active — room "${this.options.room}", ` +
-          `${this.peerCount} peer(s), ` +
+          `sync active — room "${this.options.room}", ${this.peerCount} peer(s), ` +
           `${this.localIndex.size} local / ${this.vault.annotationCount} shared items` +
           (this.lastSync ? `, last sync ${this._formatAge(this.lastSync)}` : ''))
-      }, statusInterval)
+      }, this.debug ? 30000 : 300000)
 
     } catch (err) {
       this.state = 'error'
@@ -385,14 +239,46 @@ class SyncEngine {
     }
   }
 
-  /**
-   * Safety-net with exponential backoff (R5).
-   */
+  /** Presence over the transport's awareness channel, where it has one. */
+  _startPresence() {
+    let awareness = this.transport.getAwareness()
+    if (!awareness) return
+
+    let name = this.options.displayName || this._stableUserId
+    this.vault.setDisplayName(this._stableUserId, name)
+    awareness.setLocalStateField('user', {
+      userId: this._stableUserId, name, joinedAt: Date.now()
+    })
+
+    this._awarenessHandler = () => {
+      this.peerCount = 0
+      awareness.getStates().forEach((state, clientId) => {
+        if (clientId === this.doc.clientID || !state.user) return
+        this.peerCount++
+        if (state.user.userId && state.user.name) {
+          this.vault.setDisplayName(state.user.userId, state.user.name)
+        }
+      })
+    }
+    awareness.on('change', this._awarenessHandler)
+  }
+
+  /** Watch the room: annotations per item, and project structure. */
+  _observeRoom() {
+    this.unsubscribe.push(schema.observeAnnotationsDeep(this.doc,
+      changes => this.handleRemoteChanges(changes), this.LOCAL_ORIGIN))
+    let structure = () => {
+      this._projectDirty = true
+      this._scheduleRemoteApply()
+    }
+    this.unsubscribe.push(schema.observeSchema(this.doc, structure, this.LOCAL_ORIGIN))
+    this.unsubscribe.push(schema.observeProjectLists(this.doc, structure, this.LOCAL_ORIGIN))
+  }
+
   _scheduleSafetyNet() {
     if (this._consecutiveErrors > 0) {
       let backoffFactor = Math.min(Math.pow(2, this._consecutiveErrors), 16)
-      let skipChance = 1 - (1 / backoffFactor)
-      if (Math.random() < skipChance) {
+      if (Math.random() < 1 - (1 / backoffFactor)) {
         this._log(`Safety-net skipped (backoff: ${this._consecutiveErrors} errors)`)
         return
       }
@@ -403,33 +289,10 @@ class SyncEngine {
   async _persistVault(force = false) {
     if (!force && !this.vault.isDirty) return
     try {
-      await this.vault.persistToFile(this.options.room, this._stableUserId)
+      await this.vault.persistToFile(this.options.room, this._stableUserId, this.dataDir)
     } catch (err) {
       this.logger.warn('vault persist failed', { error: err.message })
     }
-  }
-
-  /**
-   * a542: wrap the apply cycle in a HISTORY.TICK merge bracket so all
-   * downstream dispatches (metadata.save, tag.create, note.create, etc.)
-   * collapse into ONE undo entry. Builds a context shim around adapter.store
-   * and delegates to the re-entrant withHistoryMerge helper. Safe to call
-   * when no adapter is present (HTTP-only mode) — falls through to fn.
-   */
-  _withApplyHistoryMerge(fn) {
-    if (!this.adapter || !this.adapter.store) return fn()
-    let shim = { window: { store: this.adapter.store } }
-    return withHistoryMerge(shim, fn)
-  }
-
-  /**
-   * a542: prototype-level alias so external callers (and the
-   * history-tick-undo-merge.test.js Tier 1 anchor via SyncEngine.prototype)
-   * can resolve a stable wrap surface without going through a method on
-   * this.adapter. Same semantics as _withApplyHistoryMerge.
-   */
-  applyWithHistoryMerge(fn) {
-    return this._withApplyHistoryMerge(fn)
   }
 
   async stop() {
@@ -437,58 +300,31 @@ class SyncEngine {
     await this._persistVault(true)
     this.logger.info('Sync engine stopping')
 
-    if (this._storeUnsubscribe) {
-      this._storeUnsubscribe()
-      this._storeUnsubscribe = null
+    this.stopWatching()
+    for (let timer of ['safetyNetTimer', '_statusLogTimer']) {
+      if (this[timer]) clearInterval(this[timer])
+      this[timer] = null
     }
-
-    await this.stopWatching()
-
-    if (this.safetyNetTimer) {
-      clearInterval(this.safetyNetTimer)
-      this.safetyNetTimer = null
+    for (let timer of ['_localDebounceTimer', '_remoteDebounceTimer']) {
+      if (this[timer]) clearTimeout(this[timer])
+      this[timer] = null
     }
+    for (let off of this.unsubscribe) off()
+    this.unsubscribe = []
 
-    if (this._statusLogTimer) {
-      clearInterval(this._statusLogTimer)
-      this._statusLogTimer = null
-    }
-
-    if (this._localDebounceTimer) {
-      clearTimeout(this._localDebounceTimer)
-      this._localDebounceTimer = null
-    }
-
-    if (this._remoteDebounceTimer) {
-      clearTimeout(this._remoteDebounceTimer)
-      this._remoteDebounceTimer = null
-    }
-
-    if (this.unsubscribe) {
-      this.unsubscribe()
-      this.unsubscribe = null
-    }
-
-    // Clean up Awareness protocol
-    if (this.provider && this.provider.awareness) {
-      try {
-        if (this._awarenessHandler) {
-          this.provider.awareness.off('change', this._awarenessHandler)
-          this._awarenessHandler = null
+    if (this.transport) {
+      let awareness = this.transport.getAwareness()
+      if (awareness) {
+        try {
+          if (this._awarenessHandler) awareness.off('change', this._awarenessHandler)
+          awareness.setLocalState(null)
+        } catch (err) {
+          this._debug('Failed to clean up awareness', { error: err.message })
         }
-        this.provider.awareness.setLocalState(null)
-      } catch (err) {
-        this._debug('Failed to clean up awareness', { error: err.message })
       }
-    }
-
-    if (this.provider) {
-      if (this._statusHandler) {
-        this.provider.off('status', this._statusHandler)
-        this._statusHandler = null
-      }
-      this.provider.destroy()
-      this.provider = null
+      if (this._statusHandler) this.transport.off('status', this._statusHandler)
+      await this.transport.destroy()
+      this.transport = null
     }
 
     if (this.doc) {
@@ -508,31 +344,6 @@ class SyncEngine {
     this.state = 'idle'
   }
 
-  // R3: Clean up listener on timeout
-  waitForConnection() {
-    return new Promise((resolve, reject) => {
-      if (this.provider.wsconnected) {
-        resolve()
-        return
-      }
-
-      let handler = (event) => {
-        if (event.status === 'connected') {
-          clearTimeout(timeout)
-          this.provider.off('status', handler)
-          resolve()
-        }
-      }
-
-      let timeout = setTimeout(() => {
-        this.provider.off('status', handler) // R3: prevent listener leak
-        reject(new Error('Connection timeout (15s)'))
-      }, 15000)
-
-      this.provider.on('status', handler)
-    })
-  }
-
   pause() {
     this._paused = true
     this._log('Sync paused')
@@ -545,319 +356,59 @@ class SyncEngine {
 
   // --- Change detection ---
 
-  async startWatching() {
-    // Prefer store.subscribe when adapter is available
-    if (this.adapter) {
-      if (this._storeUnsubscribe) return
-      this._log('Using store.subscribe for change detection')
-      this._storeUnsubscribe = this.adapter.subscribe(() => {
-        this.handleLocalChange()
-      })
-      return
-    }
-
-    // Fallback: chokidar on project file (mirrors tropy/src/common/watch.js).
-    // chokidar with {awaitWriteFinish, alwaysStat} defers the 'change' event
-    // until SQLite has finished its commit — defeats the SQLITE_BUSY race
-    // that fs.watch suffered from (mulch mx-67d331). chokidar also handles
-    // its own error/restart recovery, replacing the old R9 health-check loop.
-    if (this.fileWatcher) return
-
-    try {
-      let info = await this.api.getProjectInfo()
-      if (info && info.project) {
-        this.projectPath = info.project
-        this._log(`Watching project file: ${this.projectPath}`)
-      }
-    } catch (err) {
-      this._log('Could not get project path, file watching disabled', {
-        error: err.message
-      })
-      return
-    }
-
-    if (!this.projectPath) return
-
-    this._startFileWatcher()
+  startWatching() {
+    if (this._storeUnsubscribe) return
+    this._storeUnsubscribe = this.adapter.subscribe(() => this.handleLocalChange())
   }
 
-  _startFileWatcher() {
-    try {
-      this.fileWatcher = chokidar.watch(this.projectPath, {
-        usePolling: false,
-        awaitWriteFinish: true,
-        alwaysStat: true,
-        ignoreInitial: true,
-        followSymlinks: false,
-        depth: 0,
-        persistent: false
-      })
-
-      this.fileWatcher.on('change', () => {
-        this.handleLocalChange()
-      })
-
-      this.fileWatcher.on('error', (err) => {
-        this._debug('File watcher error', { error: err && err.message })
-        // chokidar recovers from transient errors internally. We log and
-        // continue — no manual restart required (was the R9 cycle).
-      })
-
-      this.fileWatcher.on('ready', () => {
-        this._debug('File watcher ready', { path: this.projectPath })
-      })
-    } catch (err) {
-      this._debug('Could not start file watcher', { error: err.message })
-    }
+  stopWatching() {
+    if (this._storeUnsubscribe) this._storeUnsubscribe()
+    this._storeUnsubscribe = null
   }
 
-  async stopWatching() {
-    if (this.fileWatcher) {
-      try {
-        await this.fileWatcher.close()
-      } catch (err) {
-        this.logger.warn('Failed to close file watcher', { error: String(err.message || err) })
-      }
-      this.fileWatcher = null
-    }
-  }
-
-  /**
-   * Debounced handler for local file changes.
-   */
   handleLocalChange() {
-    if (this._paused) return
-    if (this._stopping) return
-
+    if (this._paused || this._stopping) return
     if (this._applyingRemote) {
       this._queuedLocalChange = true
-      this._debug('handleLocalChange: queued (applying remote)')
       return
     }
-
-    // Only log once per debounce window to avoid flooding
-    if (!this._localDebounceTimer) {
-      this._debug('handleLocalChange: store change detected, debouncing')
-    }
-
-    if (this._localDebounceTimer) {
-      clearTimeout(this._localDebounceTimer)
-    }
-
-    this._localDebounceTimer = setTimeout(() => {
-      this._localDebounceTimer = null
-      this._debug('handleLocalChange: debounce fired')
-      this.syncOnce()
-    }, this.options.localDebounce)
+    this._debounceSync(this.options.localDebounce)
   }
 
-  /**
-   * Handle remote CRDT changes — debounce and apply.
-   */
+  _debounceSync(ms) {
+    if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
+    this._localDebounceTimer = setTimeout(() => {
+      this._localDebounceTimer = null
+      this.syncOnce()
+    }, Math.max(100, ms))
+  }
+
   handleRemoteChanges(changes) {
     this._remoteAnnotationsDirty = true
-    for (let change of changes) {
-      this._pendingRemoteIdentities.add(change.identity)
-    }
+    for (let change of changes) this._pendingRemoteIdentities.add(change.identity)
+    this._debug(`remote change: ${changes.length} event(s), ${this._pendingRemoteIdentities.size} item(s) pending`)
+    this._scheduleRemoteApply()
+  }
 
-    if (this._remoteDebounceTimer) {
-      clearTimeout(this._remoteDebounceTimer)
-    }
-
+  _scheduleRemoteApply() {
+    if (this._remoteDebounceTimer) clearTimeout(this._remoteDebounceTimer)
     this._remoteDebounceTimer = setTimeout(() => {
       this._remoteDebounceTimer = null
       this.applyPendingRemote()
     }, this.options.remoteDebounce)
   }
 
+  /** Apply what collaborators changed since the last apply. */
   async applyPendingRemote() {
-    if (this._paused) return
-    if (this._pendingRemoteIdentities.size === 0) return
-    if (this.localIndex.size === 0) {
-      this._debug('applyPendingRemote: localIndex empty, deferring')
-      return
-    }
+    if (this._paused || this._stopping || !this.doc) return
 
-    // R2: Acquire mutex
     let release = await this._acquireLock()
     try {
       let identities = Array.from(this._pendingRemoteIdentities)
       this._pendingRemoteIdentities.clear()
-
-      let allTags = null
-      try {
-        allTags = this.adapter
-          ? this.adapter.getAllTags()
-          : await this.api.getTags()
-      } catch (err) {
-        this.logger.warn('applyPendingRemote: failed to fetch tags', { error: String(err.message || err) })
-      }
-      let tagMap = new Map()
-      if (allTags && Array.isArray(allTags)) {
-        for (let t of allTags) tagMap.set(t.name.toLowerCase(), t)
-      }
-
-      let listMap = new Map()
-      if (this.options.syncLists) {
-        try {
-          let allLists = this.adapter
-            ? this.adapter.getAllLists()
-            : await this.api.getLists()
-          if (Array.isArray(allLists)) {
-            for (let l of allLists) listMap.set(l.name, l)
-          }
-        } catch (err) {
-          this.logger.warn('applyPendingRemote: failed to fetch lists', { error: String(err.message || err) })
-        }
-      }
-
-      // Re-read items from store to get current state (localIndex may be stale)
-      if (this.adapter) {
-        let freshItems = this.readAllItemsFull()
-          .filter(item => (item.photo || []).some(p => p.checksum))
-        if (freshItems.length > 0) {
-          this.localIndex = identity.buildIdentityIndex(freshItems)
-        }
-      }
-
-      // Refresh list name cache for this apply cycle
+      this.localIndex = identity.buildIdentityIndex(this.readSyncableItems())
       await this._refreshListNameCache()
-
-      // Validation uses per-item snapshots (avoids full doc serialization)
-
-      this._applyingRemote = true
-      if (this.adapter) this.adapter.suppressChanges()
-      this._resetApplyStats()
-
-      try {
-        // a542: wrap the entire apply cycle so all dispatches collapse into
-        // ONE undo entry. Without this, every metadata.save / tag.create /
-        // note.create from a remote peer's batch becomes its own undo step.
-        // Helper is re-entrant; nested wraps inside apply mixins are no-ops.
-        await this._withApplyHistoryMerge(async () => {
-        // First pass: exact matches (these take priority over fuzzy matches)
-        let processedLocalIds = new Set()
-        let exactMatchedIdentities = new Set()
-        for (let itemIdentity of identities) {
-          let local = identity.findLocalMatch(itemIdentity, this.localIndex)
-          if (!local) continue
-
-          exactMatchedIdentities.add(itemIdentity)
-          processedLocalIds.add(local.localId)
-
-          // Validate inbound CRDT data before applying (per-item)
-          if (this.backup) {
-            let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
-            if (crdtItem) {
-              let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
-              if (!validation.valid) {
-                for (let w of validation.warnings) {
-                  this.logger.warn(`applyPendingRemote validation: ${w}`)
-                }
-                continue
-              }
-            }
-          }
-
-          try {
-            await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
-          } catch (err) {
-            this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
-              error: err.message
-            })
-          }
-        }
-
-        // Second pass: alias resolution for unmatched identities
-        for (let itemIdentity of identities) {
-          if (exactMatchedIdentities.has(itemIdentity)) continue
-          let resolved = schema.resolveAlias(this.doc, itemIdentity)
-          if (!resolved) continue
-          let local = identity.findLocalMatch(resolved, this.localIndex)
-          if (!local || processedLocalIds.has(local.localId)) continue
-
-          if (this.backup) {
-            let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
-            if (crdtItem) {
-              let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
-              if (!validation.valid) continue
-            }
-          }
-
-          exactMatchedIdentities.add(itemIdentity)
-          processedLocalIds.add(local.localId)
-          this._debug(`alias resolved: ${itemIdentity.slice(0, 8)} → ${resolved.slice(0, 8)}`)
-
-          try {
-            await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
-          } catch (err) {
-            this.logger.warn(`Failed to apply remote (alias) for ${itemIdentity}`, {
-              error: err.message
-            })
-          }
-        }
-
-        // Third pass: fuzzy matches for identities with no exact or alias match,
-        // skipping locals already processed by exact matches
-        for (let itemIdentity of identities) {
-          if (exactMatchedIdentities.has(itemIdentity)) continue
-          let fuzzy = this._fuzzyMatchLocal(itemIdentity)
-          if (!fuzzy) continue
-          if (processedLocalIds.has(fuzzy.local.localId)) continue
-          processedLocalIds.add(fuzzy.local.localId)
-
-          if (this.backup) {
-            let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
-            if (crdtItem) {
-              let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
-              if (!validation.valid) continue
-            }
-          }
-
-          try {
-            await this.applyRemoteAnnotations(itemIdentity, fuzzy.local, tagMap, listMap)
-          } catch (err) {
-            this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
-              error: err.message
-            })
-          }
-        }
-
-        // V5 (W2.T10, seed tropy-plugin-4541): project-level template +
-        // list-hierarchy apply. Inside _withApplyHistoryMerge so the new
-        // dispatches collapse into the same single undo entry as the rest of
-        // the apply cycle (mx-11fd28). Caller's suppressChanges still active.
-        if (this.adapter && typeof this.applyTemplates === 'function') {
-          try {
-            await this.applyTemplates()
-          } catch (err) {
-            this.logger.warn(`applyTemplates failed: ${err.message}`)
-          }
-        }
-        if (this.adapter && typeof this.applyListHierarchy === 'function') {
-          try {
-            await this.applyListHierarchy()
-          } catch (err) {
-            this.logger.warn(`applyListHierarchy failed: ${err.message}`)
-          }
-        }
-        }) // end _withApplyHistoryMerge
-      } finally {
-        this._logApplyStats()
-        this.vault.markDirty()
-        await this._persistVault()
-        this._applyingRemote = false
-        if (this.adapter) this.adapter.resumeChanges()
-        if (this._queuedLocalChange) {
-          this._queuedLocalChange = false
-          this._debug('replaying queued local change (debounced)')
-          if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
-          this._localDebounceTimer = setTimeout(() => {
-            this._localDebounceTimer = null
-            this.syncOnce()
-          }, Math.max(100, this.options.localDebounce))
-        }
-      }
+      await this._applyIdentities(identities)
     } finally {
       release()
     }
@@ -866,25 +417,15 @@ class SyncEngine {
   // --- Core sync cycle ---
 
   async syncOnce() {
-    if (this.state !== 'connected') return
-    if (!this.doc) return
-    if (this._paused) return
-    if (this._stopping) return
+    if (this.state !== 'connected' || !this.doc || this._paused || this._stopping) return
 
     if (this._syncing) {
-      // Another syncOnce is running or waiting for the lock — mark that
-      // a re-sync was requested so it runs after the current one completes
       this._syncRequested = true
       return
     }
-
-    // Set flag before acquiring lock to prevent concurrent slipthrough
     this._syncing = true
 
-    // R2: Acquire mutex
     let release = await this._acquireLock()
-
-    // Re-check guards after acquiring lock (state may have changed while waiting)
     if (this.state !== 'connected' || !this.doc || this._paused || this._stopping) {
       this._syncing = false
       release()
@@ -894,74 +435,18 @@ class SyncEngine {
     this.state = 'syncing'
 
     try {
-      this._debug('syncOnce: starting cycle')
+      let items = this.readSyncableItems()
 
-      let items
-
-      if (this.adapter) {
-        // Store-first: read everything from Redux state (no HTTP calls)
-        items = this.readAllItemsFull()
-
-        // Filter out stale items whose photos were removed from the project.
-        // These items persist in the Redux store but have no photos with
-        // checksums, making them unsyncable (fallback identity is fragile).
-        let totalCount = items.length
-        items = items.filter(item => {
-          let photos = item.photo || []
-          return photos.some(p => p.checksum)
-        })
-        if (totalCount !== items.length) {
-          let skipped = totalCount - items.length
-          this._log(`syncOnce: skipped ${skipped} photo-less item(s) — items need at least one photo to sync`)
-        }
-
-        if (items.length === 0) {
-          this._debug('syncOnce: no items in store')
-          this.state = prev
-          return
-        }
-        this._debug(`syncOnce: got ${items.length} items from store`)
-      } else {
-        // Fallback: HTTP API enrichment
-        let alive = await this.api.ping()
-        if (!alive) {
-          this._debug('syncOnce: API not reachable, skipping')
-          this.state = prev
-          return
-        }
-
-        let summaries = await this.api.getItems()
-        if (!summaries || !Array.isArray(summaries)) {
-          this._debug('syncOnce: no items from API')
-          this.state = prev
-          return
-        }
-        this._debug(`syncOnce: got ${summaries.length} item summaries`)
-
-        items = await this._enrichAll(summaries)
-
-        // Filter photo-less items (same as store path above)
-        items = items.filter(item => {
-          let photos = item.photo || []
-          if (!Array.isArray(photos)) photos = [photos]
-          return photos.some(p => p.checksum)
-        })
-      }
-
-      // Build reverse map (localId → identity) from OLD index for alias detection
-      let oldLocalIdToIdentity = new Map()
-      for (let [ident, { localId }] of this.localIndex) {
-        oldLocalIdToIdentity.set(localId, ident)
-      }
-
+      // A changed photo set changes an item's identity: alias old → new.
+      let oldIdentityOf = new Map()
+      for (let [ident, { localId }] of this.localIndex) oldIdentityOf.set(localId, ident)
       let previousIdentities = new Set(this.localIndex.keys())
       this.localIndex = identity.buildIdentityIndex(items)
 
-      // Detect identity changes (photos added/removed) and create CRDT aliases
-      if (oldLocalIdToIdentity.size > 0 && this.doc) {
+      if (oldIdentityOf.size > 0) {
         this.doc.transact(() => {
           for (let [newIdentity, { localId }] of this.localIndex) {
-            let oldIdentity = oldLocalIdToIdentity.get(localId)
+            let oldIdentity = oldIdentityOf.get(localId)
             if (oldIdentity && oldIdentity !== newIdentity) {
               schema.setAlias(this.doc, oldIdentity, newIdentity)
               this._log(`alias created: ${oldIdentity.slice(0, 8)} → ${newIdentity.slice(0, 8)}`)
@@ -969,639 +454,321 @@ class SyncEngine {
           }
         }, this.LOCAL_ORIGIN)
       }
-      this._debug(`syncOnce: ${items.length} items, ${this.localIndex.size} identities`)
 
-      // Force apply when new local items appear (e.g. after import) —
-      // their CRDT identities may already have remote annotations.
-      if (!this._remoteAnnotationsDirty && previousIdentities.size > 0) {
-        for (let id of this.localIndex.keys()) {
-          if (!previousIdentities.has(id)) {
-            this._remoteAnnotationsDirty = true
-            this._debug('syncOnce: new local identities detected, forcing apply')
-            break
-          }
-        }
+      // A newly imported item may already have annotations in the room.
+      if (previousIdentities.size > 0 &&
+          [...this.localIndex.keys()].some(id => !previousIdentities.has(id))) {
+        this._remoteAnnotationsDirty = true
       }
 
-      // C2: Build list name cache
       await this._refreshListNameCache()
 
-      // Apply remote FIRST — ensures remote changes land before push
-      let appliedIdentities = new Set()
-      let crdtChanged = false
+      // Apply first, so remote changes land before local ones are pushed.
       if (this.options.syncMode === 'auto') {
-        // P5: Cache annotation count from annotations map size (cheap)
-        let annotationsMap = this.doc.getMap('annotations')
-        this.vault.updateAnnotationCount(annotationsMap.size)
-
-        crdtChanged = this._remoteAnnotationsDirty
-        if (crdtChanged) {
-          this._debug('syncOnce: CRDT changed, applying remote')
-          appliedIdentities = await this.applyRemoteFromCRDT()
-
-          // P2: Re-read modified items after apply
-          if (appliedIdentities.size > 0) {
-            if (this.adapter) {
-              // Store-first: only re-read items that were actually applied
-              let appliedLocalIds = new Set()
-              for (let aid of appliedIdentities) {
-                let local = this.localIndex.get(aid)
-                if (local) appliedLocalIds.add(local.localId)
-              }
-              items = items.map(item => {
-                let localId = item['@id'] || item.id
-                if (appliedLocalIds.has(localId)) {
-                  return this.adapter.getItemFull(localId) || item
-                }
-                return item
-              })
-            } else {
-              // API fallback: re-enrich only affected summaries
-              let summaries = await this.api.getItems()
-              if (summaries && Array.isArray(summaries)) {
-                let modifiedSummaries = summaries.filter(s => {
-                  let id = identity.computeIdentity({ '@id': s.id, template: s.template, photo: [] })
-                  return id && appliedIdentities.has(id)
-                })
-
-                if (modifiedSummaries.length === 0 && appliedIdentities.size > 0) {
-                  items = await this._enrichAll(summaries)
-                } else if (modifiedSummaries.length > 0) {
-                  let reEnriched = await this._enrichAll(modifiedSummaries)
-                  let reEnrichedMap = new Map()
-                  for (let item of reEnriched) {
-                    let id = identity.computeIdentity(item)
-                    if (id) reEnrichedMap.set(id, item)
-                  }
-                  items = items.map(item => {
-                    let id = identity.computeIdentity(item)
-                    return (id && reEnrichedMap.has(id)) ? reEnrichedMap.get(id) : item
-                  })
-                }
-              }
-            }
+        this.vault.updateAnnotationCount(schema.getIdentities(this.doc).length)
+        if (this._remoteAnnotationsDirty || this._projectDirty) {
+          let applied = await this._applyIdentities(
+            this._remoteAnnotationsDirty ? schema.getIdentities(this.doc) : [])
+          if (applied.size > 0) {
+            items = this.readSyncableItems()
             this.localIndex = identity.buildIdentityIndex(items)
           }
-        } else {
-          this._debug('syncOnce: CRDT unchanged, skip apply')
         }
       }
 
-      // Push local changes to CRDT (skipped in 'pull' mode — only receive, never push)
       if (this.options.syncMode !== 'pull') {
         let pushSeq = this.vault.nextPushSeq()
-        if (this.adapter) this.adapter.suppressChanges()
+        this.adapter.suppressChanges()
         try {
           await this.pushLocal(items, pushSeq)
-          // V5 (W2.T10, seed tropy-plugin-4541): project-level template +
-          // list-hierarchy push. Once per sync cycle (NOT per-item). Templates
-          // before lists is conventional but not load-bearing — they live in
-          // separate CRDT root maps (`schema` vs `projectLists`).
-          if (this.adapter && typeof this.pushTemplates === 'function') {
-            await this.pushTemplates(this._stableUserId, pushSeq)
-          }
-          if (this.adapter && typeof this.pushListHierarchy === 'function') {
-            await this.pushListHierarchy(this._stableUserId, pushSeq)
-          }
+          await this.pushTemplates(this._stableUserId, pushSeq)
+          await this.pushListHierarchy(this._stableUserId, pushSeq)
         } finally {
-          if (this.adapter) this.adapter.resumeChanges()
+          this.adapter.resumeChanges()
         }
       }
 
-      // Update CRDT hash after push so next cycle doesn't falsely re-apply
-      // Skip if apply had failures — forces retry on next cycle
-      let skipHashUpdate = false
-      if (this._applyStats && this._applyStats.notesFailed > 0) {
-        // Track per-key failures in vault for persistence across restarts
-        // Snapshot the set before iterating to avoid race with concurrent additions
-        let failedKeys = new Set(this._failedNoteKeys)
-        this._failedNoteKeys.clear()
-        let givenUp = 0
-        for (let key of failedKeys) {
-          let count = (this.vault.failedNoteKeys.get(key) || 0) + 1
-          this.vault.failedNoteKeys.set(key, count)
-          if (count >= 3) {
-            this.vault.appliedNoteKeys.add(key)
-            this.vault.failedNoteKeys.delete(key)
-            this._debug(`note key ${key.slice(0, 8)} permanently given up after ${count} retries`)
-            givenUp++
-          }
-        }
-
-        // Check if any keys still pending retry (failed minus permanently given up)
-        let stillRetrying = this._applyStats.notesFailed - givenUp
-        if (stillRetrying > 0) {
-          skipHashUpdate = true
-          this._debug(`apply had ${this._applyStats.notesFailed} note failures, ${stillRetrying} will retry next cycle`)
-        }
-      } else if (this._applyStats) {
-        this._failedNoteKeys.clear()
-      }
-      if (this.options.syncMode === 'auto' && !skipHashUpdate) {
-        // Clear the annotation-dirty flag so next safety-net cycle
-        // skips apply unless the observer fires again.
+      // Failed note creates are retried for three cycles, then given up.
+      let retrying = this._settleFailedNotes()
+      if (this.options.syncMode === 'auto' && !retrying) {
         this._remoteAnnotationsDirty = false
       }
 
-      // R7: Prune vault periodically
       this.vault.pruneAppliedKeys()
-
-      // Persist vault to prevent ghost notes on restart
       this.vault.markDirty()
       await this._persistVault()
-
-      // R7: Bound previousSnapshot size using LRU-style eviction
       this.vault._evictIfNeeded(this.previousSnapshot, 5000)
 
       this.lastSync = new Date()
       this._consecutiveErrors = 0
       this.state = 'connected'
-      this._debug('syncOnce: cycle complete')
-
     } catch (err) {
       this._consecutiveErrors++
-      let errMsg = err instanceof Error ? err.message : String(err || '')
-      let isBusy = err && (err.sqliteBusy || errMsg.includes('SQLITE_BUSY'))
-
-      if (isBusy) {
-        this.logger.warn({ consecutiveErrors: this._consecutiveErrors },
-          'Database busy, will back off')
-      } else {
-        this.logger.warn({
-          error: errMsg,
-          stack: err && err.stack
-        }, 'Sync cycle failed')
-      }
-
+      this.logger.warn({ error: err && err.message, stack: err && err.stack }, 'Sync cycle failed')
       this.state = prev === 'connected' ? 'connected' : 'error'
     } finally {
       this._syncing = false
       release()
-
-      // Replay any sync triggers that arrived while we were running/waiting
-      let needsReplay = this._queuedLocalChange || this._syncRequested
+      let replay = this._queuedLocalChange || this._syncRequested
       this._queuedLocalChange = false
       this._syncRequested = false
-      if (needsReplay) {
-        this._debug('replaying queued sync trigger (debounced)')
-        if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
-        this._localDebounceTimer = setTimeout(() => {
-          this._localDebounceTimer = null
-          this.syncOnce()
-        }, Math.max(100, this.options.localDebounce))
-      }
+      if (replay) this._debounceSync(this.options.localDebounce)
     }
   }
+
+  /** True while some failed note creates still have retries left. */
+  _settleFailedNotes() {
+    let failed = new Set(this._failedNoteKeys)
+    this._failedNoteKeys.clear()
+    let retrying = false
+    for (let key of failed) {
+      let count = (this.vault.failedNoteKeys.get(key) || 0) + 1
+      if (count >= 3) {
+        this.vault.appliedNoteKeys.add(key)
+        this.vault.failedNoteKeys.delete(key)
+        this._log(`note ${key.slice(0, 8)} given up after ${count} failed attempts`)
+      } else {
+        this.vault.failedNoteKeys.set(key, count)
+        retrying = true
+      }
+    }
+    return retrying
+  }
+
+  // --- Apply remote → local ---
 
   /**
-   * One-shot migration: rewrite any mixed-case CRDT tag keys to lowercase.
-   * Idempotent — safe to run repeatedly. Runs inside a transaction so
-   * all rewrites are batched into a single Yjs update.
+   * Room items that match a local item, validated. Three passes, each
+   * claiming a local item at most once: exact identity, then an alias
+   * (the item's photo set changed), then fuzzy (most photos shared).
    */
-  _migrateTagKeysToLowercase() {
-    if (!this.doc) return
-    let annotations = this.doc.getMap('annotations')
-    let migrated = 0
+  _matchIdentities(identities) {
+    let matched = []
+    let claimed = new Set()
+    let done = new Set()
 
-    this.doc.transact(() => {
-      annotations.forEach((itemMap) => {
-        let tags = itemMap.get('tags')
-        if (!tags) return
-
-        let toMigrate = []
-        tags.forEach((value, key) => {
-          let lower = key.toLowerCase()
-          if (lower !== key) {
-            toMigrate.push({ oldKey: key, newKey: lower, value })
-          }
-        })
-
-        for (let { oldKey, newKey, value } of toMigrate) {
-          let existing = tags.get(newKey)
-          // Only overwrite if existing is a tombstone or missing
-          if (!existing || existing.deleted) {
-            tags.set(newKey, value)
-          }
-          tags.delete(oldKey)
-          migrated++
-        }
-      })
-    }, this.LOCAL_ORIGIN)
-
-    if (migrated > 0) {
-      this._log(`tag key migration: rewrote ${migrated} mixed-case key(s) to lowercase`)
-    }
-  }
-
-  // --- Conflict logging ---
-
-  _logConflict(type, identity, field, detail) {
-    this.logger.info({
-      event: 'conflict',
-      type,
-      identity: identity.slice(0, 8),
-      field,
-      ...detail
-    }, `[troparcel] Conflict: ${type} ${field} on ${identity.slice(0, 8)}`)
-  }
-
-  // --- Fuzzy matching ---
-
-  /**
-   * Try to find a local item that matches a CRDT identity by shared photo checksums.
-   * Used when exact identity matching fails (e.g., after item merges).
-   * Returns { local, localIdentity, checksumCount } or null.
-   */
-  _fuzzyMatchLocal(crdtIdentity) {
-    if (this.localIndex.size === 0 || !this.doc) return null
-
-    let crdtChecksums = schema.getItemChecksums(this.doc, crdtIdentity)
-    if (crdtChecksums.length === 0) return null
-
-    let crdtSet = new Set(crdtChecksums)
-    let bestMatch = null
-    let bestScore = 0
-
-    for (let [localIdentity, local] of this.localIndex) {
-      let photos = local.item.photo || []
-      if (!Array.isArray(photos)) photos = [photos]
-      let localChecksums = new Set()
-      for (let p of photos) {
-        if (p.checksum) localChecksums.add(p.checksum)
-      }
-      if (localChecksums.size === 0) continue
-
-      // Jaccard similarity: |intersection| / |union|
-      let intersection = 0
-      for (let cs of crdtSet) {
-        if (localChecksums.has(cs)) intersection++
-      }
-      if (intersection === 0) continue
-
-      let union = new Set([...crdtSet, ...localChecksums]).size
-      let score = intersection / union
-
-      if (score > bestScore && score >= 0.5) {
-        bestScore = score
-        bestMatch = { local, localIdentity, checksumCount: intersection, score }
-      }
-    }
-
-    return bestMatch
-  }
-
-  // --- Apply remote → local (orchestration) ---
-
-  /**
-   * S3: Validates inbound data and BLOCKS apply when validation fails.
-   * Returns Set of applied item identities (P2).
-   */
-  async applyRemoteFromCRDT() {
-    let identities = schema.getIdentities(this.doc)
-    let appliedIdentities = new Set()
-
-    if (identities.length === 0) {
-      this._log('applyRemote: CRDT snapshot is empty')
-      return appliedIdentities
-    }
-
-    this._debug(`applyRemote: scanning ${identities.length} CRDT items`)
-
-    let allTags = this.adapter
-      ? this.adapter.getAllTags()
-      : await this.api.getTags()
-    let tagMap = new Map()
-    if (allTags && Array.isArray(allTags)) {
-      for (let t of allTags) tagMap.set(t.name.toLowerCase(), t)
-    }
-
-    let listMap = new Map()
-    if (this.options.syncLists) {
-      try {
-        let allLists = this.adapter
-          ? this.adapter.getAllLists()
-          : await this.api.getLists()
-        if (Array.isArray(allLists)) {
-          for (let l of allLists) listMap.set(l.name || String(l.id), l)
-        }
-      } catch (err) {
-        this.logger.warn('applyRemoteFromCRDT: failed to fetch lists', { error: String(err.message || err) })
-      }
-    }
-
-    this._applyingRemote = true
-    if (this.adapter) this.adapter.suppressChanges()
-
-    try {
-      // Collect and validate matched items
-      let matched = []
-      let matchedIdentities = new Set()
-      let matchedLocalIds = new Set()  // Track which local items have exact matches
-      for (let itemIdentity of identities) {
-        let local = identity.findLocalMatch(itemIdentity, this.localIndex)
-        if (!local) continue
-
-        let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
-        if (!crdtItem) continue
-        let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
-        if (!validation.valid) {
-          for (let warn of validation.warnings) {
-            this.logger.warn(`Validation warning for ${itemIdentity.slice(0, 8)}: ${warn}`)
-          }
-          this.logger.warn(`Skipping apply for ${itemIdentity.slice(0, 8)} — validation failed`)
-          continue
-        }
-
-        matched.push({ itemIdentity, local })
-        matchedIdentities.add(itemIdentity)
-        matchedLocalIds.add(local.localId)
-      }
-
-      // Alias resolution: for unmatched CRDT identities, try alias lookup
-      let unmatchedIdentities = identities.filter(id => !matchedIdentities.has(id))
-      for (let crdtIdentity of unmatchedIdentities) {
-        let resolved = schema.resolveAlias(this.doc, crdtIdentity)
-        if (!resolved) continue
-        let local = identity.findLocalMatch(resolved, this.localIndex)
-        if (!local) continue
-        if (matchedLocalIds.has(local.localId)) continue
-
-        let crdtItem = schema.getItemSnapshot(this.doc, crdtIdentity)
-        if (!crdtItem) continue
-        let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
-        if (!validation.valid) continue
-
-        this._debug(`alias resolved: ${crdtIdentity.slice(0, 8)} → ${resolved.slice(0, 8)}`)
-        matched.push({ itemIdentity: crdtIdentity, local })
-        matchedIdentities.add(crdtIdentity)
-        matchedLocalIds.add(local.localId)
-      }
-
-      // Fuzzy matching: for unmatched CRDT identities, try to find local items
-      // that contain ALL of the CRDT item's photo checksums (handles merged items)
-      unmatchedIdentities = identities.filter(id => !matchedIdentities.has(id))
-      for (let crdtIdentity of unmatchedIdentities) {
-        let fuzzy = this._fuzzyMatchLocal(crdtIdentity)
-        if (!fuzzy) {
-          this._debug(`no fuzzy match for CRDT item ${crdtIdentity.slice(0, 8)}`)
-          continue
-        }
-
-        // Skip fuzzy matches to locals that already have an exact match —
-        // the merged identity's CRDT data supersedes pre-merge data
-        if (matchedLocalIds.has(fuzzy.local.localId)) {
-          this._debug(`fuzzy skip: CRDT ${crdtIdentity.slice(0, 8)} → local ${fuzzy.localIdentity.slice(0, 8)} (already has exact match)`)
-          continue
-        }
-        let crdtCount = schema.getItemChecksums(this.doc, crdtIdentity).length
-        let localPhotos = fuzzy.local.item.photo || []
-        let localCount = (Array.isArray(localPhotos) ? localPhotos : [localPhotos]).filter(p => p.checksum).length
-        this._log(`fuzzy match: CRDT ${crdtIdentity.slice(0, 8)} → local ${fuzzy.localIdentity.slice(0, 8)} (score=${fuzzy.score.toFixed(2)}, ${fuzzy.checksumCount} shared of ${crdtCount} CRDT / ${localCount} local photo(s))`)
-        let crdtItem = schema.getItemSnapshot(this.doc, crdtIdentity)
-        if (!crdtItem) continue
-        let validation = this.backup.validateInbound(crdtIdentity, crdtItem, this._stableUserId)
-        if (validation.valid) {
-          matched.push({ itemIdentity: crdtIdentity, local: fuzzy.local })
-          matchedLocalIds.add(fuzzy.local.localId)
-        }
-      }
-
-      if (matched.length === 0) {
-        this._debug('applyRemote: no matched items')
-        return appliedIdentities
-      }
-
-      // Batch backup — prefer store adapter when available
-      try {
-        let backupItems = []
-        for (let { local, itemIdentity } of matched) {
-          try {
-            let state = this.adapter
-              ? this.backup.captureItemStateFromStore(this.adapter, local.localId, itemIdentity)
-              : await this.backup.captureItemState(local.localId, itemIdentity)
-            backupItems.push(state)
-          } catch (err) {
-            this.logger.warn(`applyRemoteFromCRDT: backup capture failed for ${itemIdentity.slice(0, 8)}`, { error: String(err.message || err) })
-          }
-        }
-        if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
-          await this.backup.saveSnapshot(backupItems)
-        }
-      } catch (err) {
-        this.logger.warn('Batch backup failed', { error: err.message })
-      }
-
-      this._resetApplyStats()
-
-      try {
-        for (let { itemIdentity, local } of matched) {
-          try {
-            await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
-            appliedIdentities.add(itemIdentity)
-          } catch (err) {
-            this.logger.warn(`Failed to apply remote for ${itemIdentity}`, {
-              error: err.message
-            })
-          }
-        }
-      } finally {
-        this._logApplyStats()
-        this.vault.markDirty()
-        await this._persistVault()
-      }
-      return appliedIdentities
-    } finally {
-      this._applyingRemote = false
-      if (this.adapter) this.adapter.resumeChanges()
-      if (this._queuedLocalChange) {
-        this._queuedLocalChange = false
-        this._debug('replaying queued local change (debounced)')
-        // Debounce the replay to avoid thundering herd
-        if (this._localDebounceTimer) clearTimeout(this._localDebounceTimer)
-        this._localDebounceTimer = setTimeout(() => {
-          this._localDebounceTimer = null
-          this.syncOnce()
-        }, Math.max(100, this.options.localDebounce))
-      }
-    }
-  }
-
-  // --- Import (review mode) ---
-
-  async applyOnDemand() {
-    if (!this.doc) return null
-
-    let release = await this._acquireLock()
-    try {
-      return await this._applyOnDemandInner()
-    } finally {
-      release()
-    }
-  }
-
-  async _applyOnDemandInner() {
-    let allIdentities = schema.getIdentities(this.doc)
-    let userId = this._stableUserId
-    let summary = {}
-
-    let allTags = this.adapter
-      ? this.adapter.getAllTags()
-      : await this.api.getTags()
-    let tagMap = new Map()
-    if (allTags && Array.isArray(allTags)) {
-      for (let t of allTags) tagMap.set(t.name.toLowerCase(), t)
-    }
-
-    let listMap = new Map()
-    if (this.options.syncLists) {
-      try {
-        let allLists = this.adapter
-          ? this.adapter.getAllLists()
-          : await this.api.getLists()
-        if (Array.isArray(allLists)) {
-          for (let l of allLists) listMap.set(l.name || String(l.id), l)
-        }
-      } catch (err) {
-        this.logger.warn('applyOnDemand: failed to fetch lists', { error: String(err.message || err) })
-      }
-    }
-
-    for (let itemIdentity of allIdentities) {
-      let item = schema.getItemSnapshot(this.doc, itemIdentity)
-      if (!item) continue
-      for (let section of ['metadata', 'tags', 'notes', 'selections', 'transcriptions', 'lists']) {
-        let data = item[section]
-        if (!data || typeof data !== 'object') continue
-
-        for (let val of Object.values(data)) {
-          if (val && val.author && val.author !== userId && !val.deleted) {
-            if (!summary[val.author]) {
-              summary[val.author] = { metadata: 0, tags: 0, notes: 0, selections: 0, transcriptions: 0, lists: 0 }
-            }
-            summary[val.author][section]++
-          }
-        }
-      }
-    }
-
-    for (let [author, counts] of Object.entries(summary)) {
-      let parts = Object.entries(counts)
-        .filter(([, n]) => n > 0)
-        .map(([type, n]) => `${n} ${type}`)
-      if (parts.length > 0) {
-        this.logger.info(`${author}: ${parts.join(', ')}`)
-      }
-    }
-
-    // Backup (with validation gating)
-    let backupItems = []
-    let validIdentities = []
-    for (let itemIdentity of allIdentities) {
-      let local = identity.findLocalMatch(itemIdentity, this.localIndex)
-      if (!local) continue
-
-      // S3: Validate before applying
+    let take = (itemIdentity, local) => {
+      if (!local || claimed.has(local.localId) || done.has(itemIdentity)) return
       let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
-      if (!crdtItem) continue
+      if (!crdtItem) return
       let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
       if (!validation.valid) {
-        for (let warn of validation.warnings) {
-          this.logger.warn(`Validation warning: ${warn}`)
-        }
-        continue
+        for (let w of validation.warnings) this.logger.warn(`validation: ${w}`)
+        return
       }
+      matched.push({ itemIdentity, local })
+      claimed.add(local.localId)
+      done.add(itemIdentity)
+    }
 
-      validIdentities.push(itemIdentity)
-      try {
-        let state = this.adapter
-          ? this.backup.captureItemStateFromStore(this.adapter, local.localId, itemIdentity)
-          : await this.backup.captureItemState(local.localId, itemIdentity)
-        backupItems.push(state)
-      } catch (err) {
-        this.logger.warn(`applyOnDemand: backup capture failed for ${itemIdentity.slice(0, 8)}`, { error: String(err.message || err) })
+    for (let id of identities) take(id, identity.findLocalMatch(id, this.localIndex))
+    for (let id of identities) {
+      if (done.has(id)) continue
+      let resolved = schema.resolveAlias(this.doc, id)
+      if (resolved) take(id, identity.findLocalMatch(resolved, this.localIndex))
+    }
+    for (let id of identities) {
+      if (done.has(id)) continue
+      let fuzzy = this._fuzzyMatchLocal(id)
+      if (fuzzy) {
+        this._debug(`fuzzy match: ${id.slice(0, 8)} → ${fuzzy.localIdentity.slice(0, 8)} (score ${fuzzy.score.toFixed(2)})`)
+        take(id, fuzzy.local)
       }
     }
-    if (backupItems.length > 0 && this.vault.shouldBackup(backupItems)) {
-      await this.backup.saveSnapshot(backupItems)
-    }
+    return matched
+  }
+
+  /**
+   * Apply the room's project structure (if changed) and the given items.
+   * Returns the identities applied.
+   */
+  async _applyIdentities(identities) {
+    let applied = new Set()
+    let matched = this._matchIdentities(identities)
 
     this._applyingRemote = true
-    if (this.adapter) this.adapter.suppressChanges()
+    this.adapter.suppressChanges()
     this._resetApplyStats()
-    let applied = 0
+    this._assignments = new Assignments()
     try {
-      for (let itemIdentity of validIdentities) {
-        let local = identity.findLocalMatch(itemIdentity, this.localIndex)
-        if (!local) continue
+      if (this._projectDirty) {
+        try { await this.applyTemplates() } catch (err) {
+          this.logger.warn(`applyTemplates failed: ${err.message}`)
+        }
+        try { await this.applyListHierarchy() } catch (err) {
+          this.logger.warn(`applyListHierarchy failed: ${err.message}`)
+        }
+        this._projectDirty = false
+      }
+      if (matched.length === 0) return applied
+
+      await this._backup(matched)
+
+      let tagMap = new Map(this.adapter.getAllTags().map(t => [t.name.toLowerCase(), t]))
+      let listMap = new Map(this.adapter.getAllLists().map(l => [l.name, l]))
+
+      for (let { itemIdentity, local } of matched) {
         try {
           await this.applyRemoteAnnotations(itemIdentity, local, tagMap, listMap)
-          applied++
+          applied.add(itemIdentity)
         } catch (err) {
-          this.logger.warn(`Import: failed to apply ${itemIdentity}`, {
-            error: err.message
-          })
+          this.logger.warn(`Failed to apply remote for ${itemIdentity.slice(0, 8)}: ${err.message}`)
         }
       }
+      await this._markReceived(this._applyStats.receivedItemIds)
+      await this._assignments.flush(this.adapter, this.logger)
+      return applied
     } finally {
       this._logApplyStats()
       this.vault.markDirty()
       await this._persistVault()
       this._applyingRemote = false
-      if (this.adapter) this.adapter.resumeChanges()
+      this.adapter.resumeChanges()
+      if (this._queuedLocalChange) {
+        this._queuedLocalChange = false
+        this._debounceSync(this.options.localDebounce)
+      }
     }
-
-    return { applied, summary }
   }
 
-  // --- Rollback ---
-
-  async rollback(backupPath) {
-    return this.backup.rollback(backupPath, this.adapter)
+  async _backup(matched) {
+    try {
+      let snapshots = matched.map(({ local, itemIdentity }) =>
+        this.backup.captureItemStateFromStore(this.adapter, local.localId, itemIdentity))
+      if (this.vault.shouldBackup(snapshots)) await this.backup.saveSnapshot(snapshots)
+    } catch (err) {
+      this.logger.warn(`backup before apply failed: ${err.message}`)
+    }
   }
 
-  // --- Tombstone purge ---
+  /** Put the items a collaborator changed into the owner's received list. */
+  async _markReceived(itemIds) {
+    if (!itemIds || itemIds.size === 0) return
+    try {
+      let list = this.adapter.getAllLists().find(l => l.name === RECEIVED_LIST && l.parent === 0)
+      let listId = list ? list.id : (await this.adapter.createList({ name: RECEIVED_LIST, parent: 0 })).id
+      for (let id of itemIds) {
+        let item = this.adapter.getItem(id)
+        if (item && !(item.lists || []).includes(listId)) this._assignments.list(listId, id)
+      }
+    } catch (err) {
+      this.logger.warn(`could not update the "${RECEIVED_LIST}" list: ${err.message}`)
+    }
+  }
 
-  purgeTombstones() {
-    if (!this.doc) return
+  // --- Import hook (review / pull modes) ---
 
-    this.logger.info('Purging tombstones from CRDT')
+  async applyOnDemand() {
+    if (!this.doc) return null
+    let release = await this._acquireLock()
+    try {
+      this.localIndex = identity.buildIdentityIndex(this.readSyncableItems())
+      await this._refreshListNameCache()
+      this._projectDirty = true
+      let all = schema.getIdentities(this.doc)
+      this._logPendingSummary(all)
+      let applied = await this._applyIdentities(all)
+      return { applied: applied.size }
+    } finally {
+      release()
+    }
+  }
 
+  /** Log, per collaborator, how much is waiting in the room. */
+  _logPendingSummary(identities) {
+    let summary = {}
+    for (let itemIdentity of identities) {
+      let item = schema.getItemSnapshot(this.doc, itemIdentity)
+      if (!item) continue
+      for (let section of ['metadata', 'tags', 'notes', 'selections', 'transcriptions', 'lists']) {
+        for (let val of Object.values(item[section] || {})) {
+          if (!val || !val.author || val.author === this._stableUserId || val.deleted) continue
+          summary[val.author] = summary[val.author] || {}
+          summary[val.author][section] = (summary[val.author][section] || 0) + 1
+        }
+      }
+    }
+    for (let [author, counts] of Object.entries(summary)) {
+      this.logger.info(`${author}: ${Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(', ')}`)
+    }
+  }
+
+  // --- Maintenance ---
+
+  /**
+   * Bring a v4 room to v5 (see crdt-schema.js for why v5 exists). A room a
+   * NEWER Troparcel has written is left alone: syncing would misread it.
+   */
+  _migrateRoom() {
+    let { version } = schema.checkSchemaVersion(this.doc)
+    if (version && version > schema.SCHEMA_VERSION) {
+      throw new Error(`room "${this.options.room}" was written by a newer Troparcel ` +
+        `(schema ${version}); update Troparcel to sync it`)
+    }
     this.doc.transact(() => {
-      let result = schema.purgeTombstones(this.doc)
-      let parts = [`${result.purged} tombstone(s)`]
-      if (result.uuidsPurged) parts.push(`${result.uuidsPurged} orphaned UUID(s)`)
-      if (result.aliasesPurged) parts.push(`${result.aliasesPurged} expired alias(es)`)
-      this.logger.info(
-        `Purged ${parts.join(', ')} across ${result.items} item(s)`
-      )
+      let copied = schema.migrateFromV4(this.doc)
+      if (copied > 0) this._log(`moved ${copied} item(s) from the v4 room layout to v5`)
+      schema.setSchemaVersion(this.doc)
     }, this.LOCAL_ORIGIN)
   }
 
-  // --- Status ---
+  _logConflict(type, itemIdentity, field, detail) {
+    this.logger.info({
+      event: 'conflict', type, identity: itemIdentity.slice(0, 8), field, ...detail
+    }, `[troparcel] Conflict: ${type} ${field} on ${itemIdentity.slice(0, 8)}`)
+  }
 
-  // P5: Uses cached annotation count instead of serializing whole doc
+  /**
+   * The local item sharing the most photos with a room item (Jaccard
+   * similarity ≥ 0.5), for items merged or split on one side.
+   */
+  _fuzzyMatchLocal(crdtIdentity) {
+    if (this.localIndex.size === 0 || !this.doc) return null
+    let crdtSet = new Set(schema.getItemChecksums(this.doc, crdtIdentity))
+    if (crdtSet.size === 0) return null
+
+    let best = null
+    for (let [localIdentity, local] of this.localIndex) {
+      let localSet = new Set((local.item.photo || []).map(p => p.checksum).filter(Boolean))
+      if (localSet.size === 0) continue
+      let shared = [...crdtSet].filter(c => localSet.has(c)).length
+      if (shared === 0) continue
+      let score = shared / new Set([...crdtSet, ...localSet]).size
+      if (score >= 0.5 && (!best || score > best.score)) {
+        best = { local, localIdentity, checksumCount: shared, score }
+      }
+    }
+    return best
+  }
+
+  purgeTombstones() {
+    if (!this.doc) return
+    this.doc.transact(() => {
+      let result = schema.purgeTombstones(this.doc)
+      this.logger.info(`Purged ${result.purged} tombstone(s), ${result.uuidsPurged || 0} orphaned UUID(s), ` +
+        `${result.aliasesPurged || 0} alias(es) across ${result.items} item(s)`)
+    }, this.LOCAL_ORIGIN)
+  }
+
   getStatus() {
     return {
       state: this.state,
       lastSync: this.lastSync,
       room: this.options.room,
-      server: this.options.serverUrl,
+      transport: this.transport ? this.transport.transportName : null,
+      address: this.transport ? this.transport.displayAddress : null,
       syncMode: this.options.syncMode,
       clientId: this.doc ? this.doc.clientID : null,
       localItems: this.localIndex.size,
       crdtItems: this.vault.annotationCount,
       peerCount: this.peerCount,
-      watching: this.fileWatcher != null || this._storeUnsubscribe != null,
-      storeAvailable: this.adapter != null,
-      projectPath: this.projectPath,
+      watching: this._storeUnsubscribe != null,
       consecutiveErrors: this._consecutiveErrors
     }
   }
 }
 
-// Mix in methods from modules
 Object.assign(SyncEngine.prototype, require('./push'))
 Object.assign(SyncEngine.prototype, require('./apply'))
-Object.assign(SyncEngine.prototype, require('./enrich'))
 
 module.exports = { SyncEngine }

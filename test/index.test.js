@@ -35,13 +35,6 @@ describe('connection-string', () => {
     assert.equal(r.syncDir, '/C:/Users/alice/Dropbox/sync')
   })
 
-  it('parses snapshot URL', () => {
-    let r = parseConnectionString('troparcel://snapshot/https://r2.example.com/crdt/room.yjs?auth=Bearer+tok')
-    assert.equal(r.transport, 'snapshot')
-    assert.equal(r.snapshotUrl, 'https://r2.example.com/crdt/room.yjs')
-    assert.equal(r.snapshotAuth, 'Bearer tok')
-  })
-
   it('parses bare ws:// URL as websocket', () => {
     let r = parseConnectionString('ws://localhost:2468')
     assert.equal(r.transport, 'websocket')
@@ -69,6 +62,10 @@ describe('connection-string', () => {
   it('generates file connection string', () => {
     let s = generateConnectionString({ transport: 'file', syncDir: '/home/alice/sync' })
     assert.equal(s, 'troparcel://file/home/alice/sync')
+  })
+
+  it('no longer accepts the snapshot scheme', () => {
+    assert.equal(parseConnectionString('troparcel://snapshot/https://x/room.yjs'), null)
   })
 })
 
@@ -430,10 +427,13 @@ describe('sanitize', () => {
       assert.ok(result.includes('<sup>'))
       assert.ok(result.includes('<sub>'))
       assert.ok(result.includes('line-break'))
-      assert.ok(result.includes('<h1>'))
       assert.ok(result.includes('<hr>'))
-      assert.ok(result.includes('<pre>'))
-      assert.ok(result.includes('<code>'))
+      // Tropy's editor schema has no heading or code nodes: the tags go,
+      // the words stay.
+      assert.ok(!result.includes('<h1>'))
+      assert.ok(!result.includes('<pre>'))
+      assert.ok(result.includes('Heading'))
+      assert.ok(result.includes('let x = 1'))
     })
   })
 
@@ -883,20 +883,20 @@ describe('backup', () => {
 
   describe('sanitizeDir', () => {
     it('sanitizes special characters', () => {
-      let bm = new BackupManager('test', null, { info: () => {}, debug: () => {} })
+      let bm = new BackupManager('test', { info: () => {}, debug: () => {} })
       assert.equal(bm.sanitizeDir('my-room'), 'my-room')
       assert.equal(bm.sanitizeDir('room/with/slashes'), 'room_with_slashes')
       assert.equal(bm.sanitizeDir('room with spaces'), 'room_with_spaces')
     })
 
     it('truncates long names', () => {
-      let bm = new BackupManager('test', null, { info: () => {}, debug: () => {} })
+      let bm = new BackupManager('test', { info: () => {}, debug: () => {} })
       let long = 'a'.repeat(200)
       assert.ok(bm.sanitizeDir(long).length <= 128)
     })
 
     it('returns "default" for empty after sanitization', () => {
-      let bm = new BackupManager('test', null, { info: () => {}, debug: () => {} })
+      let bm = new BackupManager('test', { info: () => {}, debug: () => {} })
       // Empty string gets replaced with 'default'; slashes become underscores
       assert.equal(bm.sanitizeDir(''), 'default')
     })
@@ -905,7 +905,7 @@ describe('backup', () => {
   describe('validateInbound', () => {
     let bm
     beforeEach(() => {
-      bm = new BackupManager('test', null, { info: () => {}, debug: () => {} })
+      bm = new BackupManager('test', { info: () => {}, debug: () => {} })
     })
 
     it('returns valid for normal data', () => {
@@ -965,7 +965,7 @@ describe('backup', () => {
   describe('shouldOverwrite', () => {
     let bm
     beforeEach(() => {
-      bm = new BackupManager('test', null, { info: () => {}, debug: () => {} })
+      bm = new BackupManager('test', { info: () => {}, debug: () => {} })
     })
 
     it('allows tombstoned overwrites', () => {
@@ -984,7 +984,7 @@ describe('backup', () => {
 
   describe('listBackups', () => {
     it('returns empty array when dir does not exist', () => {
-      let bm = new BackupManager('nonexistent-room-xyz', null, { info: () => {}, debug: () => {} })
+      let bm = new BackupManager('nonexistent-room-xyz', { info: () => {}, debug: () => {} })
       let backups = bm.listBackups()
       assert.ok(Array.isArray(backups))
       assert.equal(backups.length, 0)
@@ -994,7 +994,7 @@ describe('backup', () => {
   describe('saveSnapshot size limit', () => {
     it('returns null and warns when snapshot exceeds maxBackupSize', async () => {
       let warnings = []
-      let bm = new BackupManager('test', null, {
+      let bm = new BackupManager('test', {
         info: () => {}, debug: () => {},
         warn: (msg) => warnings.push(msg)
       }, { maxBackupSize: 100 })  // 100 bytes — any real snapshot exceeds this
@@ -1008,10 +1008,13 @@ describe('backup', () => {
 
     it('saves normally when under size limit', async () => {
       let infos = []
-      let bm = new BackupManager('size-test-room', null, {
+      let bm = new BackupManager('size-test-room', {
         info: (msg) => infos.push(msg),
         debug: () => {}, warn: () => {}
-      }, { maxBackupSize: 10 * 1024 * 1024 })
+      }, {
+        maxBackupSize: 10 * 1024 * 1024,
+        dataDir: require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'troparcel-'))
+      })
 
       let result = await bm.saveSnapshot([
         { identity: 'abc', localId: 1, metadata: { title: 'ok' } }
@@ -1034,33 +1037,61 @@ describe('crdt-schema', () => {
   const Y = require('yjs')
   const schema = require('../src/crdt-schema')
 
-  describe('getItemAnnotations', () => {
-    it('creates item structure with all sections', () => {
-      let doc = new Y.Doc()
-      let sections = schema.getItemAnnotations(doc, 'test-identity')
-      assert.ok(sections.metadata)
-      assert.ok(sections.tags)
-      assert.ok(sections.notes)
-      assert.ok(sections.photos)
-      assert.ok(sections.selections)
-      assert.ok(sections.selectionMeta)
-      assert.ok(sections.selectionNotes)
-      assert.ok(sections.transcriptions)
-      assert.ok(sections.lists)
+  describe('concurrent first writes (why schema v5 exists)', () => {
+    let exchange = (a, b) => {
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      Y.applyUpdate(b, Y.encodeStateAsUpdate(a))
+    }
+
+    it('two peers creating the same item both keep their writes', () => {
+      for (let i = 0; i < 50; i++) {
+        let a = new Y.Doc()
+        let b = new Y.Doc()
+        schema.setNote(a, 'item1', 'n_a', { text: 'alice' }, 'alice', 1)
+        schema.setTag(b, 'item1', { name: 'bob-tag' }, 'bob', 1)
+        exchange(a, b)
+        for (let d of [a, b]) {
+          assert.ok(schema.getNotes(d, 'item1').n_a, 'alice\'s note survives')
+          assert.equal(schema.getTags(d, 'item1').length, 1, 'bob\'s tag survives')
+        }
+      }
     })
 
-    it('returns same structure on repeated calls', () => {
-      let doc = new Y.Doc()
-      let s1 = schema.getItemAnnotations(doc, 'test-identity')
-      let s2 = schema.getItemAnnotations(doc, 'test-identity')
-      assert.equal(s1.metadata, s2.metadata)
+    it('two peers adding the first note to an item both keep it', () => {
+      for (let i = 0; i < 50; i++) {
+        let a = new Y.Doc()
+        let b = new Y.Doc()
+        schema.setItemChecksums(a, 'item1', ['x'])
+        exchange(a, b)
+        schema.setNote(a, 'item1', 'n_a', { text: 'a' }, 'alice', 1)
+        schema.setNote(b, 'item1', 'n_b', { text: 'b' }, 'bob', 1)
+        exchange(a, b)
+        assert.deepEqual(Object.keys(schema.getNotes(a, 'item1')).sort(), ['n_a', 'n_b'])
+      }
     })
 
-    it('creates separate structures for different identities', () => {
+    it('a v4 room is copied into the v5 layout', () => {
+      let { YKeyValue } = require('y-utility/y-keyvalue')
       let doc = new Y.Doc()
-      let s1 = schema.getItemAnnotations(doc, 'identity-1')
-      let s2 = schema.getItemAnnotations(doc, 'identity-2')
-      assert.notEqual(s1.metadata, s2.metadata)
+      let item = new Y.Map()
+      doc.getMap('annotations').set('item1', item)
+      let notes = new Y.Map()
+      item.set('notes', notes)
+      notes.set('n_1', { uuid: 'n_1', text: 'old', author: 'alice' })
+      let tags = new Y.Map()
+      item.set('tags', tags)
+      tags.set('Evidence', { name: 'Evidence', author: 'alice' })
+      let meta = new Y.Array()
+      item.set('metadata', meta)
+      new YKeyValue(meta).set('dc:title', { text: 'T', author: 'alice' })
+      item.set('checksums', 'c1,c2')
+
+      assert.equal(schema.migrateFromV4(doc), 1)
+      assert.equal(schema.getNotes(doc, 'item1').n_1.text, 'old')
+      assert.equal(schema.getTags(doc, 'item1')[0].name, 'Evidence')
+      assert.equal(schema.getMetadata(doc, 'item1')['dc:title'].text, 'T')
+      assert.deepEqual(schema.getItemChecksums(doc, 'item1'), ['c1', 'c2'])
+      assert.deepEqual(schema.getIdentities(doc), ['item1'])
     })
   })
 
@@ -1176,39 +1207,6 @@ describe('crdt-schema', () => {
 })
 
 // ============================================================
-//  api-client.js
-// ============================================================
-
-describe('api-client', () => {
-  const { ApiClient } = require('../src/api-client')
-
-  it('creates client with default port', () => {
-    let client = new ApiClient()
-    assert.equal(client.port, 2019)
-    assert.equal(client.host, '127.0.0.1')
-  })
-
-  it('creates client with custom port', () => {
-    let client = new ApiClient(2029)
-    assert.equal(client.port, 2029)
-  })
-
-  it('ping returns false when server is not running', async () => {
-    let client = new ApiClient(19999)
-    let result = await client.ping()
-    assert.equal(result, false)
-  })
-
-  it('importItems blocks file paths', async () => {
-    let client = new ApiClient()
-    await assert.rejects(
-      () => client.importItems({ file: '/etc/passwd' }),
-      { message: /File path import is blocked/ }
-    )
-  })
-})
-
-// ============================================================
 //  plugin.js
 // ============================================================
 
@@ -1236,7 +1234,7 @@ describe('plugin', () => {
       ctx.logger.info = (msg) => logs.push(msg)
 
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
-      assert.ok(logs.some(m => m.includes('skipping sync in prefs window')))
+      assert.ok(!logs.some(m => m.startsWith('Troparcel —')))
       assert.equal(plugin.engine, null)
     })
 
@@ -1245,8 +1243,8 @@ describe('plugin', () => {
       let ctx = mockContext({ bindings: { name: 'prefs' } })
       ctx.logger.info = (msg) => logs.push(msg)
 
-      let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
-      assert.ok(logs.some(m => m.includes('skipping sync in prefs window')))
+      new TroparcelPlugin({ autoSync: false }, ctx)
+      assert.ok(!logs.some(m => m.startsWith('Troparcel —')))
     })
 
     it('does not skip in project window', () => {
@@ -1255,8 +1253,7 @@ describe('plugin', () => {
       ctx.logger.info = (msg) => logs.push(msg)
 
       new TroparcelPlugin({ autoSync: false }, ctx)
-      assert.ok(!logs.some(m => m.includes('skipping sync')))
-      assert.ok(logs.some(m => m.includes('v5.0')))
+      assert.ok(logs.some(m => m.startsWith('Troparcel —')))
     })
   })
 
@@ -1265,11 +1262,11 @@ describe('plugin', () => {
       let ctx = mockContext()
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
 
+      assert.equal(plugin.options.transport, 'websocket')
       assert.equal(plugin.options.serverUrl, 'ws://localhost:2468')
       assert.equal(plugin.options.syncMode, 'auto')
       assert.equal(plugin.options.autoSync, false)
       assert.equal(plugin.options.apiPort, 2019)
-      assert.equal(plugin.options.startupDelay, 8000)
       assert.equal(plugin.options.syncMetadata, true)
       assert.equal(plugin.options.syncTags, true)
       assert.equal(plugin.options.syncNotes, true)
@@ -1331,6 +1328,34 @@ describe('plugin', () => {
       assert.equal(plugin.options.room, 'troparcel-default')
     })
 
+    it('takes transport, address, room and token from a connection string', () => {
+      let plugin = new TroparcelPlugin({
+        autoSync: false,
+        connection: 'troparcel://ws/archive.example.edu:2468/letters?token=s3cret'
+      }, mockContext())
+      assert.equal(plugin.options.transport, 'websocket')
+      assert.equal(plugin.options.serverUrl, 'ws://archive.example.edu:2468')
+      assert.equal(plugin.options.room, 'letters')
+      assert.equal(plugin.options.roomToken, 's3cret')
+    })
+
+    it('takes a bare folder path as a shared folder', () => {
+      let plugin = new TroparcelPlugin({
+        autoSync: false, connection: '/home/alice/Nextcloud/tropy'
+      }, mockContext())
+      assert.equal(plugin.options.transport, 'file')
+      assert.equal(plugin.options.syncDir, '/home/alice/Nextcloud/tropy')
+    })
+
+    it('still reads the separate fields older versions saved', () => {
+      let plugin = new TroparcelPlugin({
+        autoSync: false, serverUrl: 'ws://old:2468', room: 'r', roomToken: 't'
+      }, mockContext())
+      assert.equal(plugin.options.serverUrl, 'ws://old:2468')
+      assert.equal(plugin.options.room, 'r')
+      assert.equal(plugin.options.roomToken, 't')
+    })
+
     it('uses explicit room when provided', () => {
       let ctx = mockContext()
       let plugin = new TroparcelPlugin({
@@ -1347,8 +1372,7 @@ describe('plugin', () => {
       let plugin = new TroparcelPlugin({ autoSync: false }, ctx)
       let status = plugin.getStatus()
 
-      assert.equal(status.version, '5.0.0')
-      assert.equal(status.backgroundSync, false)
+      assert.equal(status.version, require('../package.json').version)
       assert.equal(status.engine, null)
     })
 
@@ -1471,20 +1495,6 @@ describe('store-adapter', () => {
       ontology: { template: {}, vocab: {} }
     }
   }
-
-  describe('getAllItems', () => {
-    it('returns all items as summaries', () => {
-      let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
-      let items = adapter.getAllItems()
-
-      assert.equal(items.length, 2)
-      let item1 = items.find(i => i.id === 1)
-      assert.ok(item1)
-      assert.deepEqual(item1.photos, [10])
-      assert.deepEqual(item1.tags, [100])
-    })
-  })
 
   describe('getItemFull', () => {
     it('returns fully enriched item', () => {
@@ -1626,14 +1636,6 @@ describe('store-adapter', () => {
     })
   })
 
-  describe('ping', () => {
-    it('returns true when store exists', () => {
-      let store = mockStore(mockState())
-      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
-      assert.ok(adapter.ping())
-    })
-  })
-
   describe('_esc', () => {
     it('escapes HTML entities', () => {
       let store = mockStore(mockState())
@@ -1644,51 +1646,20 @@ describe('store-adapter', () => {
     })
   })
 
-  describe('dispatchSuppressed (V3)', () => {
-    it('dispatches action with change detection suppressed', () => {
-      let dispatched = []
-      let store = {
-        getState: () => mockState(),
-        dispatch: (action) => { dispatched.push(action); return action },
-        subscribe: () => () => {}
+  describe('probe', () => {
+    it('accepts a complete Tropy state', () => {
+      let full = { ...mockState(), project: {}, nav: {} }
+      let adapter = new StoreAdapter(mockStore(full), { warn: () => {} })
+      assert.deepEqual(adapter.probe(), { ok: true, problems: [] })
+    })
+
+    it('names every missing slice, and refuses', () => {
+      let adapter = new StoreAdapter(mockStore({ items: {}, photos: {} }), { warn: () => {} })
+      let { ok, problems } = adapter.probe()
+      assert.equal(ok, false)
+      for (let slice of ['notes', 'metadata', 'tags', 'activities', 'transcriptions']) {
+        assert.ok(problems.some(p => p.includes(`state.${slice}`)), slice)
       }
-      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
-      adapter.dispatchSuppressed({ type: 'test.action', payload: {} })
-      assert.equal(dispatched.length, 1)
-      assert.equal(adapter._suppressChangeDetection, false)
-    })
-
-    it('restores change detection even on dispatch error', () => {
-      let store = {
-        getState: () => mockState(),
-        dispatch: () => { throw new Error('boom') },
-        subscribe: () => () => {}
-      }
-      let adapter = new StoreAdapter(store, { debug: () => {}, warn: () => {} })
-      try { adapter.dispatchSuppressed({ type: 'test.action' }) } catch {}
-      assert.equal(adapter._suppressChangeDetection, false)
-    })
-  })
-
-  describe('_validateStateShape', () => {
-    it('does not warn when all slices present', () => {
-      let warnings = []
-      let store = mockStore(mockState())
-      new StoreAdapter(store, { debug: () => {}, warn: (msg) => warnings.push(msg) })
-      assert.equal(warnings.length, 0)
-    })
-
-    it('warns when slices are missing', () => {
-      let warnings = []
-      let store = mockStore({ items: {}, photos: {} })  // missing 5 slices
-      new StoreAdapter(store, { debug: () => {}, warn: (msg) => warnings.push(msg) })
-      assert.equal(warnings.length, 1)
-      assert.ok(warnings[0].includes('missing expected slices'))
-      assert.ok(warnings[0].includes('selections'))
-      assert.ok(warnings[0].includes('notes'))
-      assert.ok(warnings[0].includes('metadata'))
-      assert.ok(warnings[0].includes('tags'))
-      assert.ok(warnings[0].includes('lists'))
     })
   })
 })
@@ -1991,7 +1962,7 @@ describe('apply (unit tests via helpers)', () => {
     let doc = buildCRDTDoc({
       templates: { [tmpl.uri]: tmpl }
     })
-    let state = mockState({ ontology: { template: {} } })
+    let state = mockState({ ontology: { template: { 'https://tropy.org/v1/templates/generic': { id: 'https://tropy.org/v1/templates/generic', name: 'Tropy Generic' } } } })
     let store = mockStore(state)
     let ctx = mockSyncContext({ doc, state, store, userId: 'local-user' })
     await ctx.applyTemplates()
@@ -2005,7 +1976,7 @@ describe('apply (unit tests via helpers)', () => {
     let doc = buildCRDTDoc({
       templates: { 'https://example.org/tmpl/mine': buildTemplate({ name: 'My Template' }) }
     })
-    let state = mockState({ ontology: { template: {} } })
+    let state = mockState({ ontology: { template: { 'https://tropy.org/v1/templates/generic': { id: 'https://tropy.org/v1/templates/generic', name: 'Tropy Generic' } } } })
     let store = mockStore(state)
     let ctx = mockSyncContext({ doc, state, store, userId: 'remote-user' })
     await ctx.applyTemplates()
@@ -2096,7 +2067,7 @@ describe('roundtrip (push -> CRDT -> apply)', () => {
     ctxA.pushTemplates(1)
     ctxA.pushListHierarchy(1)
 
-    let stateB = mockState({ ontology: { template: {} }, lists: {} })
+    let stateB = mockState({ ontology: { template: { 'https://tropy.org/v1/templates/generic': { id: 'https://tropy.org/v1/templates/generic', name: 'Tropy Generic' } } }, lists: {} })
     let storeB = mockStore(stateB)
     let ctxB = mockSyncContext({ doc: ctxA.doc, state: stateB, store: storeB, userId: 'user-b' })
     await ctxB.applyTemplates()
@@ -2510,9 +2481,9 @@ describe('Team 6: Store Adapter Correctness (BLUE)', () => {
   }
 
   // 6.2: Empty state
-  it('getAllItems returns [] on empty state', () => {
+  it('getAllItemsFull returns [] on empty state', () => {
     let adapter = new StoreAdapter(mkStore(ms()), noopLogger)
-    let items = adapter.getAllItems()
+    let items = adapter.getAllItemsFull()
     assert.ok(Array.isArray(items))
     assert.equal(items.length, 0)
   })
@@ -2598,7 +2569,7 @@ describe('Team 6: Store Adapter Correctness (BLUE)', () => {
   })
 
   // 6.8: Large state
-  it('getAllItems handles 500 items without error', () => {
+  it('getAllItemsFull handles 500 items without error', () => {
     let items = {}
     let photos = {}
     for (let i = 1; i <= 500; i++) {
@@ -2606,7 +2577,7 @@ describe('Team 6: Store Adapter Correctness (BLUE)', () => {
       photos[i + 1000] = { id: i + 1000, item: i, checksum: `cs-${i}`, selections: [], notes: [], transcriptions: [] }
     }
     let adapter = new StoreAdapter(mkStore(ms({ items, photos })), noopLogger)
-    let result = adapter.getAllItems()
+    let result = adapter.getAllItemsFull()
     assert.equal(result.length, 500)
   })
 
@@ -2687,7 +2658,7 @@ describe('Team 2: Vault Integrity Invariants (BLUE)', () => {
   })
 
   // 2.3: LRU eviction breaks invariant (KNOWN BUG)
-  it('LRU eviction preserves bidirectional invariant', { todo: 'Known bug: one-sided LRU eviction' }, () => {
+  it('LRU eviction preserves bidirectional invariant', () => {
     let v = new SyncVault()
     for (let i = 0; i < 100; i++) {
       v.noteIdToCrdtKey.set(`local-${i}`, `crdt-${i}`)
@@ -2719,13 +2690,11 @@ describe('Team 2: Vault Integrity Invariants (BLUE)', () => {
     v.pushedListHashes.set('l_1', 'hash2')
     v.listIdToCrdtUuid.set(42, 'l_1')
     v.crdtUuidToListId.set('l_1', 42)
-    v.attributionTagIds.set('synced', 99)
     v.clear()
     assert.equal(v.pushedTemplateHashes.size, 0, 'pushedTemplateHashes not cleared')
     assert.equal(v.pushedListHashes.size, 0, 'pushedListHashes not cleared')
     assert.equal(v.listIdToCrdtUuid.size, 0, 'listIdToCrdtUuid not cleared')
     assert.equal(v.crdtUuidToListId.size, 0, 'crdtUuidToListId not cleared')
-    assert.equal(v.attributionTagIds.size, 0, 'attributionTagIds not cleared')
   })
 
   // 2.10: failedNoteKeys migration — object format
@@ -3036,7 +3005,6 @@ describe('Team 3: Identity Collision & Fuzzy Match (RED)', () => {
 describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
   const { parseConnectionString, generateConnectionString } = require('../src/connection-string')
   const { BackupManager } = require('../src/backup')
-  const { ApiClient } = require('../src/api-client')
   const noopLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
 
   // 8.1: Path traversal in connection string
@@ -3062,14 +3030,14 @@ describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
 
   // 8.8: sanitizeDir with null bytes
   it('sanitizeDir handles null bytes', () => {
-    let bm = new BackupManager('test', null, noopLogger)
+    let bm = new BackupManager('test', noopLogger)
     let result = bm.sanitizeDir('room\x00evil')
     assert.ok(!result.includes('\x00'))
   })
 
   // 8.8b: sanitizeDir with Windows reserved names
   it('sanitizeDir handles Windows reserved names', () => {
-    let bm = new BackupManager('test', null, noopLogger)
+    let bm = new BackupManager('test', noopLogger)
     for (let reserved of ['CON', 'PRN', 'NUL', 'COM1', 'LPT1']) {
       let result = bm.sanitizeDir(reserved)
       assert.ok(result.length > 0, `sanitizeDir should handle ${reserved}`)
@@ -3079,24 +3047,15 @@ describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
   // 8.9: Path separators — sanitizeDir strips slashes (dots allowed, safe
   //   because result is used as a single directory name under a fixed parent)
   it('sanitizeDir neutralizes path separators', () => {
-    let bm = new BackupManager('test', null, noopLogger)
+    let bm = new BackupManager('test', noopLogger)
     let result = bm.sanitizeDir('../../etc/passwd')
     assert.ok(!result.includes('/'), 'slashes must be removed')
     assert.ok(!result.includes('\\'), 'backslashes must be removed')
   })
 
-  // 8.10: API client file path bypass
-  it('importItems blocks /etc/passwd', async () => {
-    let client = new ApiClient()
-    await assert.rejects(
-      () => client.importItems({ file: '/etc/passwd' }),
-      { message: /blocked/i }
-    )
-  })
-
   // 8.4: Backup size boundary — over limit
   it('validateInbound rejects oversized note', () => {
-    let bm = new BackupManager('test', null, noopLogger, { maxNoteSize: 100 })
+    let bm = new BackupManager('test', noopLogger, { maxNoteSize: 100 })
     let result = bm.validateInbound('item-1', {
       notes: { 'note-1': { html: 'x'.repeat(101) } }
     })
@@ -3105,7 +3064,7 @@ describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
 
   // 8.4b: Under limit
   it('validateInbound accepts note under size limit', () => {
-    let bm = new BackupManager('test', null, noopLogger, { maxNoteSize: 100 })
+    let bm = new BackupManager('test', noopLogger, { maxNoteSize: 100 })
     let result = bm.validateInbound('item-1', {
       notes: { 'note-1': { html: 'x'.repeat(50) } }
     })
@@ -3114,7 +3073,7 @@ describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
 
   // 8.13: Missing backup directory
   it('listBackups handles missing directory', () => {
-    let bm = new BackupManager('nonexistent-room-xyz-test', null, noopLogger)
+    let bm = new BackupManager('nonexistent-room-xyz-test', noopLogger)
     let backups = bm.listBackups()
     assert.ok(Array.isArray(backups))
     assert.equal(backups.length, 0)

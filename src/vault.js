@@ -24,6 +24,11 @@ const Y = require('yjs')
  */
 
 const MAX_PUSHED_ITEMS = 5000
+
+/** Where vaults and backups live unless the `dataDir` option says. */
+function defaultRoot() {
+  return path.join(os.homedir(), '.troparcel')
+}
 const MAX_APPLIED_KEYS = 50000
 const MAX_ID_MAPPINGS = 50000
 
@@ -35,6 +40,7 @@ class SyncVault {
 
     // Per-identity push state
     this.pushedHashes = new Map()  // identity -> content hash
+    this._itemHashes = new WeakMap() // item object -> content hash
 
     // Applied key tracking (flat Sets — keys are globally unique UUIDs)
     this.appliedNoteKeys = new Set()
@@ -64,50 +70,48 @@ class SyncVault {
     // Dirty flag — set when applied keys change, cleared after persist
     this._dirty = false
 
-    // v4: Push sequence counter (monotonic per-author).
+    // Push sequence counter (monotonic per-author).
     // Diagnostic-only: stored in every CRDT entry for ordering/debugging.
     // NOT used for conflict resolution — see hasLocalEdit() below.
     this.pushSeq = 0
 
-    // v4: Logic-based conflict tracking
-    // Records value hash of what we last pushed per field
-    // Intentionally NOT persisted — rebuilt on first push cycle
+    // The three-way merge BASE: per field, the hash of the value this peer
+    // last agreed with the room on — what it last pushed OR applied. It is
+    // persisted: without it, after a restart every local value looks like
+    // a fresh edit and stale local values overwrite the room.
     this.pushedFieldValues = new Map()  // `${identity}:${field}` -> value hash
 
-    // v4: Locally-dismissed remote deletions
+    // The remote content last applied, per note / transcription key, so an
+    // unchanged remote entry is not re-applied and a changed one is.
+    this.remoteNoteHashes = new Map()
+    this.remoteTxHashes = new Map()
+
+    // Locally-dismissed remote deletions
     // Map<key, pushSeq> — pushSeq-aware: auto-undismiss when author revises content
     this.dismissedKeys = new Map()
 
-    // v4: Track notes that have been retracted (tombstone applied)
+    // Track notes that have been retracted (tombstone applied)
     // Prevents re-retraction on every apply cycle
     this.retractedNoteKeys = new Set()
 
-    // v4: Track content hash of last-applied note content per CRDT key.
+    // Track content hash of last-applied note content per CRDT key.
     // Used to detect local edits before overwriting with remote content.
     this.appliedNoteHashes = new Map()  // crdtKey -> FNV-1a hash of applied HTML
 
-    // v4: Original authors — maps CRDT key -> author userId.
+    // Original authors — maps CRDT key -> author userId.
     // Recorded when content is first seen (push or apply).
     // Used for apply-side tombstone validation (defense-in-depth).
     this.originalAuthors = new Map()
 
-    // v6: Template/list push change detection
+    // Template/list push change detection
     this.pushedTemplateHashes = new Map()  // URI -> content hash
     this.pushedListHashes = new Map()      // list name -> content hash
 
-    // v6: List UUID mappings (local list ID <-> CRDT UUID)
+    // List UUID mappings (local list ID <-> CRDT UUID)
     this.listIdToCrdtUuid = new Map()
     this.crdtUuidToListId = new Map()
 
-    // v6: Attribution tag ID cache — tagName -> tagId
-    // Not persisted — rediscovered from store state
-    this.attributionTagIds = new Map()
-
-    // v6: Synced list ID cache
-    // Not persisted — rediscovered from store state
-    this.syncedListId = null
-
-    // V3 attribution: peer userId -> human-readable display name.
+    // peer userId -> human-readable display name.
     // Populated from awareness state in sync-engine._awarenessHandler.
     // NOT persisted — rediscovered each session via the Yjs awareness
     // handshake (every peer broadcasts its name on join/update).
@@ -115,7 +119,7 @@ class SyncVault {
     this.userDisplayNames = new Map()
   }
 
-  // --- V3 attribution: userId -> displayName resolution ---
+  // --- Display names (from awareness) ---
 
   /**
    * Register a peer's display name. Called from awareness handler when a
@@ -177,7 +181,9 @@ class SyncVault {
    */
   markFieldPushed(identity, field, valueHash) {
     let key = `${identity}:${field}`
+    if (this.pushedFieldValues.get(key) === valueHash) return
     this.pushedFieldValues.set(key, valueHash)
+    this._dirty = true
   }
 
   // --- CRDT change detection ---
@@ -212,7 +218,13 @@ class SyncVault {
   }
 
   hasItemChanged(identity, item) {
-    let hash = this._fastHash(item)
+    // The adapter returns the same object for an unchanged item, so its
+    // hash is computed once.
+    let hash = this._itemHashes.get(item)
+    if (hash === undefined) {
+      hash = this._fastHash(item)
+      this._itemHashes.set(item, hash)
+    }
     let last = this.pushedHashes.get(identity)
     return { changed: last !== hash, hash }
   }
@@ -478,15 +490,38 @@ class SyncVault {
 
   // --- Pruning ---
 
+  /**
+   * Drop the oldest fifth of `map` once it reaches `maxSize`. The id maps
+   * come in pairs (local id ↔ CRDT key); evicting one side only would leave
+   * the other pointing at nothing, so the partner entries go too.
+   */
   _evictIfNeeded(map, maxSize) {
     if (map.size < maxSize) return
+    let partner = this._partnerOf(map)
     let toRemove = Math.floor(maxSize * 0.2)
-    let iter = map.keys()
+    let iter = map.entries()
     for (let i = 0; i < toRemove; i++) {
       let next = iter.next()
       if (next.done) break
-      map.delete(next.value)
+      let [key, value] = next.value
+      map.delete(key)
+      if (partner && partner.get(value) === key) partner.delete(value)
     }
+  }
+
+  _partnerOf(map) {
+    let pairs = [
+      [this.noteIdToCrdtKey, this.crdtKeyToNoteId],
+      [this.txIdToCrdtKey, this.crdtKeyToTxId],
+      [this.selIdToCrdtKey, this.crdtKeyToSelId],
+      [this.listNameToCrdtKey, this.crdtKeyToListName],
+      [this.listIdToCrdtUuid, this.crdtUuidToListId]
+    ]
+    for (let [a, b] of pairs) {
+      if (map === a) return b
+      if (map === b) return a
+    }
+    return null
   }
 
   pruneAppliedKeys() {
@@ -508,10 +543,10 @@ class SyncVault {
 
   // --- Persistence ---
 
-  async persistToFile(room, userId) {
+  async persistToFile(room, userId, root = defaultRoot()) {
     if (!room) return
     try {
-      let dir = path.join(os.homedir(), '.troparcel', 'vault')
+      let dir = path.join(root, 'vault')
       await fs.promises.mkdir(dir, { recursive: true })
       let suffix = userId ? '_' + this._sanitizeRoom(userId) : ''
       let file = path.join(dir, this._sanitizeRoom(room) + suffix + '.json')
@@ -532,11 +567,13 @@ class SyncVault {
         retractedNoteKeys: Array.from(this.retractedNoteKeys),
         appliedNoteHashes: Array.from(this.appliedNoteHashes.entries()),
         originalAuthors: Array.from(this.originalAuthors.entries()),
-        // v6: Template/list push hashes + list UUID mappings
+        // Template/list push hashes + list UUID mappings
         pushedTemplateHashes: Array.from(this.pushedTemplateHashes.entries()),
         pushedListHashes: Array.from(this.pushedListHashes.entries()),
-        listUuidMappings: Array.from(this.crdtUuidToListId.entries())
-        // pushedFieldValues intentionally NOT persisted — rebuilt on first push cycle
+        listUuidMappings: Array.from(this.crdtUuidToListId.entries()),
+        fieldBases: Array.from(this.pushedFieldValues.entries()),
+        remoteNoteHashes: Array.from(this.remoteNoteHashes.entries()),
+        remoteTxHashes: Array.from(this.remoteTxHashes.entries())
       }
       await fs.promises.writeFile(tmpFile, JSON.stringify(data))
       await fs.promises.rename(tmpFile, file)
@@ -546,10 +583,10 @@ class SyncVault {
     }
   }
 
-  loadFromFile(room, userId) {
+  loadFromFile(room, userId, root = defaultRoot()) {
     if (!room) return false
     try {
-      let dir = path.join(os.homedir(), '.troparcel', 'vault')
+      let dir = path.join(root, 'vault')
       let suffix = userId ? '_' + this._sanitizeRoom(userId) : ''
       let file = path.join(dir, this._sanitizeRoom(room) + suffix + '.json')
       let raw
@@ -603,25 +640,25 @@ class SyncVault {
           this.txIdToCrdtKey.set(String(txId), crdtKey)
         }
       }
-      // v4: Restore selection mappings
+      // Restore selection mappings
       if (Array.isArray(data.selMappings)) {
         for (let [uuid, selId] of data.selMappings) {
           this.crdtKeyToSelId.set(uuid, String(selId))
           this.selIdToCrdtKey.set(String(selId), uuid)
         }
       }
-      // v4: Restore list mappings
+      // Restore list mappings
       if (Array.isArray(data.listMappings)) {
         for (let [uuid, listName] of data.listMappings) {
           this.crdtKeyToListName.set(uuid, listName)
           this.listNameToCrdtKey.set(listName, uuid)
         }
       }
-      // v4: Restore push sequence
+      // Restore push sequence
       if (typeof data.pushSeq === 'number') {
         this.pushSeq = data.pushSeq
       }
-      // v4: Restore dismissed keys (backward-compat: old Set format → pushSeq 0)
+      // Restore dismissed keys (backward-compat: old Set format → pushSeq 0)
       if (Array.isArray(data.dismissedKeys)) {
         for (let entry of data.dismissedKeys) {
           if (Array.isArray(entry) && entry.length === 2) {
@@ -631,31 +668,38 @@ class SyncVault {
           }
         }
       }
-      // v4: Restore retracted note keys
+      // Restore retracted note keys
       if (Array.isArray(data.retractedNoteKeys)) {
         for (let k of data.retractedNoteKeys) this.retractedNoteKeys.add(k)
       }
-      // v4: Restore applied note content hashes
+      // Restore applied note content hashes
       if (Array.isArray(data.appliedNoteHashes)) {
         for (let [k, v] of data.appliedNoteHashes) this.appliedNoteHashes.set(k, v)
       }
-      // v4: Restore original authors
+      // Restore original authors
       if (Array.isArray(data.originalAuthors)) {
         for (let [k, v] of data.originalAuthors) this.originalAuthors.set(k, v)
       }
-      // v6: Restore template/list push hashes
+      // Restore template/list push hashes
       if (Array.isArray(data.pushedTemplateHashes)) {
         for (let [k, v] of data.pushedTemplateHashes) this.pushedTemplateHashes.set(k, v)
       }
       if (Array.isArray(data.pushedListHashes)) {
         for (let [k, v] of data.pushedListHashes) this.pushedListHashes.set(k, v)
       }
-      // v6: Restore list UUID mappings
+      // Restore list UUID mappings
       if (Array.isArray(data.listUuidMappings)) {
         for (let [uuid, listId] of data.listUuidMappings) {
           this.crdtUuidToListId.set(uuid, listId)
           this.listIdToCrdtUuid.set(listId, uuid)
         }
+      }
+      for (let [field, list] of [
+        ['pushedFieldValues', data.fieldBases],
+        ['remoteNoteHashes', data.remoteNoteHashes],
+        ['remoteTxHashes', data.remoteTxHashes]
+      ]) {
+        if (Array.isArray(list)) for (let [k, v] of list) this[field].set(k, v)
       }
       return true
     } catch {
@@ -685,6 +729,8 @@ class SyncVault {
     this._cachedAnnotationCount = 0
     this.failedNoteKeys.clear()
     this.pushedFieldValues.clear()
+    this.remoteNoteHashes.clear()
+    this.remoteTxHashes.clear()
     this.dismissedKeys.clear()
     this.retractedNoteKeys.clear()
     this.appliedNoteHashes.clear()
@@ -693,9 +739,8 @@ class SyncVault {
     this.pushedListHashes.clear()
     this.listIdToCrdtUuid.clear()
     this.crdtUuidToListId.clear()
-    this.attributionTagIds.clear()
     this.pushSeq = 0
   }
 }
 
-module.exports = { SyncVault }
+module.exports = { SyncVault, defaultRoot }

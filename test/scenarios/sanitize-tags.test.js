@@ -1,13 +1,10 @@
 'use strict'
 
 /**
- * Sanitize SAFE_TAGS — TDD anchor for seed tropy-plugin-8073 (Recon-plan W3.T2).
- *
- * Verifies the SAFE_TAGS audit table from
- * troparcel/docs/architecture/subsystems/notes-html-pipeline.md.
- *
- * Pre-W3.T2: u, s, h1-h6, code, pre, div pass through (over-permissive).
- * Post-W3.T2: those tags are stripped (formatting drops, content survives).
+ * Sanitize SAFE_TAGS: only tags Tropy's note editor schema has get through.
+ * u, s, h1-h6, code, pre and div are stripped; their text survives.
+ * (normalize-on-push.js turns u and s into styled spans BEFORE sending, so
+ * a collaborator's formatting is kept.)
  */
 
 const test = require('node:test')
@@ -66,26 +63,24 @@ test('sanitize: data: href in img blocked (img not in SAFE_TAGS at all)', () => 
   )
 })
 
-// --- Tags audited 2026-05-08 as over-permissive vs Tropy editor schema ---
-// These tests are SKIPPED until W3.T2 lands — current sanitizer permits them.
-// Flip `skip` → undefined to lock in the fix.
+// --- Tags outside Tropy's editor schema are stripped ---
 
-test('sanitize [W3.T2]: <u> stripped (Tropy uses span+text-decoration)',() => {
+test('sanitize: <u> stripped (Tropy uses span+text-decoration)',() => {
   assert.doesNotMatch(sanitizeHtml('<u>x</u>'), /<u>/)
 })
 
-test('sanitize [W3.T2]: <s> stripped',() => {
+test('sanitize: <s> stripped',() => {
   assert.doesNotMatch(sanitizeHtml('<s>x</s>'), /<s>/)
 })
 
-test('sanitize [W3.T2]: heading tags stripped',() => {
+test('sanitize: heading tags stripped',() => {
   for (const h of ['h1','h2','h3','h4','h5','h6']) {
     const out = sanitizeHtml(`<${h}>x</${h}>`)
     assert.doesNotMatch(out, new RegExp(`<${h}>`), `${h} should be stripped`)
   }
 })
 
-test('sanitize [W3.T2]: code/pre/div stripped',() => {
+test('sanitize: code/pre/div stripped',() => {
   assert.doesNotMatch(sanitizeHtml('<code>x</code>'), /<code>/)
   assert.doesNotMatch(sanitizeHtml('<pre>x</pre>'), /<pre>/)
   assert.doesNotMatch(sanitizeHtml('<div>x</div>'), /<div>/)
@@ -93,7 +88,7 @@ test('sanitize [W3.T2]: code/pre/div stripped',() => {
 
 // --- Content survival contract — even when format strips, text remains ---
 
-test('sanitize [W3.T2]: stripped tags retain their text content',() => {
+test('sanitize: stripped tags retain their text content',() => {
   // After tightening, the dropped tags should leave inner text intact
   for (const tag of ['u', 's', 'h1', 'code', 'pre', 'div']) {
     const out = sanitizeHtml(`<${tag}>visible text</${tag}>`)

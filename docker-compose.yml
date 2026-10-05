@@ -2,7 +2,9 @@ version: "3.8"
 
 services:
   troparcel:
-    build: ./server
+    build:
+      context: .
+      dockerfile: server/Dockerfile
     ports:
       - "2468:2468"
     volumes:

@@ -1,15 +1,17 @@
-FROM node:20-alpine
+# Built from the repository root (docker-compose.yml sets the context):
+# the server shares src/purge.js with the plugin.
+FROM node:24-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --production
+COPY server/package.json server/package-lock.json ./server/
+RUN cd server && npm ci --omit=dev
 
-COPY index.js ./
+COPY server/index.js ./server/
+COPY src/purge.js src/connection-string.js ./src/
 
 RUN mkdir -p /app/data && chown node:node /app/data
 
-# Run as non-root user (#18)
 USER node
 
 ENV PORT=2468
@@ -21,4 +23,4 @@ EXPOSE 2468
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -q -O /dev/null http://localhost:2468/health || exit 1
 
-CMD ["node", "index.js"]
+CMD ["node", "server/index.js"]

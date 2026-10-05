@@ -4,48 +4,27 @@ const crypto = require('crypto')
 const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { normalizeNoteHtml } = require('./normalize-on-push')
+const { isLocalOnlyTag, isLocalOnlyProperty, isLocalOnlyList, isTropyPresetTemplate } = require('./local-only')
 
-// V5 push helpers (W2.T6/T7) — internal, not exported
-
-/**
- * Deterministic content hash for V5 dedup gating.
- * Stable across runs: JSON.stringify with sorted keys.
- */
-function _hashV5Content(obj) {
-  let json = JSON.stringify(obj, Object.keys(obj).sort())
-  return crypto.createHash('sha256').update(json).digest('hex').slice(0, 32)
-}
-
-/**
- * Skip Tropy preset templates (built-in Item/Photo/Selection factory templates).
- * These come from Tropy itself and are not user-created — pushing them would
- * cause every peer to fight over duplicates. URI prefixes per
- * tropy/src/ontology/template.js + Recon-plan W2.T6.
- */
-const TROPY_PRESET_PREFIXES = [
-  'https://tropy.org/v1/templates/generic/',
-  'https://tropy.org/v1/templates/photo',
-  'https://tropy.org/v1/templates/selection'
-]
-function _isPresetTemplateUri(uri) {
-  if (!uri) return true
-  for (let p of TROPY_PRESET_PREFIXES) {
-    if (uri.startsWith(p)) return true
+/** JSON with every object's keys sorted, at every depth. */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort()
+      .map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`
   }
-  return false
+  return JSON.stringify(value)
 }
 
 /**
- * Push mixin — local → CRDT write methods (Schema v4).
- *
- * v4 changes:
- *   - UUID-based keying for notes, selections, transcriptions, lists
- *   - pushSeq (monotonic counter) replaces Date.now() timestamps
- *   - Logic-based conflict checks replace ts > lastPushTs comparisons
- *
- * These methods are mixed onto SyncEngine.prototype via Object.assign.
- * All `this` references resolve to the SyncEngine instance at call time.
+ * Content hash that gates template and list pushes. Every nested field
+ * counts: a replacer array passed to JSON.stringify would also filter
+ * nested keys, and a changed template FIELD would then never be pushed.
  */
+function _contentHash(obj) {
+  return crypto.createHash('sha256').update(stableStringify(obj)).digest('hex').slice(0, 32)
+}
+
 module.exports = {
 
   async pushLocal(items, pushSeq) {
@@ -63,58 +42,62 @@ module.exports = {
       deduped.set(id, item)
     }
 
-    for (let [id, item] of deduped) {
-      let changeCheck = this.vault.hasItemChanged(id, item)
-      if (!changeCheck.changed) {
-        skipped++
-        continue
-      }
-      pushed++
-
-      // P4: Compute checksumMap once per item
-      let checksumMap = identity.buildPhotoChecksumMap(item)
-      this._debug(`pushLocal: ${id.slice(0, 8)} — ${checksumMap.size} photo(s), first checksum: ${[...checksumMap.values()][0]?.slice(0, 12) || 'none'}...`)
-
-      try {
-        // Collect keys during push to avoid recomputing them in saveItemSnapshot
-        let collectedKeys = {}
-        this.doc.transact(() => {
-          // Store photo checksums for fuzzy identity matching (merged items)
-          let checksums = Array.from(checksumMap.values())
-          if (checksums.length > 0) {
-            schema.setItemChecksums(this.doc, id, checksums)
-          }
-          this.pushMetadata(item, id, userId, pushSeq)
-          this.pushTags(item, id, userId, pushSeq)
-          collectedKeys.noteKeys = this.pushNotes(item, id, userId, checksumMap, pushSeq)
-          this.pushPhotoMetadata(item, id, userId, pushSeq)
-          collectedKeys.selectionKeys = this.pushSelections(item, id, userId, checksumMap, pushSeq)
-          collectedKeys.transcriptionKeys = this.pushTranscriptions(item, id, userId, checksumMap, pushSeq)
-          if (this.options.syncLists) {
-            this.pushLists(item, id, userId, pushSeq)
-          }
-          this.pushDeletions(item, id, userId, checksumMap, collectedKeys, pushSeq)
-        }, this.LOCAL_ORIGIN)
-
-        this.saveItemSnapshot(item, id, checksumMap, collectedKeys)
-        this.vault.markPushed(id, changeCheck.hash)
-        // Clear failure count on success (prevents stale counts + memory leak)
-        if (this._pushFailCounts && this._pushFailCounts.has(id)) {
-          this._pushFailCounts.delete(id)
+    // One transaction for the whole push: one update message and one round
+    // of observers, not one per item. Each item's own transact joins it.
+    this.doc.transact(() => {
+      for (let [id, item] of deduped) {
+        let changeCheck = this.vault.hasItemChanged(id, item)
+        if (!changeCheck.changed) {
+          skipped++
+          continue
         }
-      } catch (err) {
-        this.logger.warn(`Failed to push item ${id}`, { error: err.message })
-        // Mark as pushed after repeated failures to prevent infinite retry
-        let failCount = (this._pushFailCounts && this._pushFailCounts.get(id)) || 0
-        if (!this._pushFailCounts) this._pushFailCounts = new Map()
-        this._pushFailCounts.set(id, failCount + 1)
-        if (failCount + 1 >= 3) {
+        pushed++
+
+        // Compute checksumMap once per item
+        let checksumMap = identity.buildPhotoChecksumMap(item)
+        this._debug(`pushLocal: ${id.slice(0, 8)} — ${checksumMap.size} photo(s), first checksum: ${[...checksumMap.values()][0]?.slice(0, 12) || 'none'}...`)
+
+        try {
+          // Collect keys during push to avoid recomputing them in saveItemSnapshot
+          let collectedKeys = {}
+          this.doc.transact(() => {
+            // Store photo checksums for fuzzy identity matching (merged items)
+            let checksums = Array.from(checksumMap.values())
+            if (checksums.length > 0) {
+              schema.setItemChecksums(this.doc, id, checksums)
+            }
+            this.pushMetadata(item, id, userId, pushSeq)
+            this.pushTags(item, id, userId, pushSeq)
+            collectedKeys.noteKeys = this.pushNotes(item, id, userId, checksumMap, pushSeq)
+            this.pushPhotoMetadata(item, id, userId, pushSeq)
+            collectedKeys.selectionKeys = this.pushSelections(item, id, userId, checksumMap, pushSeq)
+            collectedKeys.transcriptionKeys = this.pushTranscriptions(item, id, userId, checksumMap, pushSeq)
+            if (this.options.syncLists) {
+              this.pushLists(item, id, userId, pushSeq)
+            }
+            this.pushDeletions(item, id, userId, checksumMap, collectedKeys, pushSeq)
+          }, this.LOCAL_ORIGIN)
+
+          this.saveItemSnapshot(item, id, checksumMap, collectedKeys)
           this.vault.markPushed(id, changeCheck.hash)
-          this._pushFailCounts.delete(id)
-          this.logger.warn(`Item ${id} push permanently skipped after ${failCount + 1} failures`)
+          // Clear failure count on success (prevents stale counts + memory leak)
+          if (this._pushFailCounts && this._pushFailCounts.has(id)) {
+            this._pushFailCounts.delete(id)
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to push item ${id}`, { error: err.message })
+          // Mark as pushed after repeated failures to prevent infinite retry
+          let failCount = (this._pushFailCounts && this._pushFailCounts.get(id)) || 0
+          if (!this._pushFailCounts) this._pushFailCounts = new Map()
+          this._pushFailCounts.set(id, failCount + 1)
+          if (failCount + 1 >= 3) {
+            this.vault.markPushed(id, changeCheck.hash)
+            this._pushFailCounts.delete(id)
+            this.logger.warn(`Item ${id} push permanently skipped after ${failCount + 1} failures`)
+          }
         }
       }
-    }
+    }, this.LOCAL_ORIGIN)
 
     if (pushed > 0) {
       this._log(`pushed ${pushed} item(s) to CRDT`)
@@ -131,6 +114,7 @@ module.exports = {
       if (key.startsWith('@') || key.startsWith('_')) continue
       if (['photo', 'template', 'list', 'lists', 'tag'].includes(key)) continue
       if (!key.includes(':') && !key.includes('/')) continue
+      if (isLocalOnlyProperty(key)) continue
 
       let text = ''
       let type = 'http://www.w3.org/2001/XMLSchema#string'
@@ -185,6 +169,7 @@ module.exports = {
       let color = typeof tag === 'object' ? tag.color : null
 
       if (!name) continue
+      if (isLocalOnlyTag(name)) continue
 
       let existing = existingTags.get(name.toLowerCase())
       if (existing && !existing.deleted) {
@@ -238,11 +223,11 @@ module.exports = {
         // Normalize non-canonical/dropped HTML tags (u, s, h1-h6, code, pre, div)
         // into Tropy editor schema canonical form BEFORE hashing or CRDT write,
         // so cross-peer formatting is preserved. Pairs with sanitize.js (receive
-        // side). See src/normalize-on-push.js + mulch mx-f3a517 / mx-a3caef.
+        // side). See src/normalize-on-push.js.
         html = normalizeNoteHtml(html)
 
         if (text || html) {
-          // v4: UUID-based key — vault generates on first call, reuses thereafter
+          // UUID-based key — vault generates on first call, reuses thereafter
           let localNoteId = note['@id'] || note.id
           let noteUUID = localNoteId
             ? this.vault.getNoteKey(localNoteId, identity.generateNoteUUID())
@@ -282,7 +267,7 @@ module.exports = {
       for (let sel of selections) {
         if (!sel || !photoChecksum) continue
 
-        // v4: Use vault for selection UUID
+        // Use vault for selection UUID
         let localSelId = sel['@id'] || sel.id
         let selUUID = localSelId
           ? this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
@@ -454,7 +439,7 @@ module.exports = {
       for (let sel of selections) {
         if (!sel) continue
 
-        // v4: UUID-based key
+        // UUID-based key
         let localSelId = sel['@id'] || sel.id
         let selUUID = localSelId
           ? this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
@@ -556,7 +541,7 @@ module.exports = {
           return
         }
 
-        // v4: UUID-based key
+        // UUID-based key
         let localTxId = tx['@id'] || tx.id
         let txUUID = localTxId
           ? this.vault.getTxKey(localTxId, identity.generateTranscriptionUUID())
@@ -590,7 +575,7 @@ module.exports = {
 
       for (let sel of selections) {
         if (!sel) continue
-        // v4: Use vault for selection UUID
+        // Use vault for selection UUID
         let localSelId = sel['@id'] || sel.id
         let selUUID = localSelId
           ? this.vault.getSelectionKey(localSelId, identity.generateSelectionUUID())
@@ -649,14 +634,15 @@ module.exports = {
     let existingLists = schema.getLists(this.doc, itemIdentity)
 
     for (let listId of listIds) {
-      // C2: Use list name (not local ID) for cross-instance matching
+      // Use list name (not local ID) for cross-instance matching
       let listName = this._listNameCache.get(listId) || this._listNameCache.get(String(listId))
       if (!listName) {
         this._debug(`pushLists: skipping list ${listId} (name not in cache)`)
         continue
       }
+      if (isLocalOnlyList(listName)) continue
 
-      // v4: UUID-based key with name field
+      // UUID-based key with name field
       let listUUID = this.vault.getListKey(listName)
 
       if (!listUUID) {
@@ -685,16 +671,14 @@ module.exports = {
     }
   },
 
-  // C2: Refresh the listId -> listName cache.
+  // Refresh the listId -> listName cache.
   // Skips if already refreshed within this sync cycle (< 5s ago).
   async _refreshListNameCache() {
     if (!this.options.syncLists) return
     let now = Date.now()
     if (now - this._listCacheRefreshedAt < 5000) return
     try {
-      let lists = this.adapter
-        ? this.adapter.getAllLists()
-        : await this.api.getLists()
+      let lists = this.adapter.getAllLists()
       if (Array.isArray(lists)) {
         this._listNameCache.clear()
         for (let l of lists) {
@@ -714,7 +698,7 @@ module.exports = {
 
   /**
    * Compute all identity keys for an item's sub-resources.
-   * v4: Uses UUID-based keys from vault instead of content-addressed keys.
+   * Uses UUID-based keys from vault instead of content-addressed keys.
    */
   _computeItemKeys(item, checksumMap) {
     let noteKeys = new Set()
@@ -818,7 +802,7 @@ module.exports = {
     return { noteKeys, selectionKeys, transcriptionKeys, selectionNoteKeys, listNames }
   },
 
-  // P4: Accepts checksumMap parameter.
+  // Accepts checksumMap parameter.
   // P8: Accepts pre-collected keys from push methods to avoid recomputing.
   saveItemSnapshot(item, itemIdentity, checksumMap, collectedKeys) {
     let tags = Array.from(this._resolveTagNames(item))
@@ -872,6 +856,7 @@ module.exports = {
       let currentTags = this._resolveTagNames(item)
       let currentTagsLower = new Set([...currentTags].map(n => n.toLowerCase()))
       for (let tagName of prev.tags) {
+        if (isLocalOnlyTag(tagName)) continue
         if (!currentTagsLower.has(tagName.toLowerCase())) {
           schema.removeTag(this.doc, itemIdentity, tagName, userId, pushSeq)
         }
@@ -1035,7 +1020,7 @@ module.exports = {
     }, this.LOCAL_ORIGIN)
   },
 
-  // --- V5: Project-level schema + list-hierarchy push (W2.T6/T7) ---
+  // --- Project structure: templates and the list tree ---
 
   /**
    * Push local templates to the CRDT `schema` Y.Map (project-level).
@@ -1043,29 +1028,26 @@ module.exports = {
    * Idempotency: vault.pushedTemplateHashes keys URI → content hash.
    * If hash matches, skip the write (no-op CRDT mutation).
    *
-   * URI preservation (mx-0ade81): we use the local template's `id` (its @id
+   * URI preservation: we use the local template's `id` (its @id
    * URI) verbatim — never re-mint via Template.identify() — so that the next
    * apply on the originating peer sees the same key and doesn't duplicate.
    *
-   * Field keying (mx-995aa5): fields are serialized by `property` URI, not
+   * Field keying: fields are serialized by `property` URI, not
    * by Tropy's local decrementing-counter `id` (which is meaningless across
    * peers).
    */
   async pushTemplates(userId, pushSeq) {
-    if (!this.adapter) return
-    if (typeof this.adapter.readTemplates !== 'function') return
-
     let local = this.adapter.readTemplates() || {}
     let pushed = 0
 
     this.doc.transact(() => {
       for (let uri of Object.keys(local)) {
-        if (_isPresetTemplateUri(uri)) continue
+        if (isTropyPresetTemplate(uri)) continue
         let tmpl = local[uri]
         if (!tmpl || !tmpl.name) continue
 
         // Hash includes every field that round-trips through CRDT —
-        // critical for W2.T4: toggling isProtected/domain MUST trigger re-push.
+        // Toggling isProtected or domain must trigger a re-push too.
         let hashInput = {
           uri,
           name: tmpl.name,
@@ -1085,7 +1067,7 @@ module.exports = {
             value: f.value || null
           }))
         }
-        let hash = _hashV5Content(hashInput)
+        let hash = _contentHash(hashInput)
         if (this.vault.pushedTemplateHashes.get(uri) === hash) continue
 
         schema.setTemplateSchema(this.doc, uri, hashInput, userId, pushSeq)
@@ -1098,8 +1080,8 @@ module.exports = {
   },
 
   /**
-   * Push local list hierarchy to the CRDT `projectLists` Y.Map (key
-   * `'projectLists'` per mx-2a349c — NOT `'lists'`).
+   * Push the local list tree to the room's `projectLists` map (not
+   * `lists`, which holds item memberships).
    *
    * List identity: each non-root local list gets a stable CRDT UUID via
    * vault.listIdToCrdtUuid (mints one if absent, persists bidirectionally).
@@ -1109,9 +1091,6 @@ module.exports = {
    * Idempotency: vault.pushedListHashes keys CRDT-UUID → content hash.
    */
   async pushListHierarchy(userId, pushSeq) {
-    if (!this.adapter) return
-    if (typeof this.adapter.readLists !== 'function') return
-
     let local = this.adapter.readLists() || {}
     let pushed = 0
 
@@ -1132,6 +1111,7 @@ module.exports = {
         if (nid === 0) continue  // skip synthetic root
         let list = local[id]
         if (!list || !list.name) continue
+        if (isLocalOnlyList(list.name)) continue
 
         let uuid = this.vault.listIdToCrdtUuid.get(nid)
         let parentUuid = null
@@ -1149,7 +1129,7 @@ module.exports = {
         }
 
         let entry = { name: list.name, parent: parentUuid, children: childUuids }
-        let hash = _hashV5Content({ uuid, ...entry })
+        let hash = _contentHash({ uuid, ...entry })
         if (this.vault.pushedListHashes.get(uuid) === hash) continue
 
         schema.setListHierarchyEntry(this.doc, uuid, entry, userId, pushSeq)

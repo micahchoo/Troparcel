@@ -33,14 +33,19 @@
  *   MIN_TOKEN_LENGTH  - Minimum token length for security (default: 16)
  *   COMPACTION_HOURS  - Hours between LevelDB compaction runs (default: 6)
  *   TOMBSTONE_MAX_DAYS - Days to keep tombstones before purging (default: 30)
+ *   PUBLIC_URL        - The address collaborators use, e.g. wss://tropy.example.edu
+ *                       (default: ws://<this machine's LAN address>:<PORT>)
  */
 
 const crypto = require('crypto')
 const http = require('http')
 const WebSocket = require('ws')
 const Y = require('yjs')
-const { setupWSConnection, getYDoc, setPersistence } = require('y-websocket/bin/utils')
+const { setupWSConnection, getYDoc, setPersistence, docs } = require('y-websocket/bin/utils')
 const { LeveldbPersistence } = require('y-leveldb')
+const { purgeTombstones } = require('../src/purge')
+const { generateConnectionString } = require('../src/connection-string')
+const os = require('os')
 
 // --- Configuration ---
 
@@ -752,103 +757,32 @@ function roomDetailHtml(name) {
 
 // --- LevelDB compaction + tombstone purge ---
 
+/**
+ * Purge old tombstones from a room, then merge its stored updates.
+ *
+ * An open room is purged in memory, and y-websocket persists and relays
+ * the change. A closed room is loaded from LevelDB, purged, and the purge
+ * stored as an update: changing a loaded copy alone persists nothing.
+ */
 async function compactAndPurge(docName, maxAgeMs) {
   if (maxAgeMs == null) maxAgeMs = TOMBSTONE_MAX_DAYS * 24 * 60 * 60 * 1000
-  let cutoff = Date.now() - maxAgeMs
 
-  // Load doc from LevelDB
-  let doc = await ldb.getYDoc(docName)
-  let annotations = doc.getMap('annotations')
-  let purged = 0
-  let uuidsPurged = 0
-  let aliasesPurged = 0
-  let tombstoneSections = ['tags', 'notes', 'selections', 'selectionNotes', 'transcriptions', 'lists']
+  let live = docs.get(docName)
+  let doc = live || await ldb.getYDoc(docName)
+  let updates = []
+  let capture = update => updates.push(update)
+  if (!live) doc.on('update', capture)
 
-  doc.transact(() => {
-    annotations.forEach((itemMap, identity) => {
-      for (let section of tombstoneSections) {
-        let map = itemMap.get(section)
-        if (!map || typeof map.forEach !== 'function') continue
-        let toDelete = []
-        map.forEach((value, key) => {
-          if (value && value.deleted && value.deletedAt && value.deletedAt < cutoff) {
-            toDelete.push(key)
-          }
-        })
-        for (let key of toDelete) {
-          map.delete(key)
-          purged++
-        }
-      }
+  let result
+  doc.transact(() => { result = purgeTombstones(doc, maxAgeMs) })
 
-      // Prune orphaned UUID registry entries
-      let uuids = itemMap.get('uuids')
-      if (uuids && typeof uuids.forEach === 'function') {
-        let liveUUIDs = new Set()
-
-        let notes = itemMap.get('notes')
-        if (notes && typeof notes.forEach === 'function') {
-          notes.forEach((_, k) => liveUUIDs.add(k))
-        }
-
-        let selections = itemMap.get('selections')
-        if (selections && typeof selections.forEach === 'function') {
-          selections.forEach((_, k) => liveUUIDs.add(k))
-        }
-
-        let selectionNotes = itemMap.get('selectionNotes')
-        if (selectionNotes && typeof selectionNotes.forEach === 'function') {
-          selectionNotes.forEach((_, k) => {
-            let sep = k.indexOf(':')
-            if (sep > 0) {
-              liveUUIDs.add(k.slice(0, sep))
-              liveUUIDs.add(k.slice(sep + 1))
-            }
-          })
-        }
-
-        let transcriptions = itemMap.get('transcriptions')
-        if (transcriptions && typeof transcriptions.forEach === 'function') {
-          transcriptions.forEach((_, k) => liveUUIDs.add(k))
-        }
-
-        let lists = itemMap.get('lists')
-        if (lists && typeof lists.forEach === 'function') {
-          lists.forEach((_, k) => liveUUIDs.add(k))
-        }
-
-        let orphaned = []
-        uuids.forEach((_, k) => {
-          if (!liveUUIDs.has(k)) orphaned.push(k)
-        })
-        for (let k of orphaned) {
-          uuids.delete(k)
-          uuidsPurged++
-        }
-      }
-
-      // Purge expired aliases
-      let aliases = itemMap.get('aliases')
-      if (aliases && typeof aliases.forEach === 'function') {
-        let toDelete = []
-        aliases.forEach((value, key) => {
-          let createdAt = (value && typeof value === 'object') ? value.createdAt : 0
-          if (!createdAt || createdAt < cutoff) {
-            toDelete.push(key)
-          }
-        })
-        for (let key of toDelete) {
-          aliases.delete(key)
-          aliasesPurged++
-        }
-      }
-    })
-  })
-
-  // Flush compacted state (merges all incremental updates into one)
+  if (!live) {
+    doc.off('update', capture)
+    for (let update of updates) await ldb.storeUpdate(docName, update)
+    doc.destroy()
+  }
   await ldb.flushDocument(docName)
-
-  return { purged, uuidsPurged, aliasesPurged, docName }
+  return { ...result, docName }
 }
 
 async function runCompaction() {
@@ -883,8 +817,34 @@ const wss = new WebSocket.Server({ server })
 
 wss.on('connection', handleConnection)
 
+/** The address collaborators reach this server at. */
+function publicUrl() {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/+$/, '')
+  if (HOST !== '0.0.0.0' && HOST !== '::') return `ws://${HOST}:${PORT}`
+  for (let addrs of Object.values(os.networkInterfaces())) {
+    for (let a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) return `ws://${a.address}:${PORT}`
+    }
+  }
+  return `ws://localhost:${PORT}`
+}
+
+/** What a collaborator pastes into Troparcel's Connection field. */
+function connectionString(room, token) {
+  return generateConnectionString({ transport: 'websocket', serverUrl: publicUrl(), room, roomToken: token })
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`Troparcel server v4.0 (Yjs + LevelDB) listening on ${HOST}:${PORT}`)
+  console.log(`Troparcel server listening on ${HOST}:${PORT}`)
+  console.log('')
+  if (AUTH_TOKENS.size > 0) {
+    console.log('  Give each group its connection string (Troparcel > Connection):')
+    for (let [room, token] of AUTH_TOKENS) console.log(`    ${room}: ${connectionString(room, token)}`)
+  } else {
+    console.log('  Connection string (replace <room> with your group\'s room name):')
+    console.log(`    ${connectionString('ROOM').replace('/ROOM', '/<room>')}`)
+  }
+  console.log('')
   console.log(`  WebSocket: ws://${HOST}:${PORT}/<room-name>?token=<token>`)
   console.log(`  Monitor:   http://${HOST}:${PORT}/monitor`)
   console.log(`  Health:    http://${HOST}:${PORT}/health`)

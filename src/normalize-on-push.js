@@ -10,8 +10,7 @@
  * is written into the CRDT.
  *
  * Without this, a peer can locally edit and persist HTML that survives
- * sanitize.js (because SAFE_TAGS is a strict subset, see mulch
- * mx-f3a517 / mx-a3caef) but loses formatting on the receiving side
+ * sanitize.js (because SAFE_TAGS is a strict subset) but loses formatting on the receiving side
  * because Tropy's `fromHTML` silently drops anything outside its
  * editor schema (tropy/src/editor/schema.js).
  *

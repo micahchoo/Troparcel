@@ -4,11 +4,11 @@
  * Parse a troparcel:// connection string into option fields.
  *
  * Formats:
- *   troparcel://ws/host:port/room?token=secret
- *   troparcel://file/path/to/shared/folder
- *   troparcel://snapshot/https://host/path?auth=Bearer+token
- *   ws://host:port  (bare URL, auto-detected)
- *   wss://host:port
+ *   troparcel://ws/host:port/room?token=secret   a Troparcel server
+ *   troparcel://wss/host:port/room?token=secret  the same, over TLS
+ *   troparcel://file/path/to/shared/folder       a shared folder
+ *   ws://host:port, wss://host                   a server, bare URL
+ *   /path/to/shared/folder                       a shared folder, bare path
  *
  * @param {string} str
  * @returns {object|null} parsed options or null if empty/invalid
@@ -23,21 +23,20 @@ function parseConnectionString(str) {
     return { transport: 'websocket', serverUrl: str }
   }
 
-  // Must start with troparcel://
-  let match = str.match(/^troparcel:\/\/(ws|file|snapshot)\/(.+)$/i)
+  // Bare absolute path — a shared folder
+  if (str.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(str)) {
+    return { transport: 'file', syncDir: str }
+  }
+
+  let match = str.match(/^troparcel:\/\/(wss|ws|file)\/(.+)$/i)
   if (!match) return null
 
   let scheme = match[1].toLowerCase()
-  let rest = match[2]
-
-  if (scheme === 'ws') return _parseWebSocket(rest)
-  if (scheme === 'file') return _parseFile(rest)
-  if (scheme === 'snapshot') return _parseSnapshot(rest)
-
-  return null
+  if (scheme === 'file') return _parseFile(match[2])
+  return _parseWebSocket(match[2], scheme === 'wss' ? 'wss' : null)
 }
 
-function _parseWebSocket(rest) {
+function _parseWebSocket(rest, protocolHint) {
   let [pathPart, query] = rest.split('?', 2)
   let params = _parseQuery(query)
 
@@ -52,8 +51,8 @@ function _parseWebSocket(rest) {
     hostPort = pathPart.replace(/\/$/, '')
   }
 
-  // Use wss:// if no port specified (assume reverse proxy with TLS)
-  let protocol = hostPort.includes(':') ? 'ws' : 'wss'
+  // ws/ with no port means a TLS proxy (older strings); wss/ says so outright
+  let protocol = protocolHint || (hostPort.includes(':') ? 'ws' : 'wss')
   let result = {
     transport: 'websocket',
     serverUrl: `${protocol}://${hostPort}`
@@ -70,19 +69,6 @@ function _parseFile(rest) {
     transport: 'file',
     syncDir: '/' + pathPart.replace(/^\//, '')
   }
-}
-
-function _parseSnapshot(rest) {
-  let [urlPart, query] = rest.split('?', 2)
-  let params = _parseQuery(query)
-
-  let result = {
-    transport: 'snapshot',
-    snapshotUrl: urlPart
-  }
-  if (params.auth) result.snapshotAuth = params.auth
-
-  return result
 }
 
 function _parseQuery(query) {
@@ -107,8 +93,10 @@ function generateConnectionString(opts) {
   let transport = opts.transport || 'websocket'
 
   if (transport === 'websocket') {
-    let url = (opts.serverUrl || 'ws://localhost:2468').replace(/^wss?:\/\//, '')
-    let str = `troparcel://ws/${url}`
+    let serverUrl = opts.serverUrl || 'ws://localhost:2468'
+    let scheme = /^wss:/i.test(serverUrl) ? 'wss' : 'ws'
+    let url = serverUrl.replace(/^wss?:\/\//, '').replace(/\/+$/, '')
+    let str = `troparcel://${scheme}/${url}`
     if (opts.room) str += `/${encodeURIComponent(opts.room)}`
     if (opts.roomToken) str += `?token=${encodeURIComponent(opts.roomToken)}`
     return str
@@ -117,12 +105,6 @@ function generateConnectionString(opts) {
   if (transport === 'file') {
     let dir = (opts.syncDir || '').replace(/^\//, '')
     return `troparcel://file/${dir}`
-  }
-
-  if (transport === 'snapshot') {
-    let str = `troparcel://snapshot/${opts.snapshotUrl || ''}`
-    if (opts.snapshotAuth) str += `?auth=${encodeURIComponent(opts.snapshotAuth)}`
-    return str
   }
 
   return ''

@@ -1,77 +1,70 @@
 'use strict'
 
-const { SELECTION, NOTE, LIST } = require('./tropy-action-types')
+const {
+  TAG, ITEM, METADATA, NOTE, NAV, SELECTION, TRANSCRIPTION, LIST, ONTOLOGY
+} = require('./tropy-action-types')
+const { footerKey } = require('./local-only')
 
 /**
- * StoreAdapter — reads from and writes to Tropy's Redux store.
+ * StoreAdapter — the one module that knows how to talk to Tropy.
  *
- * Tropy's plugin context includes `context.window.store`, the full
- * Redux store for the project window.  This adapter replaces the
- * HTTP API for reads (eliminates N+1 enrichment calls) and uses
- * store.dispatch() for writes where the HTTP API has no routes
- * (selections, note updates, list item management).
+ * Tropy gives a plugin its project window's Redux store and nothing else
+ * that can change a project. None of that is a published interface, so
+ * every state shape Troparcel reads and every action it dispatches lives
+ * here, and only here. The shapes are Tropy's own action creators
+ * (src/actions/*.js, src/slices/transcriptions.js), checked against 1.17.3
+ * and main; `npm run e2e` checks them against a running Tropy.
  *
- * ⚠ TROPY INTERNALS DEPENDENCY ⚠
- * This adapter accesses undocumented Redux internals. If Tropy changes
- * its state shape or action types, state shape validation (_validateStateShape)
- * will log a warning and the engine falls back to the HTTP API.
+ * Three rules every write follows:
  *
- * Redux state slices READ:
- *   state.items[id]           → { id, photos:[], tags:[], lists:[], template }
- *   state.photos[id]          → { id, item, checksum, selections:[], notes:[], transcriptions:[] }
- *   state.selections[id]      → { id, photo, x, y, width, height, angle, notes:[], transcriptions:[] }
- *   state.notes[id]           → { id, photo, selection, state (ProseMirror JSON), text, language }
- *   state.metadata[sid]       → { id, [propUri]: { text, type } }
- *   state.tags[id]            → { id, name, color }
- *   state.lists[id]           → { id, name, parent, children:[] }
- *   state.activities[seq]     → presence = action in flight (cleared on completion)
- *   state.transcriptions[id]  → { id, text, data, ... }
+ *   1. It is a COMMAND: `meta.cmd` set, `meta.done` unset. Tropy's command
+ *      saga runs only then, and only the command writes the database. An
+ *      action with `done: true` changes the window and is lost on restart.
+ *   2. It carries NO `meta.history`. A collaborator's change is not the
+ *      owner's to undo; with no history the command adds no undo entry.
+ *   3. It resolves when its EFFECT is visible in the store, and rejects if
+ *      the command finishes without it or the effect never comes.
  *
- * Redux actions DISPATCHED:
- *   selection.create  → { photo, x, y, width, height, angle }, meta: { cmd: 'project' }
- *   note.create       → { photo?, selection?, text (HTML) },   meta: { cmd: 'project', history: 'add' }
- *   note.delete       → [id],                                  meta: { cmd: 'project', history: 'add' }
- *   list.item.add     → { id: listId, items: [itemId] },       meta: { cmd: 'project', history: 'add', search: true }
- *   list.item.remove  → { id: listId, items: [itemId] },       meta: { cmd: 'project', history: 'add', search: true }
- *
- * Action completion is detected by watching state.activities[action.meta.seq]
- * — when the seq key disappears, the command has finished processing.
+ * `probe()` checks the state shape before anything is written. If it
+ * fails, the engine syncs nothing and says why, rather than dispatching
+ * actions a different Tropy might misread.
  */
 class StoreAdapter {
-  static EXPECTED_SLICES = [
-    'items', 'photos', 'selections', 'notes',
-    'metadata', 'tags', 'lists', 'ontology'
+  static REQUIRED_SLICES = [
+    'project', 'items', 'photos', 'selections', 'notes', 'metadata',
+    'tags', 'lists', 'ontology', 'activities', 'nav', 'transcriptions'
   ]
+
+  static TIMEOUT = 15000
 
   constructor(store, logger) {
     this.store = store
     this.logger = logger
-
-    // Suppress store.subscribe callback during our own writes
     this._suppressChangeDetection = false
-
-    this._validateStateShape()
   }
 
   /**
-   * Check that the Redux state contains the expected top-level slices.
-   * Logs a warning for any missing slices — the adapter will still work
-   * (reads return empty, writes fall back to HTTP API) but sync may be
-   * incomplete.
+   * Does this store look like the Tropy Troparcel was written for?
+   * @returns {{ ok: boolean, problems: string[] }}
    */
-  _validateStateShape() {
+  probe() {
+    let problems = []
+    let state
     try {
-      let state = this._getState()
-      let missing = StoreAdapter.EXPECTED_SLICES.filter(s => !(s in state))
-      if (missing.length > 0) {
-        this.logger.warn(
-          `StoreAdapter: Redux state missing expected slices: ${missing.join(', ')}. ` +
-          'Tropy version may be incompatible — some sync features may not work.'
-        )
-      }
+      state = this._getState()
     } catch (err) {
-      this.logger.warn(`StoreAdapter: failed to validate state shape: ${err.message}`)
+      return { ok: false, problems: [`cannot read the store: ${err.message}`] }
     }
+    if (!state || typeof state !== 'object') {
+      return { ok: false, problems: ['the store has no state'] }
+    }
+    for (let slice of StoreAdapter.REQUIRED_SLICES) {
+      if (!(slice in state)) problems.push(`state.${slice} is missing`)
+    }
+    if (state.ontology && !state.ontology.template) {
+      problems.push('state.ontology.template is missing')
+    }
+    return { ok: problems.length === 0, problems }
   }
 
   _getState() {
@@ -81,49 +74,59 @@ class StoreAdapter {
   // ------------------------------------------------------------------ Reads
 
   /**
-   * Return all items as summaries (mirrors ApiClient.getItems format).
+   * Every item, nested. An item whose inputs are the same objects as last
+   * time (Redux state is immutable) comes back as the same object, so a
+   * cycle over a large project where little changed costs reference
+   * comparisons, not a rebuild of every item.
    */
-  getAllItems() {
-    let { items, photos } = this._getState()
+  getAllItemsFull() {
+    let state = this._getState()
+    let cache = this._itemCache || (this._itemCache = new Map())
     let result = []
-
-    for (let id of Object.keys(items)) {
-      let item = items[id]
-      result.push({
-        id: Number(id),
-        template: item.template,
-        photos: item.photos || [],
-        lists: item.lists || [],
-        tags: item.tags || []
-      })
+    let seen = new Set()
+    for (let key of Object.keys(state.items)) {
+      let id = Number(key)
+      seen.add(id)
+      let deps = this._itemInputs(state, id)
+      let hit = cache.get(id)
+      if (hit && sameRefs(hit.deps, deps)) {
+        result.push(hit.value)
+        continue
+      }
+      let value = this._buildItemFull(state, id)
+      cache.set(id, { deps, value })
+      if (value) result.push(value)
     }
+    for (let id of cache.keys()) if (!seen.has(id)) cache.delete(id)
     return result
   }
 
-  /**
-   * Assemble a fully-enriched item from the normalised Redux state.
-   * Returns the same nested shape that SyncEngine.enrichItem() produced.
-   */
+  /** The state objects an item's nested form is built from. */
+  _itemInputs(state, id) {
+    let item = state.items[id]
+    let deps = [item, state.metadata[id], state.tags]
+    for (let pid of (item && item.photos) || []) {
+      let photo = state.photos[pid]
+      deps.push(photo, state.metadata[pid])
+      if (!photo) continue
+      for (let nid of photo.notes || []) deps.push(state.notes[nid])
+      for (let tid of photo.transcriptions || []) deps.push(state.transcriptions[tid])
+      for (let sid of photo.selections || []) {
+        let sel = state.selections[sid]
+        deps.push(sel, state.metadata[sid])
+        if (!sel) continue
+        for (let nid of sel.notes || []) deps.push(state.notes[nid])
+        for (let tid of sel.transcriptions || []) deps.push(state.transcriptions[tid])
+      }
+    }
+    return deps
+  }
+
   getItemFull(itemId) {
     return this._buildItemFull(this._getState(), itemId)
   }
 
-  /**
-   * Return all items fully enriched in a single pass (one state read).
-   */
-  getAllItemsFull() {
-    let state = this._getState()
-    let result = []
-    for (let id of Object.keys(state.items)) {
-      let item = this._buildItemFull(state, Number(id))
-      if (item) result.push(item)
-    }
-    return result
-  }
-
-  /**
-   * Build a fully-enriched item from a pre-read state snapshot.
-   */
+  /** One item with its photos, selections, notes and metadata nested. */
   _buildItemFull(state, itemId) {
     let item = state.items[itemId]
     if (!item) return null
@@ -134,41 +137,26 @@ class StoreAdapter {
       lists: item.lists || []
     }
 
-    // --- Item metadata ---
     let meta = state.metadata[itemId]
     if (meta) {
       for (let [key, value] of Object.entries(meta)) {
         if (key === 'id') continue
         if (typeof value === 'object' && value !== null) {
-          enriched[key] = {
-            '@value': value.text || '',
-            '@type': value.type || ''
-          }
+          enriched[key] = { '@value': value.text || '', '@type': value.type || '' }
         } else if (value != null) {
           enriched[key] = value
         }
       }
     }
 
-    // --- Tags (resolve IDs → objects) ---
-    let tagIds = item.tags || []
     enriched.tag = []
-    for (let tid of tagIds) {
+    for (let tid of (item.tags || [])) {
       let tag = state.tags[tid]
-      if (tag) {
-        enriched.tag.push({
-          id: tid,
-          name: tag.name,
-          color: tag.color || null
-        })
-      }
+      if (tag) enriched.tag.push({ id: tid, name: tag.name, color: tag.color || null })
     }
 
-    // --- Photos ---
     enriched.photo = []
-    let photoIds = item.photos || []
-
-    for (let pid of photoIds) {
+    for (let pid of (item.photos || [])) {
       let photo = state.photos[pid]
       if (!photo) continue
 
@@ -178,42 +166,19 @@ class StoreAdapter {
         note: [],
         selection: [],
         transcription: [],
-        metadata: null
+        metadata: copyMetadata(state.metadata[pid])
       }
 
-      // Photo metadata
-      let photoMeta = state.metadata[pid]
-      if (photoMeta) {
-        ep.metadata = {}
-        for (let [key, value] of Object.entries(photoMeta)) {
-          if (key === 'id') continue
-          ep.metadata[key] = value
-        }
-      }
-
-      // Photo notes
       for (let nid of (photo.notes || [])) {
         let note = state.notes[nid]
-        if (!note) continue
-        let html = this._noteStateToHtml(note)
-        ep.note.push({
-          '@id': nid,
-          text: note.text || '',
-          html,
-          language: note.language || null,
-          photo: pid
-        })
+        if (note) ep.note.push(this._noteEntry(nid, note, { photo: pid }))
       }
 
-      // Photo transcriptions
-      if (state.transcriptions) {
-        for (let txid of (photo.transcriptions || [])) {
-          let tx = state.transcriptions[txid]
-          if (tx) ep.transcription.push(tx)
-        }
+      for (let txid of (photo.transcriptions || [])) {
+        let tx = state.transcriptions[txid]
+        if (tx) ep.transcription.push(tx)
       }
 
-      // Selections
       for (let sid of (photo.selections || [])) {
         let sel = state.selections[sid]
         if (!sel) continue
@@ -226,42 +191,17 @@ class StoreAdapter {
           height: sel.height,
           angle: sel.angle || 0,
           note: [],
-          metadata: null,
-          transcription: []
+          transcription: [],
+          metadata: copyMetadata(state.metadata[sid])
         }
-
-        // Selection metadata
-        let selMeta = state.metadata[sid]
-        if (selMeta) {
-          es.metadata = {}
-          for (let [key, value] of Object.entries(selMeta)) {
-            if (key === 'id') continue
-            es.metadata[key] = value
-          }
-        }
-
-        // Selection notes
         for (let nid of (sel.notes || [])) {
           let note = state.notes[nid]
-          if (!note) continue
-          let html = this._noteStateToHtml(note)
-          es.note.push({
-            '@id': nid,
-            text: note.text || '',
-            html,
-            language: note.language || null,
-            selection: sid
-          })
+          if (note) es.note.push(this._noteEntry(nid, note, { selection: sid }))
         }
-
-        // Selection transcriptions
-        if (state.transcriptions) {
-          for (let txid of (sel.transcriptions || [])) {
-            let tx = state.transcriptions[txid]
-            if (tx) es.transcription.push(tx)
-          }
+        for (let txid of (sel.transcriptions || [])) {
+          let tx = state.transcriptions[txid]
+          if (tx) es.transcription.push(tx)
         }
-
         ep.selection.push(es)
       }
 
@@ -271,447 +211,386 @@ class StoreAdapter {
     return enriched
   }
 
-  /**
-   * Return all tags as an array of { id, name, color }.
-   */
+  _noteEntry(id, note, parent) {
+    return {
+      '@id': id,
+      text: note.text || '',
+      html: this._noteStateToHtml(note),
+      language: note.language || null,
+      ...parent
+    }
+  }
+
   getAllTags() {
     let { tags } = this._getState()
     return Object.values(tags || {}).map(t => ({
-      id: t.id,
-      name: t.name,
-      color: t.color || null
+      id: t.id, name: t.name, color: t.color || null
     }))
   }
 
-  /**
-   * Return all lists as an array of { id, name, parent }.
-   */
+  /** The tag with this name, compared as Tropy does (case-insensitively). */
+  findTag(name) {
+    let lower = String(name).toLowerCase()
+    return this.getAllTags().find(t => t.name && t.name.toLowerCase() === lower) || null
+  }
+
   getAllLists() {
     let { lists } = this._getState()
     return Object.values(lists || {}).map(l => ({
-      id: l.id,
-      name: l.name,
-      parent: l.parent || null
+      id: l.id, name: l.name, parent: l.parent ?? null
     }))
   }
 
-  // --- V5 raw-slice readers (W2.T5, mx-780c7d) ---
-  // CRDT push/apply MUST see the raw Redux slice — NOT the resolved selectors
-  // (getAllTemplates / getListTree). Selectors flatten trees and resolve URI
-  // references, breaking CRDT-side identity. See
-  // troparcel/docs/architecture/subsystems/v5-template-list-sync.md §State paths.
-
-  /**
-   * Raw `state.ontology.template` map keyed by template URI.
-   * Each value: { id, name, type, creator, description, fields, isProtected,
-   *   domain, version }. Evidence: tropy/src/reducers/ontology.js TEMPLATE.CREATE
-   *   reducer spreads payload directly into this slice.
-   * @returns {Object<string, Object>} raw template slice (URI → template def)
-   */
+  /** Raw `state.ontology.template`: URI → definition. Not getAllTemplates,
+   *  which resolves and flattens and so loses the identity push needs. */
   readTemplates() {
     let state = this._getState()
     return (state.ontology && state.ontology.template) || {}
   }
 
-  /**
-   * Raw `state.lists` map keyed by local numeric ID.
-   * Each value: { id, parent, name, children, items? }. Root list is id=0
-   * with parent=null. Evidence: tropy/src/reducers/lists.js.
-   * @returns {Object<number, Object>} raw list slice (local id → list)
-   */
+  /** Raw `state.lists`: id → { id, parent, name, children }. Root is 0. */
   readLists() {
-    let state = this._getState()
-    return state.lists || {}
+    return this._getState().lists || {}
+  }
+
+  getNote(id) {
+    return this._getState().notes[id] || null
+  }
+
+  /** An item as Tropy holds it: { id, photos, tags, lists, template }. */
+  getItem(id) {
+    return this._getState().items[id] || null
   }
 
   /**
-   * Check if the store is still usable (always true when we have a store ref).
+   * The local note carrying the footer for room entry `key`, or null.
+   *
+   * The index costs one pass over the notes, made at most once per write
+   * phase (suppressChanges clears it) and kept current by createNote. A
+   * lookup per note against the live notes slice made a bulk apply O(N²).
+   * An id is returned only if that note still exists.
    */
-  ping() {
-    return !!this.store
-  }
-
-  // ----------------------------------------------------------- Writes (dispatch)
-
-  /**
-   * Create a selection on a photo.
-   * Returns { id } of the created selection.
-   */
-  async createSelection({ photo, x, y, width, height, angle }) {
-    let idsBefore = new Set(Object.keys(this._getState().selections))
-
-    let action = this.store.dispatch({
-      type: SELECTION.CREATE,
-      payload: { photo, x, y, width, height, angle: angle || 0 },
-      meta: { cmd: 'project' }
-    })
-    await this._waitForAction(action)
-
-    let state = this._getState()
-    let idsAfter = Object.keys(state.selections)
-    // Filter new IDs by matching parent photo to handle concurrent UI creations
-    let candidates = []
-    for (let id of idsAfter) {
-      if (!idsBefore.has(id)) {
-        let sel = state.selections[id]
-        if (sel && sel.photo === photo) {
-          candidates.push(id)
-        }
+  findNoteByKey(key) {
+    let notes = this._getState().notes
+    if (!this._noteIndex) {
+      this._noteIndex = new Map()
+      for (let [id, note] of Object.entries(notes)) {
+        let k = footerKey(note.text) ||
+          (note.state && footerKey(JSON.stringify(note.state)))
+        if (k) this._noteIndex.set(k, Number(id))
       }
     }
-    // If multiple candidates match, prefer the last one (most recently created)
-    if (candidates.length > 0) {
-      let id = candidates[candidates.length - 1]
-      return { id: Number(id), '@id': Number(id) }
+    let id = this._noteIndex.get(key)
+    return (id != null && notes[id]) ? id : null
+  }
+
+  // ----------------------------------------------------------------- Writes
+
+  /**
+   * Dispatch a command and wait until `effect(state)` returns something.
+   * Resolves with that value.
+   */
+  _command(action, effect, timeout = StoreAdapter.TIMEOUT) {
+    let dispatched
+    try {
+      dispatched = this.store.dispatch(action)
+    } catch (err) {
+      return Promise.reject(err)
     }
-    return null
+    let seq = dispatched && dispatched.meta && dispatched.meta.seq
+
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let unsub = () => {}
+      let finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        unsub()
+        fn(value)
+      }
+      let check = () => {
+        let state = this._getState()
+        let result
+        try {
+          result = effect(state)
+        } catch (err) {
+          return finish(reject, err)
+        }
+        if (result) return finish(resolve, result)
+        // The command ran to the end without its effect: it failed.
+        if (seq && state.activities && !state.activities[seq] && seenActivity) {
+          finish(reject, new Error(`${action.type} finished without effect`))
+        }
+        if (seq && state.activities && state.activities[seq]) seenActivity = true
+      }
+      let seenActivity = false
+      let timer = setTimeout(() =>
+        finish(reject, new Error(`${action.type} timed out after ${timeout}ms`)), timeout)
+      unsub = this.store.subscribe(check)
+      check()
+    })
   }
 
   /**
-   * Create a note attached to a photo or selection.
-   * The note.create command calls fromHTML() internally when state is null.
-   * Returns { id } of the created note.
+   * An effect for a create command: the first id that appears in a
+   * parent's child list (`listOf`) and exists in its slice (`slice`).
+   * Looking only at the parent keeps a create O(children), not O(slice):
+   * scanning the slice made N creates cost O(N²).
    */
-  async createNote({ photo, selection, html, language }) {
-    // Guard: note.create requires a valid parent (photo or selection)
-    if (!photo && !selection) {
-      this.logger.warn('createNote: no photo or selection — skipping')
+  _newChild(listOf, slice) {
+    let before = new Set(listOf(this._getState()) || [])
+    return s => {
+      for (let id of (listOf(s) || [])) {
+        if (!before.has(id) && slice(s)[id]) return Number(id)
+      }
       return null
     }
+  }
 
-    let idsBefore = new Set(Object.keys(this._getState().notes))
+  _cmd(type, payload, cmd = 'project') {
+    return { type, payload, meta: { cmd } }
+  }
+
+  /**
+   * Create a note. Tropy's note.create also SELECTS the new note, which
+   * would move the owner's view to a collaborator's note mid-edit; the
+   * owner's selection is put back afterwards.
+   */
+  async createNote({ photo, selection, html, language }) {
+    if (!photo && !selection) throw new Error('createNote: needs a photo or a selection')
+
+    let state = this._getState()
+    let nav = pickNav(state.nav)
+    let notesOf = selection
+      ? s => s.selections[selection] && s.selections[selection].notes
+      : s => s.photos[photo] && s.photos[photo].notes
 
     let payload = { text: html || '' }
-    if (photo) payload.photo = photo
     if (selection) payload.selection = selection
+    else payload.photo = photo
     if (language) payload.language = language
 
-    let action = this.store.dispatch({
-      type: NOTE.CREATE,
-      payload,
-      meta: { cmd: 'project', history: 'add' }
-    })
-    await this._waitForAction(action)
+    let id = await this._command(this._cmd(NOTE.CREATE, payload),
+      this._newChild(notesOf, s => s.notes))
 
-    let state = this._getState()
-    let idsAfter = Object.keys(state.notes)
-    // Filter new IDs by matching parent (photo/selection) to handle concurrent UI creations
-    let candidates = []
-    for (let id of idsAfter) {
-      if (!idsBefore.has(id)) {
-        let note = state.notes[id]
-        if (note) {
-          let parentMatch = (photo && note.photo === photo) ||
-                            (selection && note.selection === selection)
-          if (parentMatch) candidates.push(id)
-        }
-      }
-    }
-    if (candidates.length > 0) {
-      let id = candidates[candidates.length - 1]
-      return { id: Number(id), '@id': Number(id) }
-    }
-    // Fallback: return any new ID if no parent match (shouldn't happen normally)
-    for (let id of idsAfter) {
-      if (!idsBefore.has(id)) {
-        return { id: Number(id), '@id': Number(id) }
-      }
-    }
-    return null
+    this._restoreNav(nav)
+    let key = footerKey(html)
+    if (key && this._noteIndex) this._noteIndex.set(key, id)
+    return { id }
+  }
+
+  _restoreNav(nav) {
+    let now = pickNav(this._getState().nav)
+    if (JSON.stringify(now) === JSON.stringify(nav)) return
+    this.store.dispatch({ type: NAV.UPDATE, payload: nav })
+  }
+
+  deleteNote(id) {
+    return this._command(this._cmd(NOTE.DELETE, [id]), s => !s.notes[id] || s.notes[id].deleted)
   }
 
   /**
-   * Update a note's content.
-   * Since ProseMirror state is needed for note.update and we only have HTML,
-   * we delete the old note and recreate with new content.
-   * Returns { id } of the new note.
+   * Replace a note's content. Tropy's note.update wants a live ProseMirror
+   * state that only its editor can build, so this deletes and recreates;
+   * the note gets a new id. If the create fails the old text is put back.
    */
   async updateNote(id, { html, language }) {
-    let state = this._getState()
-    let existing = state.notes[id]
-
-    if (!existing) {
-      throw new Error(`Note ${id} not found in store`)
-    }
-
-    let photo = existing.photo || undefined
-    let selection = existing.selection || undefined
+    let existing = this.getNote(id)
+    if (!existing) throw new Error(`note ${id} not found`)
+    let parent = existing.selection
+      ? { selection: existing.selection }
+      : { photo: existing.photo }
     let lang = language || existing.language || null
+    let original = this._noteStateToHtml(existing)
 
-    // Capture original content for rollback if create fails
-    let originalHtml = this._noteStateToHtml(existing)
-
-    try { await this.deleteNote(id) } catch {}
-
-    let result
+    await this.deleteNote(id)
     try {
-      result = await this.createNote({ photo, selection, html, language: lang })
-    } catch (createErr) {
-      // Create failed — attempt to restore original content
-      this.logger.warn(`updateNote: create threw after delete for note ${id}`, { error: createErr.message })
-      try {
-        result = await this.createNote({ photo, selection, html: originalHtml, language: lang })
-      } catch (restoreErr) {
-        this.logger.warn(`updateNote: restore also failed for note ${id}`, { error: restoreErr.message })
-        throw createErr
-      }
-      return result
+      return await this.createNote({ ...parent, html, language: lang })
+    } catch (err) {
+      this.logger.warn(`updateNote: create failed for note ${id}, restoring it — ${err.message}`)
+      await this.createNote({ ...parent, html: original, language: lang })
+      throw err
     }
-    if (!result) {
-      // Create returned null — attempt to restore original content
-      this.logger.warn(`updateNote: create returned null after delete, restoring original for note ${id}`)
-      try {
-        result = await this.createNote({ photo, selection, html: originalHtml, language: lang })
-      } catch (restoreErr) {
-        this.logger.warn(`updateNote: restore also failed for note ${id}`, { error: restoreErr.message })
-        throw new Error(`updateNote: note ${id} deleted but both create and restore failed`)
-      }
-      if (!result) {
-        throw new Error(`updateNote: note ${id} deleted but both create and restore returned null`)
-      }
-    }
-    return result
+  }
+
+  async createSelection({ photo, x, y, width, height, angle }) {
+    let id = await this._command(
+      this._cmd(SELECTION.CREATE, { photo, x, y, width, height, angle: angle || 0 }),
+      this._newChild(s => s.photos[photo] && s.photos[photo].selections, s => s.selections))
+    return { id }
+  }
+
+  /** `data`: { [propertyUri]: { text, type } } on an item, photo or selection. */
+  saveMetadata(id, data) {
+    let props = Object.keys(data)
+    return this._command(this._cmd(METADATA.SAVE, { ids: [id], data }), s => {
+      let m = s.metadata[id]
+      return m && props.every(p => m[p] && m[p].text === data[p].text)
+    })
+  }
+
+  /** Create a tag, assigning it to `items` in the same command. */
+  async createTag({ name, color, items = [] }) {
+    let payload = { name }
+    if (color) payload.color = color
+    if (items.length) payload.items = items
+    return this._command(this._cmd(TAG.CREATE, payload), s => {
+      let tag = Object.values(s.tags).find(t => t.name === name)
+      if (!tag) return null
+      if (items.some(i => !(s.items[i]?.tags || []).includes(tag.id))) return null
+      return { id: tag.id, name: tag.name, color: tag.color || null }
+    })
+  }
+
+  /** Give one item, or many, these tags: one command however many. */
+  addTags(itemIds, tagIds) {
+    let ids = [].concat(itemIds)
+    return this._command(this._cmd(ITEM.TAG.CREATE, { id: ids, tags: tagIds }), s =>
+      ids.every(i => tagIds.every(t => (s.items[i]?.tags || []).includes(t))))
+  }
+
+  removeTags(itemIds, tagIds) {
+    let ids = [].concat(itemIds)
+    return this._command(this._cmd(ITEM.TAG.DELETE, { id: ids, tags: tagIds }), s =>
+      ids.every(i => tagIds.every(t => !(s.items[i]?.tags || []).includes(t))))
   }
 
   /**
-   * Delete a note by ID.
+   * Add a transcription. Tropy keeps a photo's transcriptions as versions,
+   * newest active; a changed remote transcription arrives as a new version.
    */
-  async deleteNote(id) {
-    let action = this.store.dispatch({
-      type: NOTE.DELETE,
-      payload: [id],
-      meta: { cmd: 'project', history: 'add' }
-    })
-    await this._waitForAction(action)
+  async createTranscription({ photo, selection, text, data }) {
+    let payload = { photo, text: text || '' }
+    if (selection) payload.selection = selection
+    if (data) payload.data = data
+    let parentOf = selection
+      ? s => s.selections[selection] && s.selections[selection].transcriptions
+      : s => s.photos[photo] && s.photos[photo].transcriptions
+    let id = await this._command(this._cmd(TRANSCRIPTION.CREATE, payload),
+      this._newChild(parentOf, s => s.transcriptions))
+    return { id }
   }
 
-  /**
-   * Add items to a list.
-   */
-  async addItemsToList(listId, itemIds) {
-    let action = this.store.dispatch({
-      type: LIST.ITEM.ADD,
-      payload: { id: listId, items: Array.isArray(itemIds) ? itemIds : [itemIds] },
-      meta: { cmd: 'project', history: 'add', search: true }
-    })
-    await this._waitForAction(action)
+  async createList({ name, parent = 0 }) {
+    let id = await this._command(this._cmd(LIST.CREATE, { name, parent }),
+      this._newChild(s => s.lists[parent] && s.lists[parent].children, s => s.lists))
+    return { id }
   }
 
-  /**
-   * Remove items from a list.
-   */
-  async removeItemsFromList(listId, itemIds) {
-    let action = this.store.dispatch({
-      type: LIST.ITEM.REMOVE,
-      payload: { id: listId, items: Array.isArray(itemIds) ? itemIds : [itemIds] },
-      meta: { cmd: 'project', history: 'add', search: true }
-    })
-    await this._waitForAction(action)
+  addItemsToList(listId, itemIds) {
+    return this._command(this._cmd(LIST.ITEM.ADD, { id: listId, items: itemIds }), s =>
+      itemIds.every(i => (s.items[i]?.lists || []).includes(listId)))
+  }
+
+  removeItemsFromList(listId, itemIds) {
+    return this._command(this._cmd(LIST.ITEM.REMOVE, { id: listId, items: itemIds }), s =>
+      itemIds.every(i => !(s.items[i]?.lists || []).includes(listId)))
+  }
+
+  /** Create a template in the owner's ontology (shared by all projects). */
+  createTemplate(uri, def) {
+    return this._command(this._cmd(ONTOLOGY.TEMPLATE.CREATE, { [uri]: def }, 'ontology'),
+      s => !!(s.ontology.template && s.ontology.template[uri]))
   }
 
   // ------------------------------------------------------- Change detection
 
   /**
-   * Subscribe to Redux state changes that are relevant to sync.
-   * Calls `callback()` when any tracked slice changes, unless suppressed.
+   * Call `callback()` when any synced slice changes, unless suppressed.
    * Returns an unsubscribe function.
    */
   subscribe(callback) {
     this._prevState = this._getState()
     let slices = [
-      'items', 'photos', 'selections', 'notes',
-      'metadata', 'tags', 'lists'
+      'items', 'photos', 'selections', 'notes', 'metadata', 'tags',
+      'lists', 'transcriptions'
     ]
-
     return this.store.subscribe(() => {
       if (this._suppressChangeDetection) return
-
       let state = this._getState()
-      let changed = false
-      for (let slice of slices) {
-        if (state[slice] !== this._prevState[slice]) {
-          changed = true
-          break
-        }
-      }
+      let changed = slices.some(s => state[s] !== this._prevState[s])
       this._prevState = state
-
-      if (changed) {
-        try {
-          callback()
-        } catch (err) {
-          this.logger.warn(`subscribe callback error: ${String(err.message || err)}`)
-        }
+      if (!changed) return
+      try {
+        callback()
+      } catch (err) {
+        this.logger.warn(`subscribe callback error: ${String(err.message || err)}`)
       }
     })
   }
 
-  /**
-   * Suppress change detection (call before applying remote changes).
-   */
+  /** Stop reporting changes (while Troparcel itself writes). */
   suppressChanges() {
     this._suppressChangeDetection = true
+    this._noteIndex = null
   }
 
-  /**
-   * Resume change detection (call after applying remote changes).
-   */
+  /** Report changes again; what changed while suppressed is not reported. */
   resumeChanges() {
-    // Reset prevState so our own suppressed-phase changes don't trigger
-    // the subscriber as "new" on the next external state change
     this._prevState = this._getState()
     this._suppressChangeDetection = false
   }
 
-  // -------------------------------------------------------- Action completion
+  // --------------------------------------------------------- Note HTML
 
-  /**
-   * Wait for a dispatched command to complete.
-   * Watches the `activities` slice for the action's seq to be cleared.
-   */
-  _waitForAction(action, timeout = 15000) {
-    if (!action || !action.meta || !action.meta.seq) {
-      return Promise.resolve()
-    }
-
-    let seq = action.meta.seq
-
-    return new Promise((resolve, reject) => {
-      let settled = false
-
-      let timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        unsub()
-        reject(new Error(`waitForAction: ${action.type} seq=${seq} timed out after ${timeout}ms`))
-      }, timeout)
-
-      let unsub = this.store.subscribe(() => {
-        if (settled) return
-        let state = this._getState()
-        if (!state.activities || !state.activities[seq]) {
-          settled = true
-          clearTimeout(timer)
-          unsub()
-          resolve()
-        }
-      })
-
-      // Already done?
-      if (!settled) {
-        let state = this._getState()
-        if (!state.activities || !state.activities[seq]) {
-          settled = true
-          clearTimeout(timer)
-          unsub()
-          resolve()
-        }
-      }
-    })
-  }
-
-  // --------------------------------------------------------- Note HTML helpers
-
-  /**
-   * Convert a Redux note (ProseMirror state JSON + text) to HTML.
-   */
+  /** A Tropy note (ProseMirror state + text) as HTML. */
   _noteStateToHtml(note) {
     if (note.html) return note.html
-
-    if (note.state && note.state.doc) {
-      return this._renderDoc(note.state.doc)
-    }
-
-    if (note.text) {
-      return `<p>${this._esc(note.text)}</p>`
-    }
-
+    if (note.state && note.state.doc) return this._renderDoc(note.state.doc)
+    if (note.text) return `<p>${this._esc(note.text)}</p>`
     return ''
   }
 
   _renderDoc(doc) {
-    if (!doc || !doc.content) return ''
-    // Handle live ProseMirror Node (doc.content is a Fragment, not an array)
+    if (!doc) return ''
     if (typeof doc.toJSON === 'function') doc = doc.toJSON()
-    if (!doc.content) return ''
-    let content = doc.content
-    if (!Array.isArray(content)) {
-      if (Array.isArray(content.content)) content = content.content
-      else return ''
-    }
-    return content.map(n => this._renderNode(n)).join('')
+    return childrenOf(doc).map(n => this._renderNode(n)).join('')
   }
 
   _renderNode(node) {
     if (!node) return ''
-    // Handle live ProseMirror Node objects (content is Fragment, type is NodeType)
     if (typeof node.toJSON === 'function') node = node.toJSON()
-    let children = ''
-    if (node.content) {
-      let c = node.content
-      if (!Array.isArray(c)) {
-        if (Array.isArray(c.content)) c = c.content
-        else c = []
-      }
-      children = c.map(n => this._renderNode(n)).join('')
-    }
+    let children = childrenOf(node).map(n => this._renderNode(n)).join('')
 
     let type = typeof node.type === 'string' ? node.type : (node.type && node.type.name) || ''
     switch (type) {
       case 'paragraph': {
-        // Tropy: 'left' → no style, 'right' → 'text-align: end', others → direct
+        // Tropy writes 'left' as no style and 'right' as 'end'.
         let align = node.attrs && node.attrs.align
         if (align && align !== 'left') {
-          let ta = align === 'right' ? 'end' : align
-          return `<p style="text-align: ${ta}">${children}</p>`
+          return `<p style="text-align: ${align === 'right' ? 'end' : align}">${children}</p>`
         }
         return `<p>${children}</p>`
       }
-      case 'blockquote':
-        return `<blockquote>${children}</blockquote>`
-      case 'ordered_list':
-        return `<ol>${children}</ol>`
-      case 'bullet_list':
-        return `<ul>${children}</ul>`
-      case 'list_item':
-        return `<li>${children}</li>`
+      case 'blockquote': return `<blockquote>${children}</blockquote>`
+      case 'ordered_list': return `<ol>${children}</ol>`
+      case 'bullet_list': return `<ul>${children}</ul>`
+      case 'list_item': return `<li>${children}</li>`
       case 'heading': {
         let l = (node.attrs && node.attrs.level) || 1
         return `<h${l}>${children}</h${l}>`
       }
-      case 'horizontal_rule':
-        return '<hr>'
-      case 'code_block':
-        return `<pre><code>${children}</code></pre>`
-      case 'hard_break':
-        return '<span class="line-break"><br></span>'
+      case 'horizontal_rule': return '<hr>'
+      case 'code_block': return `<pre><code>${children}</code></pre>`
+      case 'hard_break': return '<span class="line-break"><br></span>'
       case 'text': {
         let t = this._esc(node.text || '')
-        if (node.marks) {
-          for (let m of node.marks) {
-            let mtype = typeof m.type === 'string' ? m.type : (m.type && m.type.name) || ''
-            switch (mtype) {
-              case 'bold':
-              case 'strong':
-                t = `<strong>${t}</strong>`; break
-              case 'italic':
-              case 'em':
-                t = `<em>${t}</em>`; break
-              case 'link':
-                t = `<a href="${this._esc((m.attrs && m.attrs.href) || '')}">${t}</a>`; break
-              case 'superscript':
-              case 'sup':
-                t = `<sup>${t}</sup>`; break
-              case 'subscript':
-              case 'sub':
-                t = `<sub>${t}</sub>`; break
-              case 'strikethrough':
-                t = `<span style="text-decoration: line-through">${t}</span>`; break
-              case 'underline':
-                t = `<span style="text-decoration: underline">${t}</span>`; break
-              case 'overline':
-                t = `<span style="text-decoration: overline">${t}</span>`; break
-            }
+        for (let m of (node.marks || [])) {
+          let mtype = typeof m.type === 'string' ? m.type : (m.type && m.type.name) || ''
+          switch (mtype) {
+            case 'bold':
+            case 'strong': t = `<strong>${t}</strong>`; break
+            case 'italic':
+            case 'em': t = `<em>${t}</em>`; break
+            case 'link': t = `<a href="${this._esc((m.attrs && m.attrs.href) || '')}">${t}</a>`; break
+            case 'superscript':
+            case 'sup': t = `<sup>${t}</sup>`; break
+            case 'subscript':
+            case 'sub': t = `<sub>${t}</sub>`; break
+            case 'strikethrough': t = `<span style="text-decoration: line-through">${t}</span>`; break
+            case 'underline': t = `<span style="text-decoration: underline">${t}</span>`; break
+            case 'overline': t = `<span style="text-decoration: overline">${t}</span>`; break
           }
         }
         return t
@@ -722,20 +601,44 @@ class StoreAdapter {
   }
 
   _esc(str) {
-    let s = String(str)
-    let out = ''
-    for (let i = 0; i < s.length; i++) {
-      let c = s[i]
-      switch (c) {
-        case '&': out += '&amp;'; break
-        case '<': out += '&lt;'; break
-        case '>': out += '&gt;'; break
-        case '"': out += '&quot;'; break
-        case "'": out += '&#x27;'; break
-        default: out += c
-      }
-    }
-    return out
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;')
+  }
+}
+
+function sameRefs(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function copyMetadata(meta) {
+  if (!meta) return null
+  let out = {}
+  for (let [key, value] of Object.entries(meta)) {
+    if (key !== 'id') out[key] = value
+  }
+  return out
+}
+
+/** ProseMirror JSON keeps children in `content`; a live Fragment nests them. */
+function childrenOf(node) {
+  let c = node && node.content
+  if (!c) return []
+  if (Array.isArray(c)) return c
+  return Array.isArray(c.content) ? c.content : []
+}
+
+function pickNav(nav = {}) {
+  return {
+    items: nav.items,
+    photo: nav.photo,
+    selection: nav.selection,
+    note: nav.note
   }
 }
 

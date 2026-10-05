@@ -7,9 +7,10 @@ const os = require('os')
 /**
  * Backup & Validation — protects local data during remote apply.
  *
- * - Pre-apply snapshots: saves affected items as JSON before applying
+ * - Pre-apply snapshots: each apply first writes the items it is about to
+ *   change, as JSON, to ~/.troparcel/backups/<room>/. They are a record to
+ *   read and restore from by hand; nothing replays them automatically.
  * - Inbound validation: size guards, tombstone flood, empty overwrite
- * - Rollback: replays a backup snapshot via the Tropy API (all data types)
  */
 
 const DEFAULT_OPTIONS = {
@@ -21,12 +22,12 @@ const DEFAULT_OPTIONS = {
 }
 
 class BackupManager {
-  constructor(room, api, logger, options = {}) {
+  constructor(room, logger, options = {}) {
     this.room = room
-    this.api = api
     this.logger = logger
     this.options = { ...DEFAULT_OPTIONS, ...options }
-    this.backupDir = path.join(os.homedir(), '.troparcel', 'backups', this.sanitizeDir(room))
+    this.backupDir = path.join(this.options.dataDir || path.join(os.homedir(), '.troparcel'),
+      'backups', this.sanitizeDir(room))
     this._fileCounter = 0
   }
 
@@ -103,51 +104,6 @@ class BackupManager {
     } catch (err) {
       this.logger.warn('Failed to prune backups', { error: err.message })
     }
-  }
-
-  /**
-   * Capture the current state of a local item for backup purposes.
-   * Uses the HTTP API — prefer captureItemStateFromStore() when adapter is available.
-   *
-   * @param {number} localId
-   * @param {string} identity
-   * @returns {Object} snapshot
-   */
-  async captureItemState(localId, identity) {
-    let snapshot = { identity, localId }
-
-    try {
-      snapshot.metadata = await this.api.getMetadata(localId)
-    } catch (err) {
-      this.logger.warn(`captureItemState: failed to get metadata for ${localId}`, { error: String(err.message || err) })
-      snapshot.metadata = null
-    }
-
-    try {
-      snapshot.tags = await this.api.getItemTags(localId)
-    } catch (err) {
-      this.logger.warn(`captureItemState: failed to get tags for ${localId}`, { error: String(err.message || err) })
-      snapshot.tags = []
-    }
-
-    // Get photos with notes and selections
-    snapshot.photos = []
-    try {
-      let photos = await this.api.getPhotos(localId)
-      if (Array.isArray(photos)) {
-        let photoIds = photos.map(pid => typeof pid === 'object' ? pid.id : pid)
-        let results = await Promise.allSettled(
-          photoIds.map(id => this.api.getPhoto(id))
-        )
-        for (let r of results) {
-          if (r.status === 'fulfilled' && r.value) snapshot.photos.push(r.value)
-        }
-      }
-    } catch (err) {
-      this.logger.warn(`captureItemState: failed to get photos for ${localId}`, { error: String(err.message || err) })
-    }
-
-    return snapshot
   }
 
   /**
@@ -275,89 +231,6 @@ class BackupManager {
     // If remote is empty/null and local has content, don't overwrite
     if ((!remoteValue || !remoteValue.text) && localValue && localValue.text) return false
     return true
-  }
-
-  /**
-   * Rollback: replay a backup file into Tropy via the API or store adapter (R4).
-   * Restores metadata, tags, and notes for all items in the backup.
-   *
-   * @param {string} backupPath - path to the backup JSON file
-   * @param {StoreAdapter} [adapter] - optional store adapter for write operations
-   * @returns {Object} { restored: number, errors: string[] }
-   */
-  async rollback(backupPath, adapter = null) {
-    let data = JSON.parse(await fs.promises.readFile(backupPath, 'utf8'))
-    let restored = 0
-    let errors = []
-
-    for (let item of data.items) {
-      let itemErrors = []
-      try {
-        // Restore metadata
-        if (item.metadata) {
-          try {
-            await this.api.saveMetadata(item.localId, item.metadata)
-          } catch (err) {
-            itemErrors.push(`metadata for ${item.localId}: ${err.message}`)
-          }
-        }
-
-        // Restore tags
-        if (item.tags && Array.isArray(item.tags)) {
-          try {
-            let tagIds = item.tags.map(t => t.id || t.tag_id).filter(Boolean)
-            if (tagIds.length > 0) {
-              await this.api.addTagsToItem(item.localId, tagIds)
-            }
-          } catch (err) {
-            itemErrors.push(`tags for ${item.localId}: ${err.message}`)
-          }
-        }
-
-        // Restore notes from photos
-        if (item.photos && Array.isArray(item.photos)) {
-          for (let photo of item.photos) {
-            let noteIds = photo.notes || []
-            for (let noteId of noteIds) {
-              try {
-                let note = await this.api.getNote(noteId, 'json')
-                if (note && note.html) {
-                  if (adapter) {
-                    await adapter.updateNote(noteId, { html: note.html })
-                  } else {
-                    this.logger.warn(`Rollback: note ${noteId} update skipped (no store adapter, HTTP PUT not supported)`)
-                  }
-                }
-              } catch (err) {
-                itemErrors.push(`note ${noteId}: ${err.message}`)
-              }
-            }
-
-            // Restore selections — coordinates can't be updated via either path
-            let selIds = photo.selections || []
-            for (let selId of selIds) {
-              this.logger.warn(`Rollback: selection ${selId} update skipped (selection coordinate update not supported)`)
-            }
-          }
-        }
-
-        if (itemErrors.length > 0) {
-          this.logger.warn(`Rollback: item ${item.localId} partially restored with ${itemErrors.length} error(s)`)
-          errors.push(...itemErrors)
-        }
-        restored++
-      } catch (err) {
-        errors.push(`Failed to restore item ${item.localId}: ${err.message}`)
-        errors.push(...itemErrors)
-      }
-    }
-
-    this.logger.info(`Rollback complete: ${restored} items restored`, {
-      backup: backupPath,
-      errors: errors.length
-    })
-
-    return { restored, errors }
   }
 
   /**

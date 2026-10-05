@@ -1,25 +1,29 @@
 'use strict'
 
 /**
- * Troparcel v5.0 — Store-First Annotation Overlay Collaboration Layer for Tropy
+ * Troparcel — collaboration for Tropy.
  *
- * Syncs notes, tags, metadata, selections, transcriptions, and lists
- * between Tropy instances through CRDTs (Yjs). Items are matched
- * across instances by photo checksum, so each researcher keeps their
- * own photos locally while sharing interpretations through a
- * lightweight WebSocket relay.
+ * Shares notes, tags, metadata, selections, transcriptions and lists
+ * between Tropy projects through CRDTs (Yjs), over a Troparcel server or a
+ * shared folder. Items are matched by their photos' checksums, so each
+ * researcher keeps their own photos and only the annotations travel.
  *
- * Sync modes:
- *   - "auto"   — push and apply changes in near-real-time
- *   - "review" — push automatically, apply only on Import
- *   - "push"   — only send local changes, never apply remote
- *   - "pull"   — only receive remote changes, never push local
+ * Modes:
+ *   auto   — share and receive continuously
+ *   review — share continuously, receive on File > Import > Troparcel
+ *   push   — share only
+ *   pull   — receive only, on import
  */
 
 const { SyncEngine } = require('./sync-engine')
-const identity = require('./identity')
+const { parseConnectionString } = require('./connection-string')
 
 const VALID_SYNC_MODES = new Set(['auto', 'review', 'push', 'pull'])
+
+const flag = (v, fallback) =>
+  v === true || v === 'true' ? true : (v === false || v === 'false' ? false : fallback)
+
+const num = (v, fallback) => (Number.isFinite(Number(v)) && v !== '' && v != null) ? Number(v) : fallback
 
 class TroparcelPlugin {
   constructor(options, context) {
@@ -27,474 +31,232 @@ class TroparcelPlugin {
     this.options = this.mergeOptions(options)
     this.engine = null
 
-    // Prefs window detection — instant check, no delay needed.
-    // The prefs window has a pino logger with name='prefs' in its bindings.
-    if (this._isPrefsWindow()) {
-      this.context.logger.info('Troparcel: skipping sync in prefs window')
-      return
-    }
+    // The preferences window loads plugins too; it must never sync.
+    if (this._isPrefsWindow()) return
 
     this.context.logger.info(
-      `Troparcel v5.0 — server: ${this.options.serverUrl}, ` +
-      `mode: ${this.options.syncMode}, ` +
-      `user: ${this.options.userId || '(anonymous)'}`)
+      `Troparcel — ${this.options.transport} ${this.options.address}, ` +
+      `mode: ${this.options.syncMode}, user: ${this.options.userId || '(anonymous)'}`)
 
-    if (this.options.autoSync) {
-      this.context.logger.info(
-        'Troparcel: auto-sync enabled, waiting for project to load...')
-      this._waitForProjectAndStart()
-    } else {
-      this.context.logger.info(
-        'Troparcel: auto-sync disabled — use File > Export/Import to sync manually')
-    }
+    if (this.options.autoSync) this._waitForProjectAndStart()
   }
 
-  /**
-   * Detect if we're running in Tropy's preferences window.
-   * The prefs window can reach the localhost API but should never sync.
-   */
+  /** The prefs window's logger is named "prefs". */
   _isPrefsWindow() {
     try {
       let logger = this.context.logger
-      // Pino logger stores bindings as a JSON string in chindings
-      if (logger.chindings && logger.chindings.includes('"name":"prefs"')) {
-        return true
-      }
-      // Alternative: check bindings() method
-      if (typeof logger.bindings === 'function') {
-        let b = logger.bindings()
-        if (b && b.name === 'prefs') return true
-      }
+      if (logger.chindings && logger.chindings.includes('"name":"prefs"')) return true
+      if (typeof logger.bindings === 'function' && logger.bindings().name === 'prefs') return true
     } catch { /* ignore */ }
     return false
   }
 
   /**
-   * User-facing notification via Tropy's FLASH.SHOW pipeline.
+   * Record a sync event in Tropy's log.
    *
-   * `context.dialog.notify(messageKey, params)` is the blessed plugin surface
-   * (per tropy/src/dialog.js:283-292 export list; reference usage in
-   * plugins/tropiiify/src/plugin.js:43,282). It internally dispatches a
-   * `flash.show` action whose payload is rendered by Tropy's FlashContainer
-   * and translated via i18n with the provided messageKey.
-   *
-   * IMPORTANT: do NOT call `context.dialog.info` or `.warning` — those names
-   * are NOT exported from tropy/src/dialog.js and will silently no-op. See
-   * mulch convention mx-4d2828 and mx-864ee7. The reference plugin
-   * tropy-crdt-collab is buggy in this regard; troparcel must not copy that
-   * pattern.
-   *
-   * Guard: dialog may be missing in non-project windows or under harness
-   * test stubs — fall back to logger so a missing dialog never crashes sync.
+   * Never `context.dialog.notify`: it opens a MODAL message box and looks
+   * its text up under `dialog.notify.<key>` in Tropy's own strings, where
+   * no plugin key exists — so every call showed an empty modal. What the
+   * owner sees instead is written into the project: "@name" tags and the
+   * "Troparcel: received" list (local-only.js).
    */
-  notify(messageKey, params) {
+  notify(event, params) {
     try {
-      let dialog = this.context && this.context.dialog
-      if (dialog && typeof dialog.notify === 'function') {
-        dialog.notify(messageKey, params || {})
-        return
-      }
-    } catch (err) {
-      try { this.context.logger.warn(`Troparcel: dialog.notify failed — ${err.message}`) } catch { /* ignore */ }
-    }
-    // Fallback path (no dialog available): log so the event is still observable.
-    try {
-      this.context.logger.info({ flash: messageKey, params: params || {} },
-        `Troparcel notify (no dialog): ${messageKey}`)
+      this.context.logger.info({ event, ...(params || {}) }, `Troparcel: ${event}`)
     } catch { /* ignore */ }
+  }
+
+  _store() {
+    try {
+      return (this.context.window && this.context.window.store) || null
+    } catch {
+      return null
+    }
   }
 
   /**
-   * Wait for the Redux store and project state before starting sync.
-   *
-   * context.window.store is set after window.load() completes.
-   * Project data lives at store.getState().project (set when PROJECT.OPENED
-   * action fires — there is NO context.window.project property).
-   *
-   * We poll every 500ms up to startupDelay for the store to appear,
-   * then check the store state for project info.
+   * Resolve the options Tropy stored for this plugin. A connection string
+   * fills the transport, address, room and token; without one, the
+   * separate fields older versions used are still read.
    */
-  async _waitForProjectAndStart() {
-    let startTime = Date.now()
-    let maxWait = this.options.startupDelay
-    let interval = 500
+  mergeOptions(options = {}) {
+    let syncMode = String(options.syncMode || 'auto').trim().toLowerCase()
+    if (!VALID_SYNC_MODES.has(syncMode)) syncMode = 'auto'
 
-    while (Date.now() - startTime < maxWait) {
-      try {
-        let store = this.context.window && this.context.window.store
-        if (store) {
-          let state = store.getState()
-          let project = state && state.project
-
-          if (project && project.path) {
-            let elapsed = Date.now() - startTime
-            this.context.logger.info(
-              `Troparcel: store + project available after ${elapsed}ms`
-            )
-
-            // Update room name from project if not explicitly set
-            if (!this.options._roomExplicit && project.name) {
-              this.options.room = project.name
-            }
-
-            // Get project file path (kept for backup manager paths)
-            this.options.projectPath = project.path
-
-            break
-          }
-
-          // Store exists but project not loaded yet — keep waiting
-          let elapsed = Date.now() - startTime
-          if (elapsed > 2000 && elapsed % 2000 < interval) {
-            this.context.logger.info(
-              `Troparcel: store ready, waiting for project state (${elapsed}ms)`
-            )
-          }
-        }
-      } catch { /* ignore */ }
-
-      await new Promise(r => setTimeout(r, interval))
+    let conn = parseConnectionString(options.connection) || {
+      transport: 'websocket',
+      serverUrl: options.serverUrl || 'ws://localhost:2468'
     }
-
-    let store = null
-    try {
-      store = this.context.window && this.context.window.store
-    } catch { /* ignore */ }
-
-    if (!store) {
-      this.context.logger.info(
-        'Troparcel: store not available after ' +
-        `${this.options.startupDelay}ms — starting sync with API fallback`
-      )
-    }
-
-    await this.startBackgroundSync()
-  }
-
-  mergeOptions(options) {
-    // Project name is read later from store.getState().project
-    // after the store has loaded — not available at construction time
-    let projectName = ''
-
-    let syncMode = (options.syncMode || 'auto').trim().toLowerCase()
-    if (!VALID_SYNC_MODES.has(syncMode)) {
-      syncMode = 'auto'
-    }
-
-    let roomExplicit = !!options.room
+    let room = options.room || conn.room || ''
+    let roomToken = options.roomToken || conn.roomToken || ''
 
     return {
-      // Connection
-      serverUrl: options.serverUrl || 'ws://localhost:2468',
-      room: options.room || projectName || 'troparcel-default',
+      transport: conn.transport,
+      serverUrl: conn.serverUrl || null,
+      syncDir: conn.syncDir || null,
+      address: conn.serverUrl || conn.syncDir,
+      room: room || 'troparcel-default',
+      _roomExplicit: !!room,
+      roomToken,
       userId: options.userId || '',
-      roomToken: options.roomToken || '',
-      apiPort: Number(options.apiPort) || 2019,
+      apiPort: num(options.apiPort, 2019), // only in the fallback user id
 
-      // Sync behavior
-      autoSync: options.autoSync !== false,
+      autoSync: flag(options.autoSync, true),
       syncMode,
-      syncMetadata: options.syncMetadata !== false,
-      syncTags: options.syncTags !== false,
-      syncNotes: options.syncNotes !== false,
-      syncSelections: options.syncSelections !== false,
-      syncTranscriptions: options.syncTranscriptions !== false,
-      syncPhotoAdjustments: options.syncPhotoAdjustments === true || options.syncPhotoAdjustments === 'true',
-      syncLists: options.syncLists === true || options.syncLists === 'true',
-      syncDeletions: options.syncDeletions === true || options.syncDeletions === 'true',
-      clearTombstones: options.clearTombstones === true || options.clearTombstones === 'true',
+      syncMetadata: flag(options.syncMetadata, true),
+      syncTags: flag(options.syncTags, true),
+      syncNotes: flag(options.syncNotes, true),
+      syncSelections: flag(options.syncSelections, true),
+      syncTranscriptions: flag(options.syncTranscriptions, true),
+      syncPhotoAdjustments: flag(options.syncPhotoAdjustments, false),
+      syncLists: flag(options.syncLists, false),
+      syncDeletions: flag(options.syncDeletions, false),
+      clearTombstones: flag(options.clearTombstones, false),
 
-      // Timing
-      startupDelay: Number(options.startupDelay) || 8000,
-      localDebounce: Number(options.localDebounce) || 2000,
-      remoteDebounce: Number(options.remoteDebounce) || 500,
-      safetyNetInterval: Number(options.safetyNetInterval) || 120,
-      writeDelay: Number(options.writeDelay) || 100,
+      startupDelay: num(options.startupDelay, 3000),
+      localDebounce: num(options.localDebounce, 2000),
+      remoteDebounce: num(options.remoteDebounce, 500),
+      safetyNetInterval: num(options.safetyNetInterval, 120),
+      filePollInterval: num(options.filePollInterval, 5000),
 
-      // Safety limits
-      maxBackups: Number(options.maxBackups) || 10,
-      maxNoteSize: Number(options.maxNoteSize) || 1048576,
-      maxMetadataSize: Number(options.maxMetadataSize) || 65536,
-      tombstoneFloodThreshold: Number(options.tombstoneFloodThreshold) || 0.5,
+      maxBackups: num(options.maxBackups, 10),
+      maxNoteSize: num(options.maxNoteSize, 1048576),
+      maxMetadataSize: num(options.maxMetadataSize, 65536),
+      tombstoneFloodThreshold: num(options.tombstoneFloodThreshold, 0.5),
 
-      // Debug
-      debug: options.debug === true || options.debug === 'true',
+      debug: flag(options.debug, false)
+    }
+  }
 
-      // Internal
-      _roomExplicit: roomExplicit
+  /**
+   * The store exists once the window has loaded; the project once
+   * PROJECT.OPENED has run. Wait for both (up to a minute), then start.
+   */
+  async _waitForProjectAndStart() {
+    let deadline = Date.now() + 60000
+    while (Date.now() < deadline && !this._unloading) {
+      let store = this._store()
+      let project = store && store.getState().project
+      if (project && project.path) {
+        if (!this.options._roomExplicit && project.name) this.options.room = project.name
+        this.options.projectPath = project.path
+        await this.startBackgroundSync()
+        return
+      }
+      await new Promise(r => setTimeout(r, 500))
+    }
+    if (!this._unloading) {
+      this.context.logger.warn('Troparcel: no project opened within a minute — not syncing')
     }
   }
 
   async startBackgroundSync() {
-    if (this.engine) return
+    if (this.engine || this._unloading) return
+    let delay = 5000
 
-    let store = null
-    try {
-      store = this.context.window && this.context.window.store
-    } catch { /* ignore */ }
+    while (!this._unloading) {
+      this.engine = new SyncEngine(this.options, this.context.logger, this._store())
+      try {
+        await this.engine.start({ skipStartupDelay: true })
+        this.notify('sync.started', { room: this.options.room, mode: this.options.syncMode })
+        return
+      } catch (err) {
+        let msg = err.message || String(err)
+        try { await this.engine.stop() } catch { /* ignore */ }
+        this.engine = null
+        this.notify('sync.error', { room: this.options.room, message: msg })
 
-    this.engine = new SyncEngine(this.options, this.context.logger, store)
-
-    try {
-      await this.engine.start()
-      this.context.logger.info(
-        `Troparcel: connected to room "${this.options.room}" ` +
-        `(${store ? 'store' : 'API'} mode, sync: ${this.options.syncMode})`)
-      this.notify('plugin.troparcel.sync.started', {
-        room: this.options.room,
-        mode: this.options.syncMode
-      })
-    } catch (err) {
-      let msg = err.message || String(err)
-      let isConnError = msg.includes('timeout') || msg.includes('ECONNREFUSED')
-      if (isConnError) {
-        this.context.logger.warn(
-          `Troparcel: could not reach server at ${this.options.serverUrl} — ` +
-          'will retry with exponential backoff')
-      } else {
-        this.context.logger.warn(
-          `Troparcel: sync failed to start — ${msg}. ` +
-          'Use File > Export/Import to sync manually.')
-      }
-      this.notify('plugin.troparcel.sync.error', {
-        room: this.options.room,
-        message: msg
-      })
-      await this.engine.stop()
-      this.engine = null
-
-      // Retry connection with exponential backoff for connection-related errors
-      if (isConnError && !this._retryTimer) {
-        let delay = 5000 // start at 5s
-        let maxDelay = 5 * 60 * 1000 // cap at 5 min
-        let scheduleRetry = () => {
-          this._retryTimer = setTimeout(async () => {
-            this._retryTimer = null
-            if (this.engine || this._unloading) return
-            try {
-              this.engine = new SyncEngine(this.options, this.context.logger, store)
-              await this.engine.start()
-              this.context.logger.info(
-                `Troparcel: connected to room "${this.options.room}" (after retry)`)
-              this.notify('plugin.troparcel.sync.started', {
-                room: this.options.room,
-                mode: this.options.syncMode
-              })
-            } catch {
-              if (this.engine) {
-                try { await this.engine.stop() } catch {}
-                this.engine = null
-              }
-              delay = Math.min(delay * 2, maxDelay)
-              this.context.logger.info(
-                `Troparcel: server still unreachable, next retry in ${Math.round(delay / 1000)}s`)
-              scheduleRetry()
-            }
-          }, delay)
+        if (!/timeout|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg)) {
+          this.context.logger.warn(`Troparcel: not syncing — ${msg}`)
+          return
         }
-        scheduleRetry()
+        this.context.logger.info(
+          `Troparcel: cannot reach ${this.options.address}, retrying in ${Math.round(delay / 1000)}s`)
+        await new Promise(r => { this._retryTimer = setTimeout(r, delay) })
+        delay = Math.min(delay * 2, 5 * 60 * 1000)
       }
     }
   }
 
+  /** An engine for one hook call when background sync is not running. */
+  async _withEngine(fn) {
+    if (this.engine) return fn(this.engine)
+    let engine = new SyncEngine(this.options, this.context.logger, this._store())
+    await engine.start({ skipStartupDelay: true, skipInitialSync: true })
+    try {
+      return await fn(engine)
+    } finally {
+      await engine.stop()
+    }
+  }
+
   /**
-   * Export hook — share selected items to the collaboration room.
-   *
-   * Offline / sneakernet exchange:
-   * Troparcel requires a running server for sync. For truly offline exchange
-   * (no shared server), copy the server's data/ directory (LevelDB) to the
-   * other machine and start a local server there. Both instances will then
-   * have identical CRDT state and can diverge independently until reconnected.
-   * There is no file-based CRDT export/import from the plugin itself because
-   * Tropy's export hook only provides JSON-LD item data, not arbitrary file I/O.
+   * File > Export > Troparcel: share the selected items now. Tropy passes
+   * them as JSON-LD; the items are read again from the store, so what is
+   * shared is exactly what background sync would share.
    */
   async export(data) {
     if (this._isPrefsWindow()) return
-
-    // Tropy passes a JSON-LD document: { '@context', '@graph': [...items], version }
-    let items = Array.isArray(data) ? data : (data && data['@graph']) || []
-    let jsonLdContext = !Array.isArray(data) && data ? data['@context'] : null
-
-    if (items.length === 0) {
-      this.context.logger.warn('Troparcel Export: no items selected — select items first, then File > Export > Troparcel')
-      return
-    }
-
-    // Push-only and auto modes support export
     if (this.options.syncMode === 'pull') {
-      this.context.logger.warn('Troparcel Export: sync mode is "pull" — local changes are not shared in this mode')
+      this.context.logger.warn('Troparcel Export: mode is "pull" — nothing is shared')
       return
     }
-
-    this.context.logger.info(`Troparcel Export: pushing ${items.length} item(s) to room "${this.options.room}"...`)
+    let graph = Array.isArray(data) ? data : (data && data['@graph']) || []
+    let ids = new Set(graph.map(item => Number(String(item['@id'] || '').split('/').pop()) || item.id))
 
     try {
-      if (this.engine && this.engine.state === 'connected') {
-        this.engine.pushItems(items, jsonLdContext)
-        this.context.logger.info(
-          `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
-        this.notify('plugin.troparcel.sync.complete', {
-          op: 'export',
-          count: items.length,
-          room: this.options.room
-        })
-        return
-      }
-
-      this.context.logger.info('Troparcel Export: connecting to server (no background sync active)...')
-      let tempEngine = new SyncEngine(this.options, this.context.logger)
-      await tempEngine.start()
-      tempEngine.pushItems(items, jsonLdContext)
-
-      this.context.logger.info(
-        `Troparcel Export: done — ${items.length} item(s) pushed to "${this.options.room}"`)
-      this.notify('plugin.troparcel.sync.complete', {
-        op: 'export',
-        count: items.length,
-        room: this.options.room
+      let count = await this._withEngine(async engine => {
+        let items = engine.readSyncableItems()
+          .filter(item => ids.size === 0 || ids.has(item['@id']))
+        await engine.pushLocal(items, engine.vault.nextPushSeq())
+        return items.length
       })
-
-      setTimeout(() => { tempEngine.stop() }, 5000)
-
+      this.notify('sync.complete', { op: 'export', count, room: this.options.room })
     } catch (err) {
-      let msg = err.message || String(err)
-      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
-        this.context.logger.error(
-          `Troparcel Export: could not reach server at ${this.options.serverUrl} — ` +
-          'is the Troparcel server running?')
-      } else {
-        this.context.logger.error(`Troparcel Export: failed — ${msg}`)
-      }
-      this.notify('plugin.troparcel.sync.error', {
-        op: 'export',
-        room: this.options.room,
-        message: msg
-      })
+      this.context.logger.error(`Troparcel Export: failed — ${err.message}`)
+      this.notify('sync.error', { op: 'export', room: this.options.room, message: err.message })
     }
   }
 
-  /**
-   * Import hook — apply annotations from the collaboration room.
-   *
-   * In review mode, shows a summary of pending changes before applying.
-   * In auto mode, forces a full re-sync from the CRDT.
-   */
-  async import(payload) {
+  /** File > Import > Troparcel: apply everything waiting in the room. */
+  async import() {
     if (this._isPrefsWindow()) return
-
-    // Push-only mode doesn't apply remote changes
     if (this.options.syncMode === 'push') {
-      this.context.logger.warn('Troparcel Import: sync mode is "push" — remote changes are not applied in this mode')
+      this.context.logger.warn('Troparcel Import: mode is "push" — nothing is received')
       return
     }
-
-    this.context.logger.info(`Troparcel Import: pulling changes from room "${this.options.room}"...`)
-
     if (this.engine) this.engine.pause()
-
     try {
-      let engine
-      let tempEngine = false
-
-      if (this.engine && this.engine.state === 'connected') {
-        engine = this.engine
-      } else {
-        engine = new SyncEngine(this.options, this.context.logger)
-        await engine.start()
-        await new Promise(r => setTimeout(r, 3000))
-        tempEngine = true
-      }
-
-      // Verify connectivity (skip API ping when store adapter is available)
-      if (!engine.adapter) {
-        let alive = await engine.api.ping()
-        if (!alive) {
-          this.context.logger.warn('Import: Tropy API not reachable')
-          if (tempEngine) await engine.stop()
-          return
-        }
-      }
-
-      // Build local index if not already populated
-      if (engine.localIndex.size === 0) {
-        if (engine.adapter) {
-          let items = engine.readAllItemsFull()
-            .filter(item => (item.photo || []).some(p => p.checksum))
-          engine.localIndex = identity.buildIdentityIndex(items)
-        } else {
-          let localItems = await engine.api.getItems()
-          if (localItems && Array.isArray(localItems)) {
-            let items = []
-            for (let s of localItems) {
-              try { items.push(await engine.enrichItem(s)) } catch {}
-            }
-            engine.localIndex = identity.buildIdentityIndex(items)
-          }
-        }
-      }
-
-      // Use applyOnDemand which handles summary + backup
-      let result = await engine.applyOnDemand()
-
-      if (result) {
-        this.context.logger.info(
-          `Troparcel Import: done — applied changes to ${result.applied} item(s) from "${this.options.room}"`)
-        this.notify('plugin.troparcel.sync.complete', {
-          op: 'import',
-          count: result.applied,
-          room: this.options.room
-        })
-      } else {
-        this.context.logger.info(
-          'Troparcel Import: done — no pending changes to apply')
-        this.notify('plugin.troparcel.sync.complete', {
-          op: 'import',
-          count: 0,
-          room: this.options.room
-        })
-      }
-
-      if (tempEngine) await engine.stop()
-
-    } catch (err) {
-      let msg = err.message || String(err)
-      if (msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
-        this.context.logger.error(
-          `Troparcel Import: could not reach server at ${this.options.serverUrl} — ` +
-          'is the Troparcel server running?')
-      } else {
-        this.context.logger.error(`Troparcel Import: failed — ${msg}`)
-      }
-      this.notify('plugin.troparcel.sync.error', {
-        op: 'import',
-        room: this.options.room,
-        message: msg
+      let result = await this._withEngine(async engine => {
+        // A fresh engine needs a moment to receive the room's state.
+        if (engine !== this.engine) await new Promise(r => setTimeout(r, 3000))
+        return engine.applyOnDemand()
       })
+      this.notify('sync.complete', {
+        op: 'import', count: result ? result.applied : 0, room: this.options.room
+      })
+    } catch (err) {
+      this.context.logger.error(`Troparcel Import: failed — ${err.message}`)
+      this.notify('sync.error', { op: 'import', room: this.options.room, message: err.message })
     } finally {
       if (this.engine) this.engine.resume()
     }
   }
 
   getStatus() {
-    let safeOptions = { ...this.options }
-    if (safeOptions.roomToken) safeOptions.roomToken = '***'
-    delete safeOptions._roomExplicit
-
+    let options = { ...this.options }
+    if (options.roomToken) options.roomToken = '***'
+    delete options._roomExplicit
     return {
-      version: '5.0.0',
-      options: safeOptions,
-      engine: this.engine ? this.engine.getStatus() : null,
-      backgroundSync: this.engine != null
+      version: require('../package.json').version,
+      options,
+      engine: this.engine ? this.engine.getStatus() : null
     }
   }
 
   async unload() {
     this._unloading = true
-    this.context.logger.info('Troparcel unloading')
-    if (this._retryTimer) {
-      clearTimeout(this._retryTimer)
-      this._retryTimer = null
-    }
+    if (this._retryTimer) clearTimeout(this._retryTimer)
     if (this.engine) {
       await this.engine.stop()
       this.engine = null

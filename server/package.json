@@ -1,6 +1,6 @@
 {
   "name": "troparcel-server",
-  "version": "3.1.0",
+  "version": "6.0.0",
   "description": "Troparcel collaboration server — Yjs CRDT sync with LevelDB persistence, auth, and monitoring",
   "main": "index.js",
   "scripts": {

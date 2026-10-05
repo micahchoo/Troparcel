@@ -95,10 +95,13 @@ async function startServer({ port, dataDir }) {
     env,
     stdio: ['ignore', 'pipe', 'pipe']
   })
+  // --test-force-exit can end this process before t.after stops the server;
+  // never leave one running.
+  process.on('exit', () => { if (proc.exitCode === null) proc.kill('SIGKILL') })
 
   // Wait for server to print listening message OR timeout
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('server start timeout')), 5000)
+    const timer = setTimeout(() => reject(new Error('server start timeout')), 15000)
     let buf = ''
     const onData = (chunk) => {
       buf += String(chunk)
@@ -134,7 +137,7 @@ function makePeer(port, room) {
   return { doc, provider }
 }
 
-async function waitConnected(provider, ms = 5000) {
+async function waitConnected(provider, ms = 15000) {
   if (provider.wsconnected) return
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('connect timeout')), ms)

@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # Troparcel reads Tropy's Redux store and dispatches its commands, none of
+    # which is a published API. Run the drift checks against the release users
+    # have AND against main, so a breaking change shows up before it ships.
+    strategy:
+      fail-fast: false
+      matrix:
+        tropy: [v1.17.3, main]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: tropy/tropy
+          ref: ${{ matrix.tropy }}
+          path: tropy-src
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm ci
+        working-directory: server
+      - run: npm test
+        env:
+          TROPY_SRC: ${{ github.workspace }}/tropy-src
+      - run: npm run build

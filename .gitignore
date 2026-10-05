@@ -5,14 +5,13 @@ server/data/
 *.log
 npm-debug.log
 troparcel.zip
-package-lock.json
 .claude/
 .DS_Store
 .fuse_hidden*
 .npmrc
 
 # Built bundle — produced by `npm run build`, not committed
-index.js
+/index.js
 
 # Session-local artifacts (Claude Code handoff notes)
 HANDOFF.md
@@ -21,3 +20,6 @@ HANDOFF-expertise.md
 # Stray local symlinks
 chrome
 
+
+# End-to-end runs (real Tropy instances, temp projects)
+.e2e/

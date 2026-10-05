@@ -12,7 +12,7 @@
  * injected into Tropy's Electron renderer (which has Node.js access).
  */
 
-// Tags Tropy's ProseMirror editor schema accepts (audit 2026-05-08, mulch mx-f3a517).
+// Tags Tropy's ProseMirror editor schema accepts (checked 2026-05-08).
 // SUBSET of tropy/src/editor/serialize.js — anything outside this is silently
 // dropped by Tropy's `fromHTML` on round-trip, so accepting it here just
 // produces formatting that vanishes on the receiving instance.

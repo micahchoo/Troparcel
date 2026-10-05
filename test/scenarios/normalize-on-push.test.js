@@ -3,8 +3,7 @@
 /**
  * Tier 1 — normalize-on-push HTML canonicalization scenarios.
  *
- * Locks in the mapping table from src/normalize-on-push.js (mulch mx-be0280,
- * seed f832). Every row in the JSDoc table @ normalize-on-push.js:18-26 has
+ * Locks in the mapping table from src/normalize-on-push.js. Every row in the JSDoc table @ normalize-on-push.js:18-26 has
  * a corresponding assertion below, plus idempotence + pass-through + edge
  * cases.
  *

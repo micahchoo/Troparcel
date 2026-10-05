@@ -1,87 +1,70 @@
 'use strict'
 
 /**
- * Local mirror of Tropy action-type constants used by troparcel/src/.
+ * The Tropy action types Troparcel dispatches, copied as literals.
  *
- * Why this exists:
- *   - Plugin context (mx-864ee7) exposes only {logger, dialog, json, sharp,
- *     window} — not the action-type constants.
- *   - Direct require()-ing of `tropy/src/constants/<slice>.js` is fragile
- *     across Tropy install variants (asar production vs. dev tree). Per
- *     mulch convention mx-f0d4e1, the supported pattern is a local mirror
- *     with literals + a comment citing the upstream source file.
+ * The plugin context does not export Tropy's constants, and requiring them
+ * from Tropy's app bundle is not possible. Each literal names its source;
+ * `test/scenarios/tropy-reducer-snapshot.test.js` compares them with a Tropy
+ * checkout (TROPY_SRC) so a rename upstream fails CI instead of failing
+ * silently in the field.
  *
- * Maintenance:
- *   - Mirror only what troparcel actually dispatches. Do not sprawl.
- *   - Each leaf has a trailing comment of the form
- *     `// tropy/src/constants/<file>.js#<KEY>` so drift is verifiable.
- *   - When adding a new dispatch site, add the constant here first, then
- *     reference it from the call site — never inline a new literal.
- *
- * Test code in troparcel/test/* is intentionally left with literal
- * action-type strings: tests document the expected wire format.
+ * Only store-adapter.js dispatches. Add a type here, then a method there.
  */
 
 module.exports = {
-  // tropy/src/constants/history.js
-  HISTORY: {
-    TICK: 'history.tick'                         // history.js#TICK
-  },
-
-  // tropy/src/constants/flash.js
-  FLASH: {
-    SHOW: 'flash.show',                          // flash.js#SHOW
-    HIDE: 'flash.hide'                           // flash.js#HIDE
-  },
-
-  // tropy/src/constants/tag.js
+  // src/constants/tag.js
   TAG: {
-    CREATE: 'tag.create',                        // tag.js#CREATE
-    SAVE: 'tag.save'                             // tag.js#SAVE
+    CREATE: 'tag.create'
   },
 
-  // tropy/src/constants/item.js
-  // ITEM.TAG.CREATE is the "intent-to-add" action handled by the AddTags
-  // command (tropy/src/commands/item/tags.js): persists to DB, then emits
-  // ITEM.TAG.INSERT to mutate the items reducer state via nested.add('tags').
-  // Used by apply.js _applyAttribution. (FIXED 2256: replaces the prior
-  // PRE-EXISTING DRIFT entry `TAGS_ADD: 'item.tags.add'`, which had no
-  // registered handler in tropy and silently no-op'd.)
+  // src/constants/item.js
   ITEM: {
     TAG: {
-      CREATE: 'item.tag.create'                  // item.js#TAG.CREATE
+      CREATE: 'item.tag.create',
+      DELETE: 'item.tag.delete'
     }
   },
 
-  // tropy/src/constants/metadata.js
+  // src/constants/metadata.js
   METADATA: {
-    SAVE: 'metadata.save'                        // metadata.js#SAVE
+    SAVE: 'metadata.save'
   },
 
-  // tropy/src/constants/note.js
+  // src/constants/note.js
   NOTE: {
-    CREATE: 'note.create',                       // note.js#CREATE
-    DELETE: 'note.delete'                        // note.js#DELETE
+    CREATE: 'note.create',
+    DELETE: 'note.delete'
   },
 
-  // tropy/src/constants/selection.js
+  // src/constants/nav.js
+  NAV: {
+    UPDATE: 'nav.update'
+  },
+
+  // src/constants/selection.js
   SELECTION: {
-    CREATE: 'selection.create'                   // selection.js#CREATE
+    CREATE: 'selection.create'
   },
 
-  // tropy/src/constants/list.js
+  // src/slices/transcriptions.js (Redux Toolkit slice "transcriptions")
+  TRANSCRIPTION: {
+    CREATE: 'transcriptions/create'
+  },
+
+  // src/constants/list.js
   LIST: {
-    CREATE: 'list.create',                       // list.js#CREATE
+    CREATE: 'list.create',
     ITEM: {
-      ADD: 'list.item.add',                      // list.js#ITEM.ADD
-      REMOVE: 'list.item.remove'                 // list.js#ITEM.REMOVE
+      ADD: 'list.item.add',
+      REMOVE: 'list.item.remove'
     }
   },
 
-  // tropy/src/constants/ontology.js
+  // src/constants/ontology.js
   ONTOLOGY: {
     TEMPLATE: {
-      CREATE: 'ontology.template.create'         // ontology.js#TEMPLATE.CREATE
+      CREATE: 'ontology.template.create'
     }
   }
 }

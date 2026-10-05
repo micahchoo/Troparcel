@@ -171,7 +171,10 @@ function mockState(overrides = {}) {
     lists: overrides.lists ?? {},
     activities: overrides.activities ?? {},
     transcriptions: overrides.transcriptions ?? {},
-    ontology: overrides.ontology ?? { template: {} }
+    // Tropy always has its preset templates once the ontology has loaded.
+    ontology: overrides.ontology ?? {
+      template: { 'https://tropy.org/v1/templates/generic': { id: 'https://tropy.org/v1/templates/generic', name: 'Tropy Generic' } }
+    }
   }
 }
 
