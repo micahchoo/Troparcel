@@ -281,12 +281,21 @@ class TroparcelPlugin {
     }
   }
 
+  /**
+   * Tropy calls this before re-creating plugins with changed settings, so
+   * it must always finish: an engine left running keeps the old room open.
+   */
   async unload() {
     this._unloading = true
     if (this._retryTimer) clearTimeout(this._retryTimer)
-    if (this.engine) {
-      await this.engine.stop()
-      this.engine = null
+    let engine = this.engine
+    this.engine = null
+    if (engine) {
+      try {
+        await engine.stop()
+      } catch (err) {
+        this.context.logger.warn(`Troparcel: stopping the old connection failed: ${err.message}`)
+      }
     }
   }
 }

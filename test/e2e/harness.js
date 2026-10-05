@@ -432,8 +432,10 @@ class Run {
   }
 }
 
+/** Bundle the plugin: into ./index.js, or into TROPARCEL_BUNDLE when set. */
 function build() {
-  execFileSync('node', ['esbuild.config.mjs'], { cwd: ROOT, stdio: 'ignore' })
+  let out = process.env.TROPARCEL_BUNDLE ? [`--outfile=${process.env.TROPARCEL_BUNDLE}`] : []
+  execFileSync('node', ['esbuild.config.mjs', ...out], { cwd: ROOT, stdio: 'ignore' })
 }
 
 module.exports = { Run, SyntheticPeer, build, until, sleep }

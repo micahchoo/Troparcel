@@ -68,8 +68,9 @@ class WebSocketAdapter extends SyncAdapter {
         'check that the Troparcel server is running')
       this.emit('error', { message: e.message || String(e) })
     })
+    // y-websocket 3 closes with a null event when we destroy the provider
     this.provider.on('connection-close', (e) => {
-      if (e.code !== 1000) {
+      if (e && e.code !== 1000) {
         this.logger.info(
           `[troparcel] connection closed (code: ${e.code}` +
           `${e.reason ? ', ' + e.reason : ''}), reconnecting...`)
