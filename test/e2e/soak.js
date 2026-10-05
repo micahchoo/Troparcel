@@ -20,6 +20,15 @@
  * outage is then a sync app offline: one member's for 20–40 s, or
  * everyone's.
  *
+ * SOAK_KEY=1 encrypts the room, the synthetic members' writes included.
+ * At the end a reader without the key opens the room and searches it for
+ * every text the run wrote: none may be readable.
+ *
+ * SOAK_PHOTOS=1 makes it a project room. alice starts with the photos;
+ * bob's and carol's projects start empty and must receive every item, and
+ * now and then a Tropy imports a new photo that must reach everyone. A
+ * member edits only items its project already has.
+ *
  * Each member owns one metadata field: two people changing one field at
  * the same time keep their own values by design (docs/CONFLICTS.md), so
  * the group in this test follows the Group Guide and splits the fields.
@@ -41,6 +50,9 @@ const { read, summarize } = require('./timeline')
 const MINUTES = Number(process.env.SOAK_MINUTES) || 20
 const FOLDER = process.env.SOAK_TRANSPORT === 'folder'
 const MEMBERS = ['alice', 'bob', 'carol', 'dave', 'erin']
+const { RoomKey } = require('../../src/room-key')
+const KEY = process.env.SOAK_KEY === '1' ? RoomKey.generate() : null
+const PROJECT = process.env.SOAK_PHOTOS === '1'
 const PHOTOS = 12
 const DC = 'http://purl.org/dc/elements/1.1/'
 const FIELD = { alice: `${DC}title`, bob: `${DC}description`, carol: `${DC}subject`, dave: `${DC}creator`, erin: `${DC}publisher` }
@@ -81,35 +93,67 @@ async function main() {
     }
     let tropys = ['alice', 'bob', 'carol'].map(name => run.tropy(name, {
       ...connectionOf(name), userId: name, syncDeletions: true, debug: true,
+      ...(KEY ? { roomKey: KEY } : {}), ...(PROJECT ? { sharePhotos: true } : {}),
       localDebounce: 300, remoteDebounce: 200, safetyNetInterval: 10, dataDir: run.dir
     }))
     let files = Array.from({ length: PHOTOS }, (_, i) => run.photo(1000 + i))
     let checksums = files.map(f => crypto.createHash('md5').update(fs.readFileSync(f)).digest('hex'))
+    // A photo imported by one Tropy, done once that Tropy holds its checksum
+    // (counting items would count one arriving from a project room too).
+    let holds = async (t, c) => Object.values((await t.driver.state('')).photos).some(p => p.checksum === c)
+    let importOne = async (t, file, c) => {
+      await until(`${t.name} to import ${path.basename(file)}`, async () => {
+        if (await holds(t, c)) return true
+        await t.api.importFiles([file])
+        await sleep(1500)
+        return holds(t, c)
+      }, { timeout: 60000, every: 500 })
+    }
     for (let t of tropys) {
       await t.start()
-      await t.importPhotos(files)
+      // In a project room only alice brings the photos; the others receive them.
+      if (!PROJECT || t.name === 'alice') {
+        for (let i = 0; i < files.length; i++) await importOne(t, files[i], checksums[i])
+      }
     }
     let peers = ['dave', 'erin'].map(name => FOLDER ? run.folderPeer(name, folders.get(name)) : run.peer(name))
+    if (KEY) for (let p of peers) p.schema.setRoomKey(p.doc, new RoomKey(KEY))
     for (let p of peers) await p.connected()
     log(`${tropys.length} Tropys and ${peers.length} synthetic members on ${PHOTOS} photos, ` +
       `${FOLDER ? 'a shared folder' : 'a server'}; soaking for ${MINUTES} min`)
 
-    // checksum → { item, photo } in one Tropy (ids survive a restart)
+    // checksum → { item, photo } in one Tropy (ids survive a restart). Read
+    // again when a checksum is missing: in a project room items keep arriving.
     let where = new Map()
-    for (let t of tropys) {
+    let lookup = async (t) => {
+      let s = await t.driver.state('')
       let map = new Map()
-      for (let it of await t.api.items()) {
-        let photo = (await t.api.item(it.id)).photos[0]
-        map.set((await t.api.photo(photo)).checksum, { item: it.id, photo })
+      for (let item of Object.values(s.items)) {
+        let photo = s.photos[item.photos[0]]
+        if (photo) map.set(photo.checksum, { item: item.id, photo: photo.id })
       }
       where.set(t.name, map)
+      return map
     }
+    let atIn = async (t, c) => (where.get(t.name) || new Map()).get(c) || (await lookup(t)).get(c) || null
+    for (let t of tropys) await lookup(t)
+    let photoSeed = 2000
 
     let down = new Set()
     let mine = new Map() // member → [{ text, noteId?, uuid?, checksum }]
     let opFor = async (member) => {
       let c = pick(checksums)
       let kind = pick(['note', 'note', 'note', 'field', 'field', 'tag', 'transcription', 'delete'])
+      let tropyOf = tropys.find(t => t.name === member)
+      if (PROJECT && tropyOf && rand(25) === 0) {
+        // A new photo, brought into the room by this member
+        let file = run.photo(photoSeed++)
+        let sum = crypto.createHash('md5').update(fs.readFileSync(file)).digest('hex')
+        await importOne(tropyOf, file, sum)
+        checksums.push(sum)
+        log(`${member} brings a new photo into the project room (${checksums.length} now)`)
+        return
+      }
       let own = mine.get(member) || []
       mine.set(member, own)
       let text = `${member}-${word()}`
@@ -119,7 +163,8 @@ async function main() {
 
       if (kind === 'delete' && own.length === 0) kind = 'note'
       if (tropy) {
-        let at = where.get(member).get(c)
+        let at = await atIn(tropy, c)
+        if (!at) return // not in this project yet: the project room is still bringing it
         if (kind === 'note') {
           let note = await tropy.api.createNote(at.photo, `<p>${text}</p>`)
           // Tropy's API answers { id: [ids] } for a new note
@@ -275,6 +320,34 @@ async function main() {
     try {
       await until('every Tropy to hold what the ledger says', check, { timeout: 300000, every: 10000 })
     } catch { /* report below */ }
+
+    if (KEY) {
+      // The room as someone without the key holds it: one Yjs update, whose
+      // strings are plain UTF-8, searched for every text the run wrote.
+      let Y = require('yjs')
+      let doc = new Y.Doc()
+      if (FOLDER) {
+        let dir = path.join(folders.get('alice'), run.room)
+        for (let name of fs.readdirSync(dir)) {
+          if (name.endsWith('.yjs')) Y.applyUpdate(doc, new Uint8Array(fs.readFileSync(path.join(dir, name))))
+        }
+      } else {
+        let { WebsocketProvider } = require('y-websocket')
+        let provider = new WebsocketProvider(run.serverUrl, run.room, doc, { WebSocketPolyfill: require('ws') })
+        await until('a reader without the key to receive the room', () => provider.synced)
+        provider.destroy()
+      }
+      let bytes = Buffer.from(Y.encodeStateAsUpdate(doc))
+      let texts = [
+        ...[...ledger.notes.values()].map(n => n.text),
+        ...ledger.fields.values(),
+        ...[...ledger.tags.keys(), ...ledger.transcriptions.keys()].map(k => k.slice(k.indexOf('|') + 1))
+      ]
+      let readable = texts.filter(tx => bytes.includes(Buffer.from(tx)))
+      log(`encrypted room: ${bytes.length} bytes, ${texts.length} texts searched, ${readable.length} readable`)
+      if (bytes.length < 1000) problems.push('the reader without the key received almost nothing, so the search proves nothing')
+      for (let tx of readable.slice(0, 20)) problems.push(`readable without the key: ${tx}`)
+    }
 
     for (let t of tropys) {
       // The outages are the soak's own; a Tropy saying it lost the server is right.
