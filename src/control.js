@@ -3,7 +3,7 @@
 const fs = require('fs')
 const path = require('path')
 const { parseConnectionString, generateConnectionString } = require('./connection-string')
-const { syncRoots, createRoomFolder } = require('./sync-folders')
+const { syncRoots, findRoomFolder, createRoomFolder } = require('./sync-folders')
 
 /**
  * What the dashboard shows and does, for one Troparcel plugin instance.
@@ -31,7 +31,7 @@ function invite(options) {
     let client = options.syncDir ? (syncRoots().find(([, root]) => options.syncDir.startsWith(root)) || [])[0] : null
     return {
       text,
-      how: `First share the folder “${name}” with them${client ? ` in ${client}` : ''}. Then send them this, to paste into Troparcel’s Connection field:`,
+      how: `First share the folder “${name}” with them${client ? ` in ${client}` : ''}. Then send them this invite, to paste into Troparcel’s setup page:`,
       secret: !!options.roomKey,
       encrypted: !!options.roomKey
     }
@@ -39,7 +39,7 @@ function invite(options) {
   let text = generateConnectionString(options)
   return {
     text,
-    how: 'Send them this, to paste into Troparcel’s Connection field:',
+    how: 'Send them this invite, to paste into Troparcel’s setup page:',
     secret: !!(options.roomToken || options.roomKey),
     encrypted: !!options.roomKey
   }
@@ -58,16 +58,46 @@ function status(plugin) {
   }
 }
 
+/**
+ * The invite in what someone pasted, or an error that says what they
+ * pasted instead and what to do. A chat or an email client wraps the
+ * invite in quotes, angle brackets or a sentence; the people most likely
+ * to paste the wrong thing paste a web address: the sync service's share
+ * link, the server's page, or this page's own address.
+ */
+function readInvite(pasted, roots = syncRoots()) {
+  let text = String(pasted || '').trim()
+  if (!text) throw new Error('Paste the invite someone in your group sent you. It starts with troparcel://')
+  let found = text.match(/troparcel:\/\/[^\s"'`<>]+/i)
+  if (found) text = found[0].replace(/[.,;:!?)\]]+$/, '')
+  else text = text.replace(/^["'`<]+|["'`>.]+$/g, '')
+
+  let web = text.match(/^https?:\/\/([^/:]+)/i)
+  if (web) {
+    if (/^(127\.0\.0\.1|localhost)$/i.test(web[1])) {
+      throw new Error('That is the address of this page, not an invite. Paste the invite someone in your group sent you. It starts with troparcel://')
+    }
+    if (/dropbox\.com|drive\.google\.com|1drv\.ms|onedrive|sharepoint|\/s\/|\/f\//i.test(text)) {
+      throw new Error('That is a share link from a sync service. Open it and accept the share, so the folder is on this computer. Then paste the invite, which starts with troparcel://')
+    }
+    throw new Error('That is a web address, not an invite. Ask the person who invited you for the invite. It starts with troparcel://')
+  }
+  let options = parseConnectionString(text)
+  if (!options) throw new Error('That is not an invite. An invite starts with troparcel://, for example troparcel://folder/tropy-letters')
+
+  if (options.syncFolder && !findRoomFolder(options.syncFolder, roots)) {
+    let where = roots.length ? `in ${[...new Set(roots.map(r => r[0]))].join(' or ')}` : 'on this computer, and no Nextcloud, Dropbox or other sync folder either'
+    throw new Error(`There is no folder named “${options.syncFolder}” ${where}. Accept the share in your sync app and wait until the folder appears, then paste the invite again.`)
+  }
+  return text
+}
+
 async function perform(plugin, action, input) {
   let engine = plugin.engine
   switch (action) {
     case 'setup': {
-      let connection = String(input.connection || '').trim()
+      let connection = readInvite(input.connection)
       let userId = String(input.userId || '').trim()
-      if (!connection) throw new Error('Paste the connection your group sent you.')
-      if (!parseConnectionString(connection)) {
-        throw new Error('That does not look like a Troparcel connection. It starts with troparcel://, ws:// or a folder path.')
-      }
       if (!userId) throw new Error('Choose a name others will see on your work.')
       writeSettings(plugin, { connection, userId })
       return 'Saved. Troparcel is connecting…'
@@ -125,4 +155,4 @@ function writeSettings(plugin, changes) {
   fs.renameSync(tmp, file)
 }
 
-module.exports = { status, perform, invite, writeSettings }
+module.exports = { status, perform, invite, readInvite, writeSettings }

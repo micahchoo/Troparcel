@@ -64,7 +64,7 @@ test('the dashboard: setup, status, conflicts, and only for this computer', { ti
 
     let bad = await dash.act('setup', { connection: 'nonsense', userId: 'dave' })
     assert.equal(bad.ok, false)
-    assert.match(bad.error, /does not look like a Troparcel connection/)
+    assert.match(bad.error, /That is not an invite/)
 
     let ok = await dash.act('setup', { connection, userId: 'dave' })
     assert.equal(ok.ok, true, JSON.stringify(ok))

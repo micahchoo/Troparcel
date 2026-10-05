@@ -122,7 +122,7 @@ function stateOf(s) {
 }
 function setup(s) {
   const name = $('input', { id: 'name', placeholder: 'e.g. Ada L.', value: s.options.userId || '', oninput: () => { typing = true } })
-  const conn = $('input', { id: 'conn', placeholder: 'troparcel://…  or the path of a shared folder', value: s.options.connection || '', oninput: () => { typing = true } })
+  const conn = $('input', { id: 'conn', placeholder: 'e.g. troparcel://folder/tropy-letters', value: s.options.connection || '', oninput: () => { typing = true } })
   const kids = [
     $('h2', {}, 'Your name'),
     $('label', {}, $('span', {}, 'How others see your work. Use one nobody else in the group uses.'), name),

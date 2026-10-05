@@ -12,7 +12,7 @@ A Tropy project belongs to one person on one computer. When several people resea
 
 Troparcel is a plugin that connects the projects of a group. When you add a note, a tag or a title, it appears in everyone else's project within seconds, and theirs appear in yours. Everyone keeps their own project and keeps working in Tropy as before. You can work offline; your work is sent when you reconnect, and nobody's work overwrites anyone else's.
 
-[![Alice writes a note in her Tropy; it arrives in bob's, marked "from alice"](docs/media/note-arrives.gif)](docs/media/troparcel.mp4)
+[![A note written in alice's Tropy arrives in bob's, marked with alice's name](docs/media/note-arrives.gif)](docs/media/troparcel.mp4)
 
 **[Watch the 68-second film](docs/media/troparcel.mp4)** of two real Tropys and a newcomer.
 
@@ -42,12 +42,44 @@ It finds Tropy on your computer (also the Flatpak version on Linux) and installs
 
 No Node.js? Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help › Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy. (The current release, 6.0.0, does not have the setup page yet; the next one will.)
 
-**2. Set up.** A page opens in your browser. Choose your name, then either:
-
-- **Join a group:** paste the invite someone sent you, or
-- **Start a new room:** pick one of your sync folders (Nextcloud, Dropbox…) and name the room. Share that folder with your group in its own app, then send them the invite the page shows.
+**2. Set up.** When Tropy starts, a setup page opens in your browser. The example below shows what to do on it.
 
 That is all. Later, **File › Export › Troparcel** in Tropy opens the same page: it shows whether sync works, who is online, what arrived, anything that needs a decision, and the invite for new members.
+
+## Example: two people and a Nextcloud folder
+
+Ada and Ben transcribe the same box of letters. Both have Nextcloud on their computers, so Nextcloud keeps a folder `~/Nextcloud` the same on both. The steps are the same for Dropbox, Google Drive, OneDrive or Syncthing.
+
+**Ada starts the room.**
+
+1. Ada installs Troparcel and restarts Tropy. The setup page opens.
+2. Under **Your name**, Ada types `ada`. Others see this name on Ada's work.
+3. Under **Start a new room**, Ada chooses **In: Nextcloud**, types the room name `tropy-letters` and clicks **Start the room**. Troparcel makes the folder `~/Nextcloud/tropy-letters`. The room is the files in it.
+4. In Nextcloud, Ada shares the folder `tropy-letters` with Ben, and lets Ben **edit** it. With a read-only share, Ben receives Ada's work but cannot send any.
+5. The page now shows the invite:
+
+   ```
+   troparcel://folder/tropy-letters
+   ```
+
+   Ada clicks **Copy** and sends it to Ben by email or chat.
+
+**Ben joins.**
+
+1. Ben accepts the share in Nextcloud, and waits until the folder `tropy-letters` is in the `~/Nextcloud` folder on Ben's computer. (A subfolder such as `~/Nextcloud/Shared/tropy-letters` is also found. In Google Drive, add the shared folder to **My Drive** first: Drive does not copy **Shared with me** to the computer.)
+2. Ben installs Troparcel and restarts Tropy. On the setup page, Ben types `ben` under **Your name**, pastes the invite under **Join a group** and clicks **Join**.
+
+**They work.** Both import the same photos into their own Tropy projects. When Ada adds a note to a letter, the note appears on the same letter in Ben's project, ending "— ada". It arrives when Nextcloud has copied the room folder to Ben's computer.
+
+**Paste the invite, not a link.** Three other addresses look similar, and the page tells you which one you pasted:
+
+| You pasted | It is | Paste instead |
+|---|---|---|
+| `https://cloud.example.org/s/aB3dE` | Nextcloud's share link | Accept the share first, then paste the invite |
+| `http://127.0.0.1:41234/…` | The setup page's own address | The invite |
+| `https://troparcel.example.org` | A server's web address | The invite, which the person who runs the server has |
+
+An invite always starts with `troparcel://`.
 
 The [Group Guide](docs/GUIDE.md) covers the other setups (a server on your network or on the internet) and what a group should agree on.
 

@@ -3309,3 +3309,34 @@ describe('folder-first rooms', () => {
     assert.equal(findRoomFolder('missing', roots), null)
   })
 })
+
+describe('reading a pasted invite', () => {
+  const fs = require('fs'), os = require('os'), path = require('path')
+  const { readInvite } = require('../src/control')
+  const { syncRoots } = require('../src/sync-folders')
+  let home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'))
+  fs.mkdirSync(path.join(home, 'Nextcloud', 'tropy-letters'), { recursive: true })
+  let roots = syncRoots(home)
+
+  it('takes the invite out of what a chat or an email wraps around it', () => {
+    for (let pasted of [
+      'troparcel://folder/tropy-letters',
+      '  <troparcel://folder/tropy-letters>  ',
+      '"troparcel://folder/tropy-letters".',
+      '`troparcel://ws/server.edu:2468/letters?token=abc`',
+      'Here is the invite: troparcel://ws/server.edu:2468/letters?token=abc\nsee you there'
+    ]) assert.match(readInvite(pasted, roots), /^troparcel:\/\/[^\s"`<>]+[^.\s"`<>]$/, pasted)
+  })
+
+  it('says what a wrong address is, and what to paste instead', () => {
+    assert.throws(() => readInvite('', roots), /Paste the invite/)
+    assert.throws(() => readInvite('http://127.0.0.1:41234/9f8e7d/', roots), /address of this page/)
+    assert.throws(() => readInvite('https://cloud.example.org/s/aB3dE', roots), /share link.*accept the share/s)
+    assert.throws(() => readInvite('https://troparcel.example.org', roots), /web address, not an invite/)
+    assert.throws(() => readInvite('tropy-letters', roots), /starts with troparcel:\/\//)
+  })
+
+  it('refuses a folder room this computer does not have yet', () => {
+    assert.throws(() => readInvite('troparcel://folder/tropy-ledgers', roots), /no folder named “tropy-ledgers” in Nextcloud/)
+  })
+})
