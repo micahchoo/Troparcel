@@ -79,6 +79,7 @@ module.exports = {
     let userId = this._stableUserId
 
     this._debug(`applyAnnotations: item ${localId}, identity ${itemIdentity.slice(0, 8)}...`)
+    this._crediting = itemIdentity
 
     // Snapshot stats before this item to detect if anything changed
     let s = this._applyStats
@@ -137,15 +138,19 @@ module.exports = {
    * Show the owner who contributed to an item: an "@name" tag per peer and
    * the troparcel contributors/lastSync fields. Local-only (local-only.js).
    */
-  async _applyAttribution(itemIdentity, localId, userId) {
-    let contributors = new Set()
-    let add = v => { if (v && v.author && v.author !== userId && !v.deleted) contributors.add(v.author) }
+  /**
+   * Record that `author`'s work was applied to the item being applied
+   * (`this._crediting`). Attribution names only these people: an entry by
+   * someone that changed nothing here (e.g. the title Tropy gives every
+   * imported photo, the same in each project) is no contribution.
+   */
+  _credit(author) {
+    if (!author || author === this._stableUserId || !this._crediting) return
+    this.vault.addContributor(this._crediting, author)
+  },
 
-    Object.values(this._admitted(itemIdentity, 'notes', schema.getNotes(this.doc, itemIdentity))).forEach(add)
-    Object.values(this._admitted(itemIdentity, 'selections', schema.getActiveSelections(this.doc, itemIdentity))).forEach(add)
-    Object.values(this._admitted(itemIdentity, 'transcriptions', schema.getActiveTranscriptions(this.doc, itemIdentity))).forEach(add)
-    schema.getActiveTags(this.doc, itemIdentity).forEach(add)
-    Object.values(this._admitted(itemIdentity, 'metadata', schema.getMetadata(this.doc, itemIdentity))).forEach(add)
+  async _applyAttribution(itemIdentity, localId, userId) {
+    let contributors = new Set([...this.vault.contributorsOf(itemIdentity)].filter(a => a !== userId))
 
     if (contributors.size === 0) return
 
@@ -180,6 +185,7 @@ module.exports = {
    * (first meeting) keeps the local value; push then offers it to the room.
    */
   async _applyFields(itemIdentity, localId, field, remoteMeta, localMeta, userId) {
+    let authors = {}
     let batch = {}
     for (let [prop, value] of Object.entries(remoteMeta)) {
       if (value.author === userId) continue
@@ -204,6 +210,7 @@ module.exports = {
         }
       }
       batch[prop] = { text: remoteText, type: value.type || TEXT }
+      authors[prop] = value.author
     }
 
     let props = Object.keys(batch)
@@ -214,6 +221,7 @@ module.exports = {
         this.vault.markFieldPushed(itemIdentity, field(prop),
           this.vault._fastHash(`${batch[prop].text}|${batch[prop].type}`))
       }
+      for (let prop of props) this._credit(authors[prop])
       if (this._applyStats) this._applyStats.metadataUpdated += props.length
       this._debug(`metadata: ${props.length} field(s) on ${localId}`)
     } catch (err) {
@@ -263,6 +271,7 @@ module.exports = {
       this._assignments.tag(tag.name, tropyColor(tag.color), localId)
       localTagNames.add(key)
       if (this._applyStats) this._applyStats.tagsAdded++
+      this._credit(tag.author)
     }
 
     if (!this.options.syncDeletions) return
@@ -377,6 +386,7 @@ module.exports = {
         let { id } = await this.adapter.updateNote(existingLocalId, { html: safeHtml })
         this._recordAppliedNote(noteKey, id)
         if (this._applyStats) this._applyStats.notesUpdated++
+        this._credit(note.author)
         this._debug(`${label} updated: ${noteKey.slice(0, 8)}`)
         return true
       } catch (err) {
@@ -401,6 +411,7 @@ module.exports = {
       this._recordAppliedNote(noteKey, id)
       existingTexts.add(safeHtml.trim())
       if (this._applyStats) this._applyStats.notesCreated++
+      this._credit(note.author)
       this._debug(`${label} created: ${noteKey.slice(0, 8)} by ${note.author}`)
       return true
     } catch (err) {
@@ -566,6 +577,7 @@ module.exports = {
           })
           this.vault.mapAppliedSelection(selUUID, id)
           if (this._applyStats) this._applyStats.selectionsCreated++
+          this._credit(sel.author)
           this._debug(`selection created: ${selUUID.slice(0, 8)} on photo ${photo}`)
         }
         this.vault.appliedSelectionKeys.add(selUUID)
@@ -664,6 +676,7 @@ module.exports = {
         this.vault.remoteTxHashes.set(txKey, hash)
         this.vault.markDirty()
         if (this._applyStats) this._applyStats.transcriptionsCreated++
+        this._credit(tx.author)
         this._debug(`transcription ${txKey.slice(0, 8)} by ${tx.author}`)
       } catch (err) {
         this.logger.warn(`Failed to add transcription ${txKey.slice(0, 8)}: ${err.message}`)

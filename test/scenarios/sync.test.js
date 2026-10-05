@@ -464,3 +464,16 @@ test('a member without the room key reads nothing', async (t) => {
   await cycle(alice, eve)
   assert.deepEqual(Object.values(eve.tropy.state().notes), [])
 })
+
+test('attribution: a collaborator is credited only for what changed this project (seen on film)', async (t) => {
+  let { alice, bob } = await pair(t)
+  // Tropy sets a new item's title from its file name, so both import the same title.
+  for (let peer of [alice, bob]) await peer.engine.adapter.saveMetadata(1, { [TITLE]: { text: 'photo-1', type: TEXT } })
+  seedItem(alice.tropy, { id: 2, photos: ['c2'] })
+  seedItem(bob.tropy, { id: 2, photos: ['c2'] })
+  await alice.engine.adapter.createNote({ photo: 201, html: '<p>only on item 2</p>' })
+  await cycle(alice, bob)
+
+  assert.ok(!tagsOf(bob, 1).includes('@alice'), 'alice changed nothing on item 1 for bob')
+  assert.ok(tagsOf(bob, 2).includes('@alice'), 'her note on item 2 is credited')
+})

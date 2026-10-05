@@ -47,6 +47,7 @@ class SyncVault {
     this.appliedTranscriptionKeys = new Set()
     this.sharedPhotos = new Set() // checksums uploaded to a project room
     this.pinnedKeys = new Map()   // name → public key, pinned on first sight
+    this.contributors = new Map() // identity → Set of authors whose work was applied here
 
     // Stable identity mappings
     // Notes: local resource ID <-> CRDT UUID
@@ -236,6 +237,19 @@ class SyncVault {
    * pushed every item again (and a project over 5,000 items, half of them
    * on every cycle).
    */
+  addContributor(identity, author) {
+    let set = this.contributors.get(identity)
+    if (!set) this.contributors.set(identity, set = new Set())
+    if (!set.has(author)) {
+      set.add(author)
+      this._dirty = true
+    }
+  }
+
+  contributorsOf(identity) {
+    return this.contributors.get(identity) || new Set()
+  }
+
   markPushed(identity, hash) {
     this.pushedHashes.set(identity, hash)
   }
@@ -567,6 +581,7 @@ class SyncVault {
         appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys),
         sharedPhotos: Array.from(this.sharedPhotos),
         pinnedKeys: Array.from(this.pinnedKeys),
+        contributors: Array.from(this.contributors, ([k, v]) => [k, [...v]]),
         failedNoteKeys: Array.from(this.failedNoteKeys.entries()).map(([k, c]) => ({ key: k, count: c })),
         noteMappings: Array.from(this.crdtKeyToNoteId.entries()).map(([k, v]) => [k, v]),
         txMappings: Array.from(this.crdtKeyToTxId.entries()).map(([k, v]) => [k, v]),
@@ -622,6 +637,9 @@ class SyncVault {
       }
       if (Array.isArray(data.appliedSelectionKeys)) {
         for (let k of data.appliedSelectionKeys) this.appliedSelectionKeys.add(k)
+      }
+      if (Array.isArray(data.contributors)) {
+        for (let [k, v] of data.contributors) this.contributors.set(k, new Set(v))
       }
       if (Array.isArray(data.pinnedKeys)) {
         for (let [k, v] of data.pinnedKeys) this.pinnedKeys.set(k, v)
@@ -738,6 +756,7 @@ class SyncVault {
     this.appliedTranscriptionKeys.clear()
     this.sharedPhotos.clear()
     this.pinnedKeys.clear()
+    this.contributors.clear()
     this.noteIdToCrdtKey.clear()
     this.crdtKeyToNoteId.clear()
     this.txIdToCrdtKey.clear()
