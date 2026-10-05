@@ -16,7 +16,8 @@ const crypto = require('crypto')
  *
  * Events emitted:
  *   'status'  — { status: 'connected' | 'disconnected' }
- *   'error'   — { message: string }
+ *   'problem' — { message: string }. Never 'error': an EventEmitter
+ *               'error' with no listener throws, and Tropy shows a crash dialog.
  *   'sync'    — { synced: true }
  */
 class SyncAdapter extends EventEmitter {

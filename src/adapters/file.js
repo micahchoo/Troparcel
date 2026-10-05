@@ -94,7 +94,7 @@ class FileAdapter extends SyncAdapter {
       if (this._dirty) this._writeOwn()
     } catch (err) {
       this.logger.warn(`[troparcel:file] ${err.message}`)
-      this.emit('error', { message: err.message })
+      this.emit('problem', { message: err.message })
     }
   }
 

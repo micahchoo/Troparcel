@@ -66,7 +66,7 @@ class WebSocketAdapter extends SyncAdapter {
       this.logger.warn(
         `[troparcel] connection error: ${e.message || String(e)} — ` +
         'check that the Troparcel server is running')
-      this.emit('error', { message: e.message || String(e) })
+      this.emit('problem', { message: e.message || String(e) })
     })
     // y-websocket 3 closes with a null event when we destroy the provider
     this.provider.on('connection-close', (e) => {
