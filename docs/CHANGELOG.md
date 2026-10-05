@@ -1,5 +1,25 @@
 # Troparcel Changelog
 
+## Unreleased (6.1)
+
+### Found by long soak runs (several Tropys, restarts, outages)
+
+- **A Tropy could stop reconnecting for good after an outage.** An error
+  raised while reporting the refused connection stopped the retries, and the
+  Tropy stayed offline without saying so. Nothing that reports the
+  connection may throw now.
+- **A collaborator's withdrawn note was deleted, not struck through, and the
+  withdrawal was retried forever.** Tropy's note.delete leaves the note in its
+  state and only takes it off its photo's list; Troparcel waited for it to go.
+  A note now counts as deleted once its photo or selection no longer lists it.
+- **A restart could publish received transcriptions and selections as your
+  own.** The first push ran before the room had arrived, so a copy received
+  from bob looked new and was written over bob's entry. Troparcel now waits
+  for the room before its first push, and never writes over an entry its
+  records say another member wrote.
+- **Pasting the wrong address in setup** (a share link, the setup page's own
+  address, a server's web page) now says what it is and what to paste.
+
 ## v6.0.0 (2026-10-05) — Room schema 5, writes Tropy can trust
 
 **Upgrade everyone in a group at the same time.** Troparcel 6 converts a
