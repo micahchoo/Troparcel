@@ -3094,3 +3094,22 @@ describe('Team 8: Boundary Validation & Connection Security (BLUE)', () => {
     assert.equal(parsed.roomToken, 'abc')
   })
 })
+
+describe('connection-string: project rooms', () => {
+  const { parseConnectionString, generateConnectionString } = require('../src/connection-string')
+
+  it('photos=1 makes a project room, on a server or a shared folder', () => {
+    let ws = parseConnectionString('troparcel://ws/host:2468/letters?token=abc&photos=1')
+    assert.equal(ws.sharePhotos, true)
+    assert.equal(ws.roomToken, 'abc')
+    assert.equal(parseConnectionString('troparcel://file/home/a/sync?photos=1').sharePhotos, true)
+    assert.equal(parseConnectionString('troparcel://ws/host:2468/letters').sharePhotos, undefined)
+  })
+
+  it('round-trips', () => {
+    for (let s of ['troparcel://ws/host:2468/letters?token=abc&photos=1',
+      'troparcel://wss/host/letters?photos=1', 'troparcel://file/home/a/sync?photos=1']) {
+      assert.equal(generateConnectionString(parseConnectionString(s)), s)
+    }
+  })
+})

@@ -3,7 +3,7 @@
 const fs = require('fs')
 const path = require('path')
 const Y = require('yjs')
-const { SyncAdapter } = require('./base')
+const { SyncAdapter, checkBlob } = require('./base')
 
 /**
  * Shared-folder transport: Nextcloud, Dropbox, Syncthing, a network share.
@@ -22,6 +22,29 @@ const { SyncAdapter } = require('./base')
  * No awareness: a folder cannot say who is online.
  */
 class FileAdapter extends SyncAdapter {
+  /** Photos live in `<syncDir>/<room>/blobs/<md5>`. */
+  async putBlob(md5, bytes) {
+    checkBlob(md5, bytes)
+    let dir = path.join(this._dir, 'blobs')
+    let file = path.join(dir, md5)
+    if (fs.existsSync(file)) return
+    await fs.promises.mkdir(dir, { recursive: true })
+    let tmp = `${file}.${process.pid}.part`
+    await fs.promises.writeFile(tmp, bytes)
+    await fs.promises.rename(tmp, file)
+  }
+
+  async getBlob(md5) {
+    let bytes
+    try {
+      bytes = await fs.promises.readFile(path.join(this._dir, 'blobs', md5))
+    } catch {
+      return null
+    }
+    // A sync client may still be copying it in: treat a mismatch as absent.
+    try { return checkBlob(md5, bytes) } catch { return null }
+  }
+
   constructor(doc, options, logger) {
     super(doc, options, logger)
     this._connected = false

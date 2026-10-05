@@ -475,6 +475,23 @@ function setItemChecksums(doc, identity, checksums) {
   }
 }
 
+/**
+ * What a project room needs to recreate an item: its template and, per
+ * photo, the facts Tropy's JSON-LD import takes (checksum, mimetype, size,
+ * dimensions…). The bytes are blobs on the transport, named by checksum.
+ */
+function setItemRecord(doc, identity, { template, photos }) {
+  let items = _map(doc, 'items')
+  let current = items.get(identity) || {}
+  let next = { ...current, template: template || null, photos }
+  if (JSON.stringify(current) !== JSON.stringify(next)) items.set(identity, next)
+}
+
+/** { checksums, template?, photos? } for one item, or null. */
+function getItemRecord(doc, identity) {
+  return _map(doc, 'items').get(identity) || null
+}
+
 function getItemChecksums(doc, identity) {
   let item = _map(doc, 'items').get(identity)
   return item ? (item.checksums || []) : []
@@ -782,6 +799,8 @@ module.exports = {
   resolveAlias,
   setItemChecksums,
   getItemChecksums,
+  setItemRecord,
+  getItemRecord,
   getIdentities,
   // Version, migration, maintenance
   checkSchemaVersion,

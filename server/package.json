@@ -7,10 +7,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "yjs": "^13.6.0",
-    "y-websocket": "^1.5.0",
-    "y-leveldb": "^0.1.2",
+    "lib0": "^0.2.88",
     "ws": "^8.16.0",
-    "lib0": "^0.2.88"
+    "y-leveldb": "^0.1.2",
+    "y-websocket": "^2.1.0",
+    "yjs": "^13.6.0"
   }
 }

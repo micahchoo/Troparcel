@@ -2,7 +2,7 @@
 
 const { WebsocketProvider } = require('y-websocket')
 const WS = require('ws')
-const { SyncAdapter } = require('./base')
+const { SyncAdapter, checkBlob } = require('./base')
 
 /**
  * WebSocket transport adapter — wraps y-websocket's WebsocketProvider.
@@ -14,6 +14,29 @@ class WebSocketAdapter extends SyncAdapter {
   constructor(doc, options, logger) {
     super(doc, options, logger)
     this.provider = null
+  }
+
+  /** The server's HTTP address for one blob: ws → http, wss → https. */
+  _blobUrl(md5) {
+    let base = String(this.options.serverUrl).replace(/^ws/i, 'http').replace(/\/+$/, '')
+    return `${base}/blobs/${encodeURIComponent(this.options.room)}/${md5}`
+  }
+
+  _headers() {
+    return this.options.roomToken ? { Authorization: `Bearer ${this.options.roomToken}` } : {}
+  }
+
+  async putBlob(md5, bytes) {
+    checkBlob(md5, bytes)
+    let res = await fetch(this._blobUrl(md5), { method: 'PUT', headers: this._headers(), body: bytes })
+    if (!res.ok) throw new Error(`the server refused photo ${md5}: ${res.status} ${await res.text()}`)
+  }
+
+  async getBlob(md5) {
+    let res = await fetch(this._blobUrl(md5), { headers: this._headers() })
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`the server refused photo ${md5}: ${res.status}`)
+    return checkBlob(md5, Buffer.from(await res.arrayBuffer()))
   }
 
   async connect() {

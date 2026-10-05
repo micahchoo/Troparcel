@@ -1,12 +1,18 @@
 'use strict'
 
 const { EventEmitter } = require('events')
+const crypto = require('crypto')
 
 /**
  * Abstract base class for sync transport adapters.
  *
  * Subclasses must implement: connect(), disconnect(), destroy(),
- * isConnected(), transportName, displayAddress.
+ * isConnected(), transportName, displayAddress, and for project rooms
+ * putBlob() and getBlob().
+ *
+ * A blob is a photo file, named by its MD5 checksum: the name Tropy itself
+ * gives a photo. Both methods refuse bytes whose MD5 is not their name, so
+ * a damaged download is never imported.
  *
  * Events emitted:
  *   'status'  — { status: 'connected' | 'disconnected' }
@@ -52,7 +58,17 @@ class SyncAdapter extends EventEmitter {
     this.removeAllListeners()
   }
 
-  /** @returns {string} e.g. 'websocket', 'file', 'snapshot' */
+  /** Store a photo under its MD5. Storing one that is there does nothing. */
+  async putBlob(md5, bytes) {
+    throw new Error('putBlob() not implemented')
+  }
+
+  /** A photo's bytes, or null if the room does not have it. */
+  async getBlob(md5) {
+    throw new Error('getBlob() not implemented')
+  }
+
+  /** @returns {string} e.g. 'websocket', 'file' */
   get transportName() {
     throw new Error('transportName not implemented')
   }
@@ -63,4 +79,11 @@ class SyncAdapter extends EventEmitter {
   }
 }
 
-module.exports = { SyncAdapter }
+/** Throws unless `bytes` hash to `md5`. */
+function checkBlob(md5, bytes) {
+  let actual = crypto.createHash('md5').update(bytes).digest('hex')
+  if (actual !== md5) throw new Error(`photo ${md5} arrived damaged (its MD5 is ${actual})`)
+  return bytes
+}
+
+module.exports = { SyncAdapter, checkBlob }

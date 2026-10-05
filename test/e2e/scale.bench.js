@@ -3,7 +3,7 @@
 /**
  * How long a first sync takes in real Tropy. Not a test: run it and read it.
  *
- *   node test/e2e/scale.bench.js [items=2000]
+ *   node test/e2e/scale.bench.js [items=2000] [--restart]
  *
  * bob runs a real Tropy and imports N photos. carol, a peer without a Tropy,
  * writes one note per item into the room in one transaction. The bench
@@ -11,15 +11,22 @@
  *
  * Read the rate column: if it falls as the count rises, each note costs
  * more than the last, and a first sync grows with N².
+ *
+ * With --restart, bob's Tropy is then closed and opened again on the same
+ * project and room: the ROADMAP Phase 3 exit test. Start is the time from
+ * Tropy opening the project to Troparcel's first full cycle; memory is the
+ * resident size of bob's Tropy processes once idle.
  */
 
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const path = require('node:path')
 const { DatabaseSync } = require('node:sqlite')
+const { execFileSync } = require('node:child_process')
 const { Run, SyntheticPeer, build, until, sleep } = require('./harness')
 
 const N = Number(process.argv[2]) || 2000
+const RESTART = process.argv.includes('--restart')
 // Tropy parses the import form with qs, which turns more than 20 repeated
 // keys into an object, and the import then fails. The route takes no JSON.
 const BATCH = 20
@@ -31,6 +38,39 @@ function savedNotes(tropy) {
   } finally {
     db.close()
   }
+}
+
+/**
+ * Seconds, in bob's last session, from Tropy first opening the project to
+ * Troparcel's first full cycle. Tropy opens project.tpy more than once a
+ * session; the plugin's first line ("Troparcel — …") marks a new session.
+ */
+function startSeconds(tropy) {
+  let lines = []
+  for (let f of fs.readdirSync(tropy.logDir)) {
+    for (let line of fs.readFileSync(path.join(tropy.logDir, f), 'utf8').split('\n')) {
+      try { lines.push(JSON.parse(line)) } catch { /* not JSON */ }
+    }
+  }
+  lines.sort((a, b) => a.time - b.time)
+  let opened = null
+  let ready = null
+  for (let { msg = '', time } of lines) {
+    if (msg.startsWith('Troparcel —')) { opened = null; ready = null }
+    else if (opened == null && /^open db .*project\.tpy$/.test(msg)) opened = time
+    else if (ready == null && opened != null && /initial sync complete/.test(msg)) ready = time
+  }
+  return opened && ready ? (ready - opened) / 1000 : null
+}
+
+/** Resident memory, in MB, of every process of this Tropy instance. */
+function residentMB(tropy) {
+  let out = execFileSync('ps', ['-eo', 'rss=,args='], { encoding: 'utf8' })
+  let kb = 0
+  for (let line of out.split('\n')) {
+    if (line.includes(`--data=${tropy.dataDir}`) || line.includes(tropy.dataDir)) kb += Number(line.trim().split(/\s+/)[0]) || 0
+  }
+  return kb / 1024
 }
 
 async function main() {
@@ -85,6 +125,17 @@ async function main() {
       if (now - last.t > 120000) throw new Error(`no progress for 2 minutes at ${n} notes`)
     }
     console.log(`\nfirst sync of ${N} notes: ${((Date.now() - start) / 1000).toFixed(0)} s`)
+    if (RESTART) {
+      await sleep(10000)
+      console.log(`memory after the first sync: ${residentMB(bob).toFixed(0)} MB`)
+      await bob.stop()
+      await bob.start()
+      await until('Troparcel to finish its first cycle', () => startSeconds(bob) != null,
+        { timeout: 600000, every: 1000 })
+      console.log(`start with ${N} items: ${startSeconds(bob).toFixed(1)} s (project opened → first full cycle)`)
+      await sleep(15000)
+      console.log(`memory when idle after a restart: ${residentMB(bob).toFixed(0)} MB`)
+    }
     let problems = bob.problems()
     console.log(problems.length ? `Tropy logged:\n  ${problems.join('\n  ')}` : 'Tropy logged no warnings or errors')
     console.log(`logs and project: ${path.relative(process.cwd(), run.dir)}`)

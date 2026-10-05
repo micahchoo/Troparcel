@@ -7,6 +7,9 @@
  *   troparcel://ws/host:port/room?token=secret   a Troparcel server
  *   troparcel://wss/host:port/room?token=secret  the same, over TLS
  *   troparcel://file/path/to/shared/folder       a shared folder
+ *
+ * `photos=1` in the query makes a project room: photos travel with the
+ * room, and items a member lacks are imported (option `sharePhotos`).
  *   ws://host:port, wss://host                   a server, bare URL
  *   /path/to/shared/folder                       a shared folder, bare path
  *
@@ -59,16 +62,19 @@ function _parseWebSocket(rest, protocolHint) {
   }
   if (room) result.room = room
   if (params.token) result.roomToken = params.token
+  if (params.photos === '1') result.sharePhotos = true
 
   return result
 }
 
 function _parseFile(rest) {
-  let [pathPart] = rest.split('?', 1)
-  return {
+  let [pathPart, query] = rest.split('?', 2)
+  let result = {
     transport: 'file',
     syncDir: '/' + pathPart.replace(/^\//, '')
   }
+  if (_parseQuery(query).photos === '1') result.sharePhotos = true
+  return result
 }
 
 function _parseQuery(query) {
@@ -98,13 +104,15 @@ function generateConnectionString(opts) {
     let url = serverUrl.replace(/^wss?:\/\//, '').replace(/\/+$/, '')
     let str = `troparcel://${scheme}/${url}`
     if (opts.room) str += `/${encodeURIComponent(opts.room)}`
-    if (opts.roomToken) str += `?token=${encodeURIComponent(opts.roomToken)}`
-    return str
+    let query = []
+    if (opts.roomToken) query.push(`token=${encodeURIComponent(opts.roomToken)}`)
+    if (opts.sharePhotos) query.push('photos=1')
+    return query.length ? `${str}?${query.join('&')}` : str
   }
 
   if (transport === 'file') {
     let dir = (opts.syncDir || '').replace(/^\//, '')
-    return `troparcel://file/${dir}`
+    return `troparcel://file/${dir}${opts.sharePhotos ? '?photos=1' : ''}`
   }
 
   return ''

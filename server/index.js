@@ -33,11 +33,14 @@
  *   MIN_TOKEN_LENGTH  - Minimum token length for security (default: 16)
  *   COMPACTION_HOURS  - Hours between LevelDB compaction runs (default: 6)
  *   TOMBSTONE_MAX_DAYS - Days to keep tombstones before purging (default: 30)
+ *   MAX_BLOB_MB       - Largest photo a room may store, in MB (default: 200)
  *   PUBLIC_URL        - The address collaborators use, e.g. wss://tropy.example.edu
  *                       (default: ws://<this machine's LAN address>:<PORT>)
  */
 
 const crypto = require('crypto')
+const fs = require('fs')
+const path = require('path')
 const http = require('http')
 const WebSocket = require('ws')
 const Y = require('yjs')
@@ -53,6 +56,7 @@ const PORT = parseInt(process.env.PORT, 10) || 2468
 const HOST = process.env.HOST || '0.0.0.0'
 const PERSISTENCE_DIR = process.env.PERSISTENCE_DIR || './data'
 const MAX_ROOMS = parseInt(process.env.MAX_ROOMS, 10) || 100
+const MAX_BLOB_BYTES = (parseInt(process.env.MAX_BLOB_MB, 10) || 200) * 1024 * 1024
 const MAX_CONNS_PER_IP = parseInt(process.env.MAX_CONNS_PER_IP, 10) || 10
 const MONITOR_ORIGIN = process.env.MONITOR_ORIGIN || ''
 const MONITOR_TOKEN = process.env.MONITOR_TOKEN || ''
@@ -151,6 +155,12 @@ function untrackConnection(ip) {
 // --- Room name sanitization ---
 
 const ROOM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_. -]{0,127}$/
+
+/** Whether `token` opens `roomName`. A room with no token is open. */
+function roomAllowed(roomName, token) {
+  let expected = AUTH_TOKENS.get(roomName)
+  return !expected || safeTokenCompare(expected, token || '')
+}
 
 function sanitizeRoomName(raw) {
   if (ROOM_NAME_RE.test(raw)) return raw
@@ -258,14 +268,10 @@ function handleConnection(ws, req) {
   let roomName = sanitizeRoomName(rawRoom)
   let token = url.searchParams.get('token') || ''
 
-  // Auth check
-  if (AUTH_TOKENS.size > 0) {
-    let expected = AUTH_TOKENS.get(roomName)
-    if (expected && !safeTokenCompare(expected, token)) {
-      console.warn(`Auth failed for room "${roomName}" from ${ip}`)
-      ws.close(4001, 'Unauthorized')
-      return
-    }
+  if (!roomAllowed(roomName, token)) {
+    console.warn(`Auth failed for room "${roomName}" from ${ip}`)
+    ws.close(4001, 'Unauthorized')
+    return
   }
 
   // Rate limit check
@@ -341,6 +347,66 @@ function handleConnection(ws, req) {
 
 // --- HTTP request handler ---
 
+/**
+ * Photos of a project room, stored under their MD5 checksum (Tropy's own
+ * name for a photo). GET returns one; PUT stores one, and refuses a body
+ * whose MD5 is not its name. The room's token is required, as for the
+ * room itself: `?token=` or `Authorization: Bearer`.
+ */
+async function handleBlob(req, res, roomName, md5, url) {
+  let auth = req.headers.authorization || ''
+  let token = url.searchParams.get('token') || (auth.startsWith('Bearer ') ? auth.slice(7) : '')
+  if (!roomAllowed(roomName, token)) {
+    res.writeHead(401)
+    return res.end('Unauthorized')
+  }
+  let dir = path.join(PERSISTENCE_DIR, 'blobs', roomName)
+  let file = path.join(dir, md5)
+
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    let stat
+    try { stat = await fs.promises.stat(file) } catch {
+      res.writeHead(404)
+      return res.end()
+    }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': stat.size })
+    if (req.method === 'HEAD') return res.end()
+    return fs.createReadStream(file).pipe(res)
+  }
+
+  if (req.method === 'PUT') {
+    if (fs.existsSync(file)) {
+      req.resume()
+      res.writeHead(204)
+      return res.end()
+    }
+    let chunks = []
+    let size = 0
+    for await (let chunk of req) {
+      size += chunk.length
+      if (size > MAX_BLOB_BYTES) {
+        res.writeHead(413)
+        return res.end(`larger than ${MAX_BLOB_BYTES / 1024 / 1024} MB (MAX_BLOB_MB)`)
+      }
+      chunks.push(chunk)
+    }
+    let body = Buffer.concat(chunks)
+    if (crypto.createHash('md5').update(body).digest('hex') !== md5) {
+      res.writeHead(400)
+      return res.end('the body\'s MD5 is not its name')
+    }
+    await fs.promises.mkdir(dir, { recursive: true })
+    let tmp = `${file}.${process.pid}.part`
+    await fs.promises.writeFile(tmp, body)
+    await fs.promises.rename(tmp, file)
+    res.writeHead(201)
+    return res.end()
+  }
+
+  res.writeHead(405)
+  res.end()
+}
+
 async function handleHttp(req, res) {
   let url
   try {
@@ -369,6 +435,9 @@ async function handleHttp(req, res) {
     jsonReply(res, { status: 'healthy', timestamp: new Date().toISOString() })
     return
   }
+
+  let blob = urlPath.match(/^\/blobs\/([^/]+)\/([0-9a-f]{32})$/)
+  if (blob) return handleBlob(req, res, sanitizeRoomName(decodeURIComponent(blob[1])), blob[2], url)
 
   if (urlPath === '/api/status') {
     if (!checkMonitorAuth(req, res)) return
