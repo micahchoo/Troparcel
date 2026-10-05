@@ -52,55 +52,70 @@ class BackupManager {
    * @param {Object[]} itemSnapshots - array of { identity, localId, metadata, tags, notes, selections, transcriptions }
    * @returns {string} path to the backup file
    */
+  /**
+   * Save the items about to change. A snapshot over `maxBackupSize` is
+   * split into parts, each under the limit, in a folder of their own: a
+   * first sync of a large project changes every item, and is the sync that
+   * most needs a backup. An item larger than the limit alone gets a part
+   * of its own, over the limit, and a warning. Returns the file or folder.
+   */
   async saveSnapshot(itemSnapshots) {
     await this.ensureDir()
     let ts = new Date().toISOString().replace(/[:.]/g, '-')
     this._fileCounter++
-    let filename = `${ts}-${String(this._fileCounter).padStart(4, '0')}.json`
-    let filepath = path.join(this.backupDir, filename)
+    let name = `${ts}-${String(this._fileCounter).padStart(4, '0')}`
+    let limit = this.options.maxBackupSize
+    let wrap = items => JSON.stringify({ room: this.room, timestamp: new Date().toISOString(), version: '4.0', items })
 
-    let data = {
-      room: this.room,
-      timestamp: new Date().toISOString(),
-      version: '4.0',
-      items: itemSnapshots
+    let whole = wrap(itemSnapshots)
+    let target
+    if (whole.length <= limit) {
+      target = path.join(this.backupDir, `${name}.json`)
+      await fs.promises.writeFile(target, whole)
+    } else {
+      target = path.join(this.backupDir, name)
+      await fs.promises.mkdir(target, { recursive: true })
+      let overhead = wrap([]).length
+      let part = []
+      let size = overhead
+      let n = 0
+      let flush = async () => {
+        if (part.length === 0) return
+        n++
+        await fs.promises.writeFile(path.join(target, `part-${String(n).padStart(4, '0')}.json`), wrap(part))
+        part = []
+        size = overhead
+      }
+      for (let snap of itemSnapshots) {
+        let len = JSON.stringify(snap).length + 1
+        if (overhead + len > limit) {
+          this.logger.warn(`Backup: item ${snap.localId} is larger than the ${limit}-byte limit; saved on its own`)
+        }
+        if (part.length > 0 && size + len > limit) await flush()
+        part.push(snap)
+        size += len
+      }
+      await flush()
     }
-
-    let json = JSON.stringify(data)
-
-    if (json.length > this.options.maxBackupSize) {
-      this.logger.warn(
-        `Backup skipped: snapshot size ${json.length} bytes exceeds limit ` +
-        `(${this.options.maxBackupSize} bytes) for ${itemSnapshots.length} item(s)`
-      )
-      return null
-    }
-
-    await fs.promises.writeFile(filepath, json)
-    this.logger.info(`Backup saved: ${filepath}`, { items: itemSnapshots.length })
-
+    this.logger.info(`Backup saved: ${target}`, { items: itemSnapshots.length })
     await this.pruneOldBackups()
-    return filepath
+    return target
   }
 
   /**
-   * Remove old backups beyond the retention limit.
+   * Remove old backups beyond the retention limit. A split backup (a
+   * folder of parts) counts as one.
    */
   async pruneOldBackups() {
     try {
-      let entries = await fs.promises.readdir(this.backupDir)
-      let files = entries.filter(f => f.endsWith('.json')).sort()
-
-      let toDelete = []
-      while (files.length > this.options.maxBackups) {
-        toDelete.push(files.shift())
-      }
-      if (toDelete.length > 0) {
-        await Promise.allSettled(
-          toDelete.map(f => fs.promises.unlink(path.join(this.backupDir, f)))
-        )
-        for (let f of toDelete) this.logger.debug(`Pruned old backup: ${f}`)
-      }
+      let entries = (await fs.promises.readdir(this.backupDir, { withFileTypes: true }))
+        .filter(e => e.isDirectory() || e.name.endsWith('.json'))
+        .map(e => e.name)
+        .sort()
+      let toDelete = entries.slice(0, Math.max(0, entries.length - this.options.maxBackups))
+      await Promise.allSettled(toDelete.map(f =>
+        fs.promises.rm(path.join(this.backupDir, f), { recursive: true, force: true })))
+      for (let f of toDelete) this.logger.debug(`Pruned old backup: ${f}`)
     } catch (err) {
       this.logger.warn('Failed to prune backups', { error: err.message })
     }
@@ -248,10 +263,12 @@ class BackupManager {
    * List available backups for this room.
    * @returns {string[]} backup file paths, newest first
    */
+  /** Backups, newest first: a .json file, or a folder of parts. */
   listBackups() {
     try {
-      return fs.readdirSync(this.backupDir)
-        .filter(f => f.endsWith('.json'))
+      return fs.readdirSync(this.backupDir, { withFileTypes: true })
+        .filter(e => e.isDirectory() || e.name.endsWith('.json'))
+        .map(e => e.name)
         .sort()
         .reverse()
         .map(f => path.join(this.backupDir, f))

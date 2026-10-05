@@ -992,18 +992,44 @@ describe('backup', () => {
   })
 
   describe('saveSnapshot size limit', () => {
-    it('returns null and warns when snapshot exceeds maxBackupSize', async () => {
-      let warnings = []
-      let bm = new BackupManager('test', {
-        info: () => {}, debug: () => {},
-        warn: (msg) => warnings.push(msg)
-      }, { maxBackupSize: 100 })  // 100 bytes — any real snapshot exceeds this
+    let tmp = () => require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'troparcel-backup-'))
+    let quiet = { info() {}, debug() {}, warn() {} }
+    let item = (i, size = 50) => ({ identity: `id-${i}`, localId: i, metadata: { title: 'x'.repeat(size) } })
 
-      let result = await bm.saveSnapshot([
-        { identity: 'abc', localId: 1, metadata: { title: 'x'.repeat(200) } }
-      ])
-      assert.equal(result, null)
-      assert.ok(warnings.some(m => m.includes('Backup skipped')))
+    it('a backup over the size limit is split into parts, none skipped', async () => {
+      const fs = require('fs'), path = require('path')
+      let bm = new BackupManager('big', quiet, { maxBackupSize: 1000, dataDir: tmp() })
+      let items = Array.from({ length: 40 }, (_, i) => item(i))
+      let result = await bm.saveSnapshot(items)
+      assert.ok(fs.statSync(result).isDirectory())
+      let parts = fs.readdirSync(result).sort()
+      assert.ok(parts.length > 1)
+      let saved = []
+      for (let p of parts) {
+        let json = fs.readFileSync(path.join(result, p), 'utf8')
+        assert.ok(json.length <= 1000, `${p} is ${json.length} bytes`)
+        saved.push(...JSON.parse(json).items)
+      }
+      assert.deepEqual(saved.map(s => s.localId), items.map(s => s.localId))
+    })
+
+    it('one item larger than the limit is still saved, with a warning', async () => {
+      let warnings = []
+      let bm = new BackupManager('huge', { ...quiet, warn: m => warnings.push(m) }, { maxBackupSize: 100, dataDir: tmp() })
+      let result = await bm.saveSnapshot([item(1, 500)])
+      assert.ok(result)
+      assert.ok(warnings.some(m => /larger than/.test(m)), warnings.join(' | '))
+    })
+
+    it('pruning counts a split backup as one backup', async () => {
+      const fs = require('fs')
+      let dir = tmp()
+      let bm = new BackupManager('prune', quiet, { maxBackupSize: 1000, maxBackups: 2, dataDir: dir })
+      for (let n = 0; n < 3; n++) await bm.saveSnapshot(Array.from({ length: 40 }, (_, i) => item(i)))
+      let kept = fs.readdirSync(bm.backupDir)
+      assert.equal(kept.length, 2)
+      for (let k of kept) assert.ok(fs.readdirSync(require('path').join(bm.backupDir, k)).length > 1, 'parts intact')
+      assert.equal(bm.listBackups().length, 2, 'listBackups shows split backups too')
     })
 
     it('saves normally when under size limit', async () => {

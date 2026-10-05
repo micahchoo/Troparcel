@@ -254,7 +254,7 @@ Each item becomes a manifest and each photo a canvas. Notes and transcriptions b
 
 ## 9. Maintenance and recovery
 
-**Backups.** Before applying anything, Troparcel saves a JSON copy of each item it is about to change, in `~/.troparcel/backups/<room>/`. The last 10 are kept. They are plain JSON: open one to see the values before a change, and enter them again by hand.
+**Backups.** Before applying anything, Troparcel saves a JSON copy of each item it is about to change, in `~/.troparcel/backups/<room>/`. The last 10 are kept; a large one is a folder of parts. They are plain JSON: open one to see the values before a change, and enter them again by hand.
 
 **Starting the room again.** Stop the server, delete its data folder (`server/data`, or the Docker volume), start it again. Nobody's project is touched. Each member's Troparcel shares its annotations again at the next sync.
 
