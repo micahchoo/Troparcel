@@ -81,7 +81,7 @@ AUTH_TOKENS="letters:7f3k9q2mz8x1p4vw,maps:c9t2w8r4n1b6y3qe" node index.js
 At start, the server prints one connection string per room:
 
 ```
-  Give each group its connection string (Troparcel > Connection):
+  Give each group its connection string (Troparcel › Connection):
     letters: troparcel://ws/192.168.0.20:2468/letters?token=7f3k9q2mz8x1p4vw
 ```
 
@@ -131,16 +131,20 @@ The strings then begin with `troparcel://wss/`, which means encrypted.
 
 ## 4. Coordinator: set up a shared folder
 
-1. Make a folder that everyone in the group syncs, for example `Nextcloud/tropy-letters`.
-2. Give each member the path of that folder **on their own computer**. The path can be different on each computer.
+The simplest setup, with no server. On the setup page (see [section 5](#5-contributor-join-a-group)), choose **Start a new room**, pick one of your sync folders (Nextcloud, Dropbox, Google Drive, Syncthing…) and name the room, for example `tropy-letters`. Troparcel makes a folder of that name there.
 
-That folder is the connection. Troparcel makes a subfolder for the room. Each person writes only their own file in it (`alice.yjs`, `bob.yjs`), so the sync client never has two people writing one file. If the sync client still makes a "conflicted copy", Troparcel reads that copy too and loses nothing.
+Then:
 
-Without a token, anyone who can read the folder can read the annotations. Share the folder only with the group.
+1. **Share that folder** with your group in its own app (Nextcloud, Dropbox…).
+2. **Send them the invite** the page shows: `troparcel://folder/tropy-letters`. It names the folder, not a path, so it works on every computer: each member's Troparcel finds the folder in whichever sync app they have.
+
+Inside the folder, each person writes only their own file (`alice.yjs`, `bob.yjs`), so the sync app never has two people writing one file. If it still makes a "conflicted copy", Troparcel reads that too and loses nothing.
+
+Anyone who can read the folder can read what the group writes. Share it only with the group, or make it a [private room](#4c-private-rooms-end-to-end-encryption).
 
 ## 4b. Project rooms: photos travel too
 
-By default a room is an **overlay**: photos stay on each computer, which suits archives whose photos may not be copied. If your group may share its photos, make the room a **project room**: add `photos=1` to the connection string.
+By default a room shares **notes only**: photos stay on each computer, which suits archives whose photos may not be copied. If your group may share its photos, make the room a **project room**: add `?photos=1` to the invite (`&photos=1` if it already has a `?`).
 
 ```
 troparcel://ws/192.168.0.20:2468/letters?token=7f3k9q2mz8x1p4vw&photos=1
@@ -177,26 +181,23 @@ troparcel://wss/tropy.example.edu/letters?token=7f3k9q2mz8x1p4vw&key=Xq3…(43 c
 
 ## 5. Contributor: join a group
 
-1. **Import the photos** the coordinator gave you into a Tropy project. Do not edit or convert them.
-2. **Install Troparcel.** Download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases). In Tropy, choose **Help > Show Plugins Folder**, extract the zip there, and restart Tropy.
-3. **Enter two fields** in **Preferences > Plugins > Troparcel**:
-   - **Connection**: the string or folder path from your coordinator.
-   - **Your name**: a name no one else in the group uses, such as your first name and last initial.
-4. **Restart Tropy.**
-5. **Check it works.** Within a minute, items your collaborators annotated show their notes and tags, an `@name` tag for each contributor, and the list **Troparcel: received**.
+1. **Import the photos** the coordinator gave you into a Tropy project. Do not edit or convert them. (In a project room, skip this: the photos arrive by themselves.)
+2. **Install Troparcel.** In a terminal, run `npx github:micahchoo/Troparcel install` ([Node.js](https://nodejs.org) needed), then restart Tropy. Without Node.js, download `troparcel.zip` from the [releases page](https://github.com/micahchoo/Troparcel/releases), choose **Help › Show Plugins Folder** in Tropy, extract the zip there, and restart Tropy.
+3. **Set up.** A page opens in your browser. Choose **your name** (one nobody else in the group uses, such as your first name and last initial), paste the **invite**, and choose **Join**. No restart is needed.
+4. **Check it works.** The page says **In sync**. Within a minute, items your collaborators worked on show their notes and tags, an `@name` tag for each contributor, and the list **Troparcel: received**.
 
-If nothing arrives, see [Troubleshooting](#8-troubleshooting).
+To open the page again: **File › Export**, then your Troparcel entry (its name is the one in **Preferences › Plugins**; usually "Troparcel"). If nothing arrives, the page says why; see also [Troubleshooting](#8-troubleshooting).
 
-### Modes
+### When to sync
 
-Leave **Mode** at `auto` unless the coordinator says otherwise.
+Leave **When to sync** at `auto` unless the coordinator says otherwise.
 
 | Mode | You share | You receive |
 |---|---|---|
 | `auto` | continuously | continuously |
-| `review` | continuously | when you choose **File > Import > Troparcel** |
+| `review` | continuously | when you choose **File › Import** with your Troparcel entry, or **Receive changes now** on the page |
 | `push` | continuously | never |
-| `pull` | never | when you choose **File > Import > Troparcel** |
+| `pull` | never | the same way |
 
 A reviewer who wants to read others' work without sharing their own uses `pull`.
 
@@ -228,7 +229,7 @@ With **Share deletions** on:
 
 ### Undo
 
-A collaborator's change never enters your undo history, so **Edit > Undo** only ever undoes your own work.
+A collaborator's change never enters your undo history, so **Edit › Undo** only ever undoes your own work.
 
 ## 7. Team agreement
 
@@ -245,25 +246,25 @@ Agree on these before you start:
 
 ## 8. Troubleshooting
 
-Troparcel writes to Tropy's log: **Help > Show Log Files**. Turn on **Debug logging** for more detail. Lines from Troparcel contain `troparcel`.
+Start with Troparcel's page (**File › Export**, then your Troparcel entry): it says whether sync works and lists what needs attention, in plain words. For more detail, Troparcel writes to Tropy's log (**Help › Show Log Files**); turn on **Detailed log** in its settings for every step.
 
 | What you see | Why | What to do |
 |---|---|---|
 | Nothing arrives, and the log says `cannot reach` | The server is down, or the address is wrong | Open `http://<server>:2468/health` in a browser. Check the connection string |
 | Nothing arrives, and the log says `not syncing — this Tropy does not look like one Troparcel supports` | A Tropy version Troparcel does not know | Update Troparcel. Nothing was changed in your project |
 | `Auth failed` in the server's output | The token does not match | Paste the connection string again, exactly |
-| Some items never receive anything | Your photo files differ from the group's | Import the photos again from the coordinator's originals |
-| Others see your work, you do not see theirs | Mode is `push` | Set Mode to `auto` |
-| You see theirs, they do not see yours | Mode is `pull` or `review`, or two people share a name | Check Mode and Your name |
-| A deleted note or tag comes back | It is a collaborator's, and Share deletions is off | Expected: see [Deleting](#deleting) |
+| Some items never receive anything (the page lists them under "no match in your project") | Your photo files differ from the group's | Import the photos again from the coordinator's originals, or switch to a project room |
+| Others see your work, you do not see theirs | **When to sync** is `push` | Set it to `auto` |
+| You see theirs, they do not see yours | **When to sync** is `pull` or `review`, or two people share a name (the page warns) | Check both in Troparcel's settings |
+| A deleted note or tag comes back | It is a collaborator's, and **Share what I delete** is off | Expected: see [Deleting](#deleting) |
 | `room "…" was written by a newer Troparcel` | Someone in the group upgraded | Update Troparcel |
 
 ## 8b. Publishing the group's work
 
 When the work is ready to show, publish it as IIIF, the format museum and library viewers read (Mirador, Universal Viewer, PosterForker):
 
-1. In **Preferences > Plugins**, add a second Troparcel entry, named for example "Publish". Set **Publish as IIIF to** to an empty folder, and **IIIF web address** to where that folder will be online, such as `https://example.edu/letters`.
-2. Select the items to publish, then choose **File > Export > Publish**.
+1. In **Preferences › Plugins**, add a second Troparcel entry, named for example "Publish". Set **Publish as IIIF to** to an empty folder, and **IIIF web address** to where that folder will be online, such as `https://example.edu/letters`.
+2. Select the items to publish, then choose **File › Export › Publish**.
 3. Upload the folder's contents to that address. Open `collection.json` in a IIIF viewer.
 
 Each item becomes a manifest and each photo a canvas. Notes and transcriptions become annotations; a note on a selection is placed on that region. A note a collaborator wrote keeps their name as its author, and Troparcel's footer is left out. Publishing copies the photos into the folder: publish only what you may share.
