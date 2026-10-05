@@ -50,8 +50,14 @@ async function startServer(t, env = {}) {
     }, 30000) // a loaded machine starts node slowly; startup is not what these tests measure
   }
   process.on('exit', () => { if (proc.exitCode === null) proc.kill('SIGKILL') })
-  t.after(() => {
-    proc.kill('SIGTERM')
+  t.after(async () => {
+    // The server may still be writing its database: wait for it to exit,
+    // or rmSync meets a file it just created (ENOTEMPTY, seen on CI).
+    if (proc.exitCode === null && proc.signalCode === null) {
+      let dead = new Promise(r => proc.once('exit', r))
+      proc.kill('SIGTERM')
+      await dead
+    }
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
   await spawnServer()
