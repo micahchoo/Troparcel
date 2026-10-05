@@ -1,0 +1,11 @@
+{
+  "name": "troparcel-test-driver",
+  "productName": "Troparcel test driver",
+  "version": "1.0.0",
+  "description": "Test only: lets the e2e harness read and drive a Tropy project window over HTTP. Never ships.",
+  "main": "index.js",
+  "hooks": {},
+  "options": [
+    { "field": "port", "label": "Port", "type": "number" }
+  ]
+}

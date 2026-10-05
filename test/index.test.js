@@ -3134,6 +3134,21 @@ describe('store-adapter: whenLoaded', () => {
   const { StoreAdapter } = require('../src/store-adapter')
   const { fakeTropy } = require('./harness/fake-tropy')
 
+  it('waits through the pause before Tropy starts loading (seen in real Tropy: about 2 s)', async () => {
+    let tropy = fakeTropy()
+    let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
+    let done = false
+    let wait = adapter.whenLoaded().then(() => { done = true })
+    await new Promise(r => setTimeout(r, 3500)) // longer than the old 3 s grace
+    assert.equal(done, false, 'an open project with nothing loaded yet is not loaded')
+    tropy.replace({ ...tropy.state(), activities: { 1: { id: 1, type: 'item.load' }, 2: { id: 2, type: 'note.load' } } })
+    tropy.replace({ ...tropy.state(), activities: { 2: { id: 2, type: 'note.load' } }, items: { 1: { id: 1, photos: [] } } })
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(done, false, 'items are in, notes are not')
+    tropy.replace({ ...tropy.state(), activities: {} })
+    await wait
+  })
+
   it('waits while Tropy is still loading the project', async () => {
     let tropy = fakeTropy()
     tropy.replace({ ...tropy.state(), activities: { 7: { id: 7, type: 'item.load' } } })
@@ -3228,5 +3243,19 @@ describe('plugin: File > Export as IIIF', () => {
     await plugin.export({ '@graph': [{ '@type': 'Item', title: 'T', photo: [{ checksum: 'c1', path: photo, filename: 'p.jpg', mimetype: 'image/jpeg' }] }] })
     assert.ok(fs.existsSync(path.join(dir, 'site', 'collection.json')), logs.join(' | '))
     assert.equal(plugin.engine, null, 'no room was joined')
+  })
+})
+
+describe('store-adapter: loads that end before whenLoaded is asked', () => {
+  const { StoreAdapter } = require('../src/store-adapter')
+  const { fakeTropy } = require('./harness/fake-tropy')
+  it('are still seen (a slow connection must not cost the 15 s fallback)', async () => {
+    let tropy = fakeTropy()
+    let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
+    tropy.replace({ ...tropy.state(), activities: { 1: { id: 1, type: 'item.load' } } })
+    tropy.replace({ ...tropy.state(), activities: {} })
+    let t0 = Date.now()
+    await adapter.whenLoaded()
+    assert.ok(Date.now() - t0 < 100)
   })
 })

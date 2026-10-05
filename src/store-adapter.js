@@ -41,6 +41,29 @@ class StoreAdapter {
     this.store = store
     this.logger = logger
     this._suppressChangeDetection = false
+    this._watchLoads()
+  }
+
+  /**
+   * From the moment the adapter exists (the project is open, before any
+   * load starts), note whether Tropy's project loads have been seen and
+   * whether they have finished. whenLoaded() reads this, so a slow
+   * connection cannot make it miss loads that ended while it connected.
+   */
+  _watchLoads() {
+    this._loadsSeen = false
+    this._loadsDone = false
+    if (!this.store || typeof this.store.subscribe !== 'function') return
+    let check = () => {
+      let loading = isLoading(this.store.getState())
+      if (loading) this._loadsSeen = true
+      else if (this._loadsSeen) {
+        this._loadsDone = true
+        this._unwatchLoads()
+      }
+    }
+    this._unwatchLoads = this.store.subscribe(check)
+    check()
   }
 
   /**
@@ -258,31 +281,31 @@ class StoreAdapter {
   }
 
   /**
-   * Resolves once Tropy has loaded the project into its state. On opening a
-   * project Tropy runs item.load, photo.load, note.load and the rest as
-   * commands; before they finish, a 10,000-item project looks empty. Done
-   * when no load is running and either one was seen or 3 s have passed
-   * (the loads finished before we looked).
+   * Resolves once Tropy has loaded the project into its state. Measured in
+   * Tropy 1.17 on a 10,000-item project: the project is open ~2 s before
+   * any load starts; then item.load, photo.load, note.load and the rest
+   * run as commands, all dispatched at once, and items appear before notes.
+   * A cycle in between reads half-loaded items and pushes them as changed.
+   *
+   * Done once a load has been seen and none is running. The subscription
+   * sees every load start, however short. After `fallback` ms with no load
+   * seen, it resolves anyway and warns: a Tropy that loads differently.
    */
-  whenLoaded({ grace = 3000 } = {}) {
-    let start = Date.now()
-    let seen = false
-    let loading = s => Object.values(s.activities || {}).some(a => /load$/i.test(String(a && a.type)))
+  whenLoaded({ fallback = 15000 } = {}) {
+    if (this._loadsDone) return Promise.resolve()
     return new Promise(resolve => {
-      let timer = null
       let unsub = () => {}
-      let check = () => {
-        let s = this._getState()
-        if (loading(s)) { seen = true; return }
-        if (seen || Object.keys(s.items || {}).length > 0 || Date.now() - start >= grace) {
-          clearTimeout(timer)
-          unsub()
-          resolve()
-        }
+      let finish = () => {
+        clearTimeout(timer)
+        unsub()
+        resolve()
       }
-      unsub = this.store.subscribe(check)
-      timer = setTimeout(check, grace)
-      check()
+      let timer = setTimeout(() => {
+        this.logger.warn(`[troparcel] saw Tropy load no project data in ${fallback / 1000} s; starting anyway`)
+        finish()
+      }, fallback)
+      unsub = this.store.subscribe(() => { if (this._loadsDone) finish() })
+      if (this._loadsDone) finish()
     })
   }
 
@@ -728,6 +751,10 @@ function childrenOf(node) {
   if (!c) return []
   if (Array.isArray(c)) return c
   return Array.isArray(c.content) ? c.content : []
+}
+
+function isLoading(state) {
+  return Object.values((state && state.activities) || {}).some(a => /load$/i.test(String(a && a.type)))
 }
 
 /** The parts of the view a Troparcel write may disturb; only those set. */
