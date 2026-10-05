@@ -20,6 +20,7 @@ module.exports = {
 
   // src/constants/item.js
   ITEM: {
+    IMPORT: 'item.import',
     TAG: {
       CREATE: 'item.tag.create',
       DELETE: 'item.tag.delete'

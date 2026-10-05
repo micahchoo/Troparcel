@@ -20,6 +20,7 @@ const Y = require('yjs')
 const { SyncEngine } = require('../../src/sync-engine')
 const { StoreAdapter } = require('../../src/store-adapter')
 const { fakeTropy } = require('./fake-tropy')
+const { checkBlob } = require('../../src/adapters/base')
 
 const silentLogger = {
   trace() {}, debug() {}, info() {}, warn() {}, error() {},
@@ -30,6 +31,7 @@ const silentLogger = {
 class Hub {
   constructor() {
     this.docs = new Set()
+    this.blobs = new Map() // md5 → bytes: a project room's photos
   }
 
   connect(doc) {
@@ -65,6 +67,14 @@ class MemoryTransport extends EventEmitter {
   async destroy() {
     if (this._off) this._off()
     this.removeAllListeners()
+  }
+
+  async putBlob(md5, bytes) {
+    this.hub.blobs.set(md5, checkBlob(md5, Buffer.from(bytes)))
+  }
+
+  async getBlob(md5) {
+    return this.hub.blobs.get(md5) || null
   }
 
   isConnected() { return !!this._off }

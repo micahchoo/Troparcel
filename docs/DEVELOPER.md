@@ -32,6 +32,7 @@ A cycle **applies** the room's changes to Tropy, then **pushes** Tropy's changes
 | `tropy-action-types.js` | The action-type literals, copied from Tropy |
 | `crdt-schema.js` | The room's layout (schema 5) and v4 migration |
 | `purge.js` | Tombstone purge; shared with the server |
+| `project-room.js` | Project rooms: record each item, upload its photos, import the items a member lacks |
 | `local-only.js` | What Troparcel writes for the owner only, and never pushes |
 | `vault.js` | Per-user state on disk: id ↔ UUID maps, merge bases, what was applied |
 | `identity.js` | Item identity from photo checksums; UUIDs |
@@ -70,6 +71,8 @@ Every one of these was a shipped defect. Each was checked against Tropy's source
 - **`history.tick` with an empty payload crashes Tropy's history reducer** (`canMerge` reads `undo.type`). There is no way to group a cycle into one undo entry; send no history instead.
 - **`dialog.notify` is a modal** that looks up `dialog.notify.<key>` in Tropy's strings. A plugin cannot add strings, so it shows an empty dialog. `dialog.info` and `dialog.warning` do not exist.
 - **A deleted selection stays in `state.selections`.** Tropy's selections reducer has no delete case; only the photo's `selections` list loses it. Ask the parent list, as `getSelection` and `getTranscription` do.
+- **`item.import` with `payload.data` takes Tropy's JSON-LD export** and trusts it: each photo's checksum, mimetype and size come from the JSON, not the file, and no duplicate check runs. `project-room.js` writes full IRIs, so no context is needed. The import also resets the view mode and search (`nav.update`); `importItems` puts them back.
+- **Tropy's import form is parsed with `qs`**, which turns more than 20 repeated `file` keys into an object; the import then fails inside Tropy. Send 20 at a time.
 - **Tag colours are preset names** (`red`, `green`, …), not hex values.
 - **The photo checksum is the MD5 of the stored file**, computed after any conversion at import.
 - **Templates are read raw** from `state.ontology.template`, not through `getAllTemplates`, which resolves and flattens them.

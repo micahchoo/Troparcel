@@ -10,6 +10,8 @@ const { BackupManager } = require('./backup')
 const { SyncVault, defaultRoot } = require('./vault')
 const { RECEIVED_LIST } = require('./local-only')
 const { Assignments } = require('./assignments')
+const { ProjectRoom } = require('./project-room')
+const path = require('path')
 
 /**
  * SyncEngine — keeps one Tropy project and one room in step.
@@ -184,6 +186,18 @@ class SyncEngine {
 
       this._migrateRoom()
       this._startPresence()
+
+      if (this.options.sharePhotos) {
+        this.projectRoom = new ProjectRoom({
+          doc: this.doc,
+          transport: this.transport,
+          adapter: this.adapter,
+          vault: this.vault,
+          dir: path.join(this.dataDir, 'photos', String(this.options.room).replace(/[^a-zA-Z0-9_.@-]/g, '_')),
+          logger: this.logger,
+          origin: this.LOCAL_ORIGIN
+        })
+      }
 
       this.backup = new BackupManager(this.options.room, this.logger, {
         dataDir: this.dataDir,
@@ -467,6 +481,19 @@ class SyncEngine {
 
       await this._refreshListNameCache()
 
+      // A project room: import the room's items this project lacks, then
+      // apply their annotations in this same cycle.
+      if (this.projectRoom && this.options.syncMode === 'auto') {
+        this.adapter.suppressChanges()
+        let imported
+        try { imported = await this.projectRoom.importMissing() } finally { this.adapter.resumeChanges() }
+        if (imported > 0) {
+          items = this.readSyncableItems()
+          this.localIndex = identity.buildIdentityIndex(items)
+          this._remoteAnnotationsDirty = true
+        }
+      }
+
       // Apply first, so remote changes land before local ones are pushed.
       if (this.options.syncMode === 'auto') {
         this.vault.updateAnnotationCount(schema.getIdentities(this.doc).length)
@@ -490,6 +517,7 @@ class SyncEngine {
         } finally {
           this.adapter.resumeChanges()
         }
+        if (this.projectRoom) await this.projectRoom.share(this.localIndex)
       }
 
       // Failed note creates are retried for three cycles, then given up.

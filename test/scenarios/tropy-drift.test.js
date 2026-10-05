@@ -32,6 +32,7 @@ async function upstream(file) {
 test('every mirrored constant matches Tropy', async () => {
   let pairs = [
     [MIRROR.TAG.CREATE, (await upstream('tag.js')).CREATE],
+    [MIRROR.ITEM.IMPORT, (await upstream('item.js')).IMPORT],
     [MIRROR.ITEM.TAG.CREATE, (await upstream('item.js')).TAG.CREATE],
     [MIRROR.ITEM.TAG.DELETE, (await upstream('item.js')).TAG.DELETE],
     [MIRROR.METADATA.SAVE, (await upstream('metadata.js')).SAVE],

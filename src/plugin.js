@@ -98,7 +98,10 @@ class TroparcelPlugin {
       room: room || 'troparcel-default',
       _roomExplicit: !!room,
       roomToken,
+      sharePhotos: flag(options.sharePhotos, conn.sharePhotos === true),
       userId: options.userId || '',
+      // Where vaults, backups and downloaded photos go (tests, embedders).
+      dataDir: options.dataDir || null,
       apiPort: num(options.apiPort, 2019), // only in the fallback user id
 
       autoSync: flag(options.autoSync, true),

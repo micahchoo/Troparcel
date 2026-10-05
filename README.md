@@ -6,6 +6,8 @@ Troparcel lets a group of researchers annotate the same photos in [Tropy](https:
 
 Each person keeps their own copy of the photos. Troparcel shares what you write about them: notes, tags, metadata, selections, transcriptions and lists. It matches items by their photos' checksums, so the photos never leave your computer.
 
+If your group *can* share its photos, make it a **project room** instead: the photos travel too, and a new member gets the whole project from one connection string.
+
 ## How it works
 
 ```
@@ -70,7 +72,7 @@ A collaborator's change never enters your undo history, and it does not move you
 
 | Shared | Not shared |
 |---|---|
-| Item metadata | Photo files |
+| Item metadata | Photo files (shared only in a project room) |
 | Tags | File paths |
 | Notes on photos and selections | Tropy's internal ids |
 | Selections (photo regions) | Window layout, preferences |
@@ -80,13 +82,15 @@ A collaborator's change never enters your undo history, and it does not move you
 | Templates you made | |
 | Deletions: your notes, tags and list membership (option) | |
 
+In a **project room** (a connection string ending in `photos=1`), each photo file is also uploaded once, and an item a member lacks is imported into their project, photos and all. Downloaded photos are kept in `~/.troparcel/photos/<room>/`.
+
 Before applying anything, Troparcel saves a JSON copy of each item it is about to change to `~/.troparcel/backups/<room>/`.
 
 ## Options
 
 | Option | Default | What it does |
 |---|---|---|
-| Connection | | Server connection string, `ws://` address, or shared folder path |
+| Connection | | Server connection string, `ws://` address, or shared folder path. Ending in `photos=1`, it makes a project room |
 | Your name | | Shown to others as `@name` on what you contribute |
 | Mode | `auto` | `auto`: share and receive. `review`: share; receive on **File > Import > Troparcel**. `push`: share only. `pull`: receive only, on import |
 | Share deletions | off | A note you delete is struck through for others (only its author can retract it); a tag or list membership you remove is removed for others. A selection or transcription you delete is deleted for others |
@@ -121,6 +125,7 @@ Before applying anything, Troparcel saves a JSON copy of each item it is about t
 | `PERSISTENCE_DIR` | `./data` | Where rooms are stored (LevelDB) |
 | `MONITOR_TOKEN` | none | Protects `/monitor` and the room API |
 | `TOMBSTONE_MAX_DAYS` | `30` | Retractions older than this are purged |
+| `MAX_BLOB_MB` | `200` | Largest photo a project room may store |
 
 `http://<server>:2468/monitor` shows rooms and who is connected.
 

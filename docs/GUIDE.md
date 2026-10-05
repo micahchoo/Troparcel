@@ -23,6 +23,8 @@ Each participant needs:
 - Tropy 1.17 or later.
 - **The same photo files**, byte for byte. Troparcel matches items by checksum.
 
+The exception is a **project room** ([section 4b](#4b-project-rooms-photos-travel-too)): there, Troparcel carries the photos to each member, and this section does not apply.
+
 Tropy computes a photo's checksum over the file it stores. Any change to the file gives a different checksum, and that item then does not sync. Nothing reports the failure. These all change the file:
 
 - saving it again, even at the same quality
@@ -119,6 +121,24 @@ The strings then begin with `troparcel://wss/`, which means encrypted.
 That folder is the connection. Troparcel makes a subfolder for the room. Each person writes only their own file in it (`alice.yjs`, `bob.yjs`), so the sync client never has two people writing one file. If the sync client still makes a "conflicted copy", Troparcel reads that copy too and loses nothing.
 
 Without a token, anyone who can read the folder can read the annotations. Share the folder only with the group.
+
+## 4b. Project rooms: photos travel too
+
+By default a room is an **overlay**: photos stay on each computer, which suits archives whose photos may not be copied. If your group may share its photos, make the room a **project room**: add `photos=1` to the connection string.
+
+```
+troparcel://ws/192.168.0.20:2468/letters?token=7f3k9q2mz8x1p4vw&photos=1
+troparcel://file/home/alice/Nextcloud/tropy-letters?photos=1
+```
+
+In a project room:
+
+- each member's Troparcel uploads each photo once, to the server or the shared folder, named by its checksum;
+- a member who lacks an item gets it imported into their project, with its photos; its notes, tags and metadata follow by ordinary sync;
+- a new member can start from an **empty** project and receive everything;
+- downloaded photos are kept in `~/.troparcel/photos/<room>/`. Do not delete that folder: the imported photos point there.
+
+The server stores photos up to 200 MB each (`MAX_BLOB_MB`). Anyone with the room token can download them, so give the token only to the group.
 
 ## 5. Contributor: join a group
 

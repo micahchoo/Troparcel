@@ -12,7 +12,7 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | 1 · Trustworthy overlay | Code done; the two-person trial is open |
 | 2 · Upstream track | Proposal drafted, not sent |
 | 3 · Scale | In progress |
-| 4 · Shared project | Not started |
+| 4 · Shared project | Built; real-Tropy test pending |
 | 5 · Verifiable authorship, private rooms | Not started |
 | 6 · Publishable rooms | Not started |
 

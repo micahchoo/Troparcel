@@ -71,6 +71,10 @@ With Share deletions on, deleting your own note writes a tombstone: `{ deleted: 
 
 Tombstones are kept for `TOMBSTONE_MAX_DAYS` (default 30), then the server purges them. A peer offline longer than that can bring a retracted entry back.
 
+## Project rooms
+
+In a project room (`photos=1`), the room also holds each item's record (template and each photo's file facts) and each photo, named by its checksum. A member imports a room item only when **none** of its photos is in their project already, and never one with an alias (an old form of a changed item). So an item that was merged, split or partly re-imported is matched, not imported again, and no photo is imported twice. An item whose photos have not all reached the room waits.
+
 ## What Troparcel writes that is never shared
 
 `@name` tags, the **Troparcel: received** list, and the `https://troparcel.org/ns/contributors` and `…/lastSync` fields are made on your computer from the room's author fields. Push skips them (`src/local-only.js`), so no one receives their own attribution back.

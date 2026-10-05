@@ -25,6 +25,7 @@
  */
 
 const GENERIC = 'https://tropy.org/v1/templates/generic'
+const TROPY = 'https://tropy.org/v1/tropy#'
 
 function defaultState() {
   return {
@@ -110,6 +111,36 @@ function fakeTropy(initial = {}) {
         selections: { ...state.selections, [id]: { id, photo, x, y, width, height, angle, notes: [], transcriptions: [] } },
         photos: { ...state.photos, [photo]: { ...p, selections: [...(p.selections || []), id] } }
       }
+    },
+
+    // Tropy's JSON-LD import, for the shape project-room.js writes: full
+    // IRIs, one tropy#photo list per item. Like Tropy, it needs each photo's
+    // file to exist, takes the checksum from the JSON, and resets the view.
+    'item.import'({ data }) {
+      need(Array.isArray(data), 'item.import: payload.data must be JSON-LD nodes')
+      let s = { ...state, items: { ...state.items }, photos: { ...state.photos } }
+      for (let node of data) {
+        let list = (node[`${TROPY}photo`] || [])[0]
+        need(list && Array.isArray(list['@list']), 'item.import: an item without photos')
+        let id = nextId++
+        let photoIds = []
+        for (let p of list['@list']) {
+          let val = k => p[`${TROPY}${k}`] && p[`${TROPY}${k}`][0]['@value']
+          need(val('checksum'), 'item.import: a photo without a checksum')
+          need(require('node:fs').existsSync(val('path')), `item.import: no file at ${val('path')}`)
+          let pid = nextId++
+          s.photos[pid] = {
+            id: pid, item: id, checksum: val('checksum'), path: val('path'),
+            mimetype: val('mimetype'), filename: val('filename'),
+            notes: [], selections: [], transcriptions: []
+          }
+          photoIds.push(pid)
+        }
+        let template = node[`${TROPY}template`] && node[`${TROPY}template`][0]['@id']
+        s.items[id] = { id, photos: photoIds, tags: [], lists: [], template: template || GENERIC }
+      }
+      s.nav = { ...s.nav, mode: 'project', query: '' }
+      return s
     },
 
     'selection.delete'({ photo, selections }) {

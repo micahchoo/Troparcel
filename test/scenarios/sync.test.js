@@ -280,3 +280,90 @@ test('deleting a collaborator\'s selection never erases it from the room', async
   assert.ok(!room[0].deleted, 'alice\'s selection is still live in the room')
   assert.equal(onlySelection(alice).length, 1)
 })
+
+// --- Project rooms: photos travel ---
+
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const crypto = require('node:crypto')
+
+/** Item `id` in `peer`'s project, with real photo files (checksum = MD5). */
+function seedRealItem(t, peer, id, contents) {
+  let dir = fs.mkdtempSync(path.join(os.tmpdir(), 'troparcel-photos-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  let checksums = contents.map(c => crypto.createHash('md5').update(c).digest('hex'))
+  let { photos } = seedItem(peer.tropy, { id, photos: checksums })
+  let s = peer.tropy.state()
+  let next = { ...s.photos }
+  photos.forEach((pid, i) => {
+    let file = path.join(dir, `photo-${i}.png`)
+    fs.writeFileSync(file, contents[i])
+    next[pid] = { ...next[pid], path: file, protocol: 'file', mimetype: 'image/png', filename: `photo-${i}.png` }
+  })
+  peer.tropy.replace({ ...s, photos: next })
+  return { photos, checksums }
+}
+
+async function projectPair(t) {
+  let hub = new Hub()
+  let alice = await makeEngine({ userId: 'alice', hub, options: { sharePhotos: true } })
+  let carol = await makeEngine({ userId: 'carol', hub, options: { sharePhotos: true } })
+  t.after(() => Promise.all([alice.stop(), carol.stop()]))
+  return { hub, alice, carol }
+}
+
+test('project room: a member with an empty project receives the item, its photos and its notes', async (t) => {
+  let { alice, carol } = await projectPair(t)
+  let { photos, checksums } = seedRealItem(t, alice, 1, ['first photo', 'second photo'])
+  await alice.engine.adapter.createNote({ photo: photos[0], html: '<p>Read the postmark</p>' })
+  carol.tropy.replace({ ...carol.tropy.state(), nav: { ...carol.tropy.state().nav, mode: 'trash', query: 'ink' } })
+
+  await cycle(alice, carol)
+
+  let items = Object.values(carol.tropy.state().items)
+  assert.equal(items.length, 1)
+  let got = items[0].photos.map(id => carol.tropy.state().photos[id].checksum)
+  assert.deepEqual(got.sort(), [...checksums].sort())
+  for (let id of items[0].photos) {
+    let p = carol.tropy.state().photos[id]
+    assert.equal(crypto.createHash('md5').update(fs.readFileSync(p.path)).digest('hex'), p.checksum)
+  }
+  let notes = Object.values(carol.tropy.state().notes).map(n => n.text)
+  assert.ok(notes.some(n => n.startsWith('Read the postmark')), notes.join(' | '))
+  assert.equal(carol.tropy.state().nav.mode, 'trash', 'the owner\'s view is put back')
+  assert.equal(carol.tropy.state().nav.query, 'ink')
+  assert.deepEqual(carol.tropy.rejected, [])
+})
+
+test('project room: nothing is imported twice, and items already here are matched', async (t) => {
+  let { alice, carol } = await projectPair(t)
+  seedRealItem(t, alice, 1, ['one'])
+  seedRealItem(t, carol, 1, ['one'])
+  seedRealItem(t, alice, 2, ['two'])
+  await cycle(alice, carol, alice, carol, carol)
+  assert.equal(Object.keys(carol.tropy.state().items).length, 2)
+  assert.equal(Object.keys(alice.tropy.state().items).length, 2)
+})
+
+test('project room: an item waits until its photos reach the room', async (t) => {
+  let { hub, alice, carol } = await projectPair(t)
+  let { checksums } = seedRealItem(t, alice, 1, ['late photo'])
+  await cycle(alice)
+  let bytes = hub.blobs.get(checksums[0])
+  hub.blobs.delete(checksums[0])
+  await cycle(carol)
+  assert.equal(Object.keys(carol.tropy.state().items).length, 0)
+  hub.blobs.set(checksums[0], bytes)
+  await cycle(carol)
+  assert.equal(Object.keys(carol.tropy.state().items).length, 1)
+})
+
+test('overlay room (the default): no photos travel and nothing is imported', async (t) => {
+  let { alice, bob } = await pair(t)
+  let hub = alice.engine.transport.hub
+  seedRealItem(t, alice, 2, ['private photo'])
+  await cycle(alice, bob)
+  assert.equal(hub.blobs.size, 0)
+  assert.equal(Object.keys(bob.tropy.state().items).length, 1, 'only the item bob already had')
+})

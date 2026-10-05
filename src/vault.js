@@ -46,6 +46,7 @@ class SyncVault {
     this.appliedNoteKeys = new Set()
     this.appliedSelectionKeys = new Set()
     this.appliedTranscriptionKeys = new Set()
+    this.sharedPhotos = new Set() // checksums uploaded to a project room
 
     // Stable identity mappings
     // Notes: local resource ID <-> CRDT UUID
@@ -558,6 +559,7 @@ class SyncVault {
         appliedNoteKeys: Array.from(this.appliedNoteKeys),
         appliedSelectionKeys: Array.from(this.appliedSelectionKeys),
         appliedTranscriptionKeys: Array.from(this.appliedTranscriptionKeys),
+        sharedPhotos: Array.from(this.sharedPhotos),
         failedNoteKeys: Array.from(this.failedNoteKeys.entries()).map(([k, c]) => ({ key: k, count: c })),
         noteMappings: Array.from(this.crdtKeyToNoteId.entries()).map(([k, v]) => [k, v]),
         txMappings: Array.from(this.crdtKeyToTxId.entries()).map(([k, v]) => [k, v]),
@@ -610,6 +612,9 @@ class SyncVault {
       }
       if (Array.isArray(data.appliedSelectionKeys)) {
         for (let k of data.appliedSelectionKeys) this.appliedSelectionKeys.add(k)
+      }
+      if (Array.isArray(data.sharedPhotos)) {
+        for (let k of data.sharedPhotos) this.sharedPhotos.add(k)
       }
       if (Array.isArray(data.appliedTranscriptionKeys)) {
         for (let k of data.appliedTranscriptionKeys) this.appliedTranscriptionKeys.add(k)
@@ -718,6 +723,7 @@ class SyncVault {
     this.appliedNoteKeys.clear()
     this.appliedSelectionKeys.clear()
     this.appliedTranscriptionKeys.clear()
+    this.sharedPhotos.clear()
     this.noteIdToCrdtKey.clear()
     this.crdtKeyToNoteId.clear()
     this.txIdToCrdtKey.clear()

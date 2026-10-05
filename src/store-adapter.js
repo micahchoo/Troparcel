@@ -257,6 +257,32 @@ class StoreAdapter {
     return this._getState().notes[id] || null
   }
 
+  /** A photo as Tropy holds it, with its absolute `path` and file facts. */
+  getPhoto(id) {
+    return this._getState().photos[id] || null
+  }
+
+  /** The checksum of every photo in the project. */
+  getAllChecksums() {
+    return Object.values(this._getState().photos).map(p => p.checksum).filter(Boolean)
+  }
+
+  /**
+   * Import items given as Tropy JSON-LD nodes. Done when a photo with each
+   * of `checksums` exists. Tropy's import also resets the view mode and
+   * search, so the owner's view is put back afterwards.
+   */
+  async importItems(nodes, checksums) {
+    let nav = pickNav(this._getState().nav)
+    let want = new Set(checksums)
+    await this._command(this._cmd(ITEM.IMPORT, { data: nodes }), s => {
+      let found = 0
+      for (let p of Object.values(s.photos)) if (want.has(p.checksum)) found++
+      return found >= want.size
+    }, Math.max(StoreAdapter.TIMEOUT, nodes.length * 2000))
+    this._restoreNav(nav)
+  }
+
   /** An item as Tropy holds it: { id, photos, tags, lists, template }. */
   /** A transcription, or null once removed from its photo or selection. */
   getTranscription(id) {
@@ -675,13 +701,13 @@ function childrenOf(node) {
   return Array.isArray(c.content) ? c.content : []
 }
 
+/** The parts of the view a Troparcel write may disturb; only those set. */
 function pickNav(nav = {}) {
-  return {
-    items: nav.items,
-    photo: nav.photo,
-    selection: nav.selection,
-    note: nav.note
+  let out = {}
+  for (let k of ['mode', 'query', 'items', 'photo', 'selection', 'note']) {
+    if (nav[k] !== undefined) out[k] = nav[k]
   }
+  return out
 }
 
 module.exports = { StoreAdapter }
