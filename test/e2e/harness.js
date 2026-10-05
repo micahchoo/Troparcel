@@ -371,6 +371,34 @@ class SyntheticPeer {
   }
 }
 
+/**
+ * A peer with no Tropy on a shared folder: the file transport over this
+ * member's own copy of the folder, writing as SyntheticPeer does.
+ */
+class FolderPeer {
+  constructor(folder, room, userId) {
+    let Y = require('yjs')
+    let { FileAdapter } = require('../../src/adapters/file')
+    this.userId = userId
+    this.schema = require('../../src/crdt-schema')
+    this.doc = new Y.Doc()
+    let quiet = { info() {}, debug() {}, warn() {}, error() {} }
+    this.adapter = new FileAdapter(this.doc, { syncDir: folder, room, peerId: userId, filePollInterval: 2000 }, quiet)
+    this.seq = 0
+  }
+
+  connected() { return this.adapter.connect() }
+
+  write(fn) {
+    this.doc.transact(() => fn(this.schema, this.userId, ++this.seq))
+  }
+
+  destroy() {
+    this.adapter.disconnect()
+    this.doc.destroy()
+  }
+}
+
 class Run {
   constructor(label = 'run') {
     // E2E_DIR moves the runs, e.g. off a busy disk: each Tropy writes its
@@ -419,6 +447,13 @@ class Run {
     return p
   }
 
+  /** A FolderPeer on `folder`, this member's copy of the shared folder. */
+  folderPeer(userId, folder) {
+    let p = new FolderPeer(folder, this.room, userId)
+    this.peers = (this.peers || []).concat(p)
+    return p
+  }
+
   tropy(name, options, extraEntries) {
     let t = new TropyInstance(this, name, options, extraEntries)
     this.instances.push(t)
@@ -445,4 +480,4 @@ function build() {
   execFileSync('node', ['esbuild.config.mjs', ...out], { cwd: ROOT, stdio: 'ignore' })
 }
 
-module.exports = { Run, SyntheticPeer, build, until, sleep }
+module.exports = { Run, SyntheticPeer, FolderPeer, build, until, sleep }

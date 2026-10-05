@@ -13,6 +13,13 @@
  * Now and then a Tropy restarts, and now and then the server is down for
  * 20 s, so everyone works offline and catches up.
  *
+ * SOAK_TRANSPORT=folder runs the same group on a shared folder instead of
+ * a server: each member has their own copy of the folder, and a simulated
+ * sync app (test/e2e/sync-app.js) carries each member's file to the others
+ * late, out of order, sometimes half-written or as a conflicted copy. An
+ * outage is then a sync app offline: one member's for 20–40 s, or
+ * everyone's.
+ *
  * Each member owns one metadata field: two people changing one field at
  * the same time keep their own values by design (docs/CONFLICTS.md), so
  * the group in this test follows the Group Guide and splits the fields.
@@ -28,9 +35,12 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { Run, SyntheticPeer, build, until, sleep } = require('./harness')
+const { SyncApp } = require('./sync-app')
 const { read, summarize } = require('./timeline')
 
 const MINUTES = Number(process.env.SOAK_MINUTES) || 20
+const FOLDER = process.env.SOAK_TRANSPORT === 'folder'
+const MEMBERS = ['alice', 'bob', 'carol', 'dave', 'erin']
 const PHOTOS = 12
 const DC = 'http://purl.org/dc/elements/1.1/'
 const FIELD = { alice: `${DC}title`, bob: `${DC}description`, carol: `${DC}subject`, dave: `${DC}creator`, erin: `${DC}publisher` }
@@ -53,12 +63,24 @@ async function main() {
   let log = (...a) => console.log(`${((Date.now() - started) / 1000).toFixed(0).padStart(5)} s`, ...a)
   let ledger = { notes: new Map(), fields: new Map(), tags: new Map(), transcriptions: new Map() }
   let counts = { ops: 0, restarts: 0, outages: 0, failed: 0 }
+  let app = null
 
   try {
-    await run.startServer()
-    let connection = `troparcel://ws/${run.serverUrl.replace('ws://', '')}/${run.room}`
+    // Each member's copy of the shared folder, in folder mode
+    let folders = new Map(MEMBERS.map(m => [m, path.join(run.dir, 'sync', m)]))
+    let connectionOf
+    if (FOLDER) {
+      for (let dir of folders.values()) fs.mkdirSync(dir, { recursive: true })
+      app = new SyncApp(folders)
+      app.start()
+      connectionOf = name => ({ connection: folders.get(name), room: run.room, filePollInterval: 2000 })
+    } else {
+      await run.startServer()
+      let connection = `troparcel://ws/${run.serverUrl.replace('ws://', '')}/${run.room}`
+      connectionOf = () => ({ connection })
+    }
     let tropys = ['alice', 'bob', 'carol'].map(name => run.tropy(name, {
-      connection, userId: name, syncDeletions: true, debug: true,
+      ...connectionOf(name), userId: name, syncDeletions: true, debug: true,
       localDebounce: 300, remoteDebounce: 200, safetyNetInterval: 10, dataDir: run.dir
     }))
     let files = Array.from({ length: PHOTOS }, (_, i) => run.photo(1000 + i))
@@ -67,9 +89,10 @@ async function main() {
       await t.start()
       await t.importPhotos(files)
     }
-    let peers = ['dave', 'erin'].map(name => run.peer(name))
+    let peers = ['dave', 'erin'].map(name => FOLDER ? run.folderPeer(name, folders.get(name)) : run.peer(name))
     for (let p of peers) await p.connected()
-    log(`${tropys.length} Tropys and ${peers.length} synthetic members on ${PHOTOS} photos; soaking for ${MINUTES} min`)
+    log(`${tropys.length} Tropys and ${peers.length} synthetic members on ${PHOTOS} photos, ` +
+      `${FOLDER ? 'a shared folder' : 'a server'}; soaking for ${MINUTES} min`)
 
     // checksum → { item, photo } in one Tropy (ids survive a restart)
     let where = new Map()
@@ -158,15 +181,25 @@ async function main() {
         nextRestart = Date.now() + 90000 + rand(90000)
       }
       if (Date.now() > nextOutage) {
-        log('server down for 20 s; everyone keeps working')
-        await run.stopServer()
+        let offline = FOLDER ? pick([...MEMBERS, 'everyone']) : null
+        if (!FOLDER) {
+          log('server down for 20 s; everyone keeps working')
+          await run.stopServer()
+        } else if (offline === 'everyone') {
+          log('every sync app offline for 20 s; everyone keeps working')
+          app.pauseAll()
+        } else {
+          log(`${offline}'s sync app offline for 20 s; ${offline} keeps working`)
+          app.pause(offline)
+        }
         let back = Date.now() + 20000
         while (Date.now() < back) {
           let member = pick(['alice', 'bob', 'carol'].filter(m => !down.has(m)))
           try { await opFor(member); counts.ops++ } catch (err) { counts.failed++; log(`op failed (${member}): ${err.message}`) }
           await sleep(1000 + rand(2000))
         }
-        await run.startServer()
+        if (FOLDER) app.resumeAll()
+        else await run.startServer()
         counts.outages++
         nextOutage = Date.now() + 120000 + rand(120000)
       }
@@ -251,6 +284,7 @@ async function main() {
       if (/errored actions: (?!none)/.test(s)) problems.push(`${t.name}: the observer recorded failed commands (see ${t.timelineFile})`)
     }
 
+    if (app) log(`sync app: ${app.counts.deliveries} deliveries, ${app.counts.chunked} written in pieces, ${app.counts.conflicted} conflicted copies`)
     log(`ledger: ${ledger.notes.size} notes (${[...ledger.notes.values()].filter(n => n.deleted).length} deleted), ` +
       `${ledger.fields.size} field values, ${ledger.tags.size} tags, ${ledger.transcriptions.size} transcriptions; ${counts.failed} ops failed to start`)
     if (problems.length) {
@@ -261,6 +295,7 @@ async function main() {
     }
     log(`run folder: ${run.dir}`)
   } finally {
+    if (app) await app.stop()
     await run.stop()
   }
 }
