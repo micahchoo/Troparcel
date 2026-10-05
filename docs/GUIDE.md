@@ -109,6 +109,22 @@ PUBLIC_URL=wss://tropy.example.edu AUTH_TOKENS="letters:7f3k9q2mz8x1p4vw" node i
 
 The strings then begin with `troparcel://wss/`, which means encrypted.
 
+### All server settings
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | `2468` | Listen port |
+| `PUBLIC_URL` | LAN address | The address members use, e.g. `wss://tropy.example.edu`; goes into the printed connection strings |
+| `AUTH_TOKENS` | none (open) | `room:token` pairs, comma-separated |
+| `PERSISTENCE_DIR` | `./data` | Where rooms and project-room photos are stored |
+| `MONITOR_TOKEN` | none | Protects `/monitor` and the room API |
+| `TOMBSTONE_MAX_DAYS` | `30` | Deletion markers older than this are purged |
+| `COMPACTION_HOURS` | `6` | How often the purge runs |
+| `MAX_BLOB_MB` | `200` | Largest photo a project room may store |
+| `MAX_ROOMS`, `MAX_CONNS_PER_IP` | `100`, `10` | Limits |
+
+`node index.js --new-key` prints a key for an encrypted room and exits.
+
 ### Watch the server
 
 `http://<server>:2468/monitor` shows each room and who is connected. Set `MONITOR_TOKEN` to protect it, then open `/monitor?token=<MONITOR_TOKEN>`.

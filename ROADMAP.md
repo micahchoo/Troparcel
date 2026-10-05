@@ -9,8 +9,8 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | Phase | Status | Exit test | Next step |
 |---|---|---|---|
 | 0 · Ground truth | Done | Passed | — |
-| 1 · Trustworthy overlay | Released as 6.0.0 | Open: needs people | A week's trial on two computers |
-| 2 · Upstream track | Proposal drafted | Open: needs a reply | Post `docs/upstream-proposal.md` to Tropy |
+| 1 · Trustworthy overlay | Released as 6.0.0 | Soak test, to build | Build and run the soak test |
+| 2 · Stay compatible with Tropy | Done | Passed: CI against Tropy `main` | — |
 | 3 · Scale | Mostly done | Not yet measured right | Re-measure a 10,000-item start on the NVMe disk |
 | 4 · Shared project | Done (6.1) | Passed in real Tropy | — |
 | 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
@@ -41,19 +41,17 @@ Also done: an oversized entry is skipped alone; a deleted selection or transcrip
 
 Released as [6.0.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.0.0) on 2026-10-05.
 
-**Exit test:** two researchers on two machines use it for a week: no duplicate notes, no dialogs, no lost work. **Open** — it needs two people, not code.
+**Exit test:** ~~two researchers on two machines use it for a week~~ — there are no testers. Instead, a **soak test**: three real Tropy instances and synthetic members make random edits for hours, with restarts and dropped connections; at the end every project holds the same data, nothing is duplicated, and Tropy logs no warnings. It finds sync bugs; it cannot find what only people find (confusing setup, awkward workflows). **Open:** to build.
 
-## Phase 2 · Upstream track
+## Phase 2 · Stay compatible with Tropy — done
 
-Troparcel's largest risk is that it depends on Tropy internals: any release can change an action shape. Propose small, general additions that any plugin could use (`docs/upstream-proposal.md`):
+Troparcel's largest risk is that it depends on Tropy internals: Tropy gives plugins no supported way to change a project, so Troparcel uses the window's Redux store, and any Tropy release can change an action shape. The plan was to propose a plugin API to Tropy's maintainers; that is dropped. Instead, breakage is caught before users see it:
 
-1. A documented store or event-subscription hook in the plugin context.
-2. A notice call that takes plain text, not a translation key.
-3. A way to group a plugin's commands without an undo entry, or a documented `history: false`.
+- CI runs every test against the current Tropy release (1.17.3) and Tropy's `main`, on every push;
+- `test/scenarios/tropy-drift.test.js` checks each action type and each state detail Troparcel relies on (how a command runs, how a loaded project looks) against Tropy's source;
+- `npm run e2e` runs real Tropy.
 
-These change the platform, not a fork, so "no host modification" still holds.
-
-**Exit test:** a maintainer replies. This track is uncertain, so no other phase waits on it. **Status:** drafted; not posted, because it speaks to Tropy's maintainers in the owner's name.
+**Exit test:** a Tropy change that breaks Troparcel fails CI. Passed: the drift test fails on a renamed action or a changed load marker.
 
 ## Phase 3 · Scale
 
