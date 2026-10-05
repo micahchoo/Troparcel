@@ -1,7 +1,7 @@
 'use strict'
 
 // Writes a small, valid RGB PNG whose pixels depend on `seed`, so every seed
-// gives a different file and therefore a different Tropy checksum.
+// (to 2^32) gives a different file and therefore a different Tropy checksum.
 
 const fs = require('node:fs')
 const zlib = require('node:zlib')
@@ -43,6 +43,10 @@ function png(seed, width = 64, height = 48) {
     }
     rows.push(row)
   }
+  // The pattern repeats every 256 seeds. Write the whole seed into the first
+  // pixels, or photo 257 is photo 1 again, and Tropy stops the import with a
+  // duplicate-photo dialog that nobody on Xvfb can answer.
+  rows[0].writeUInt32BE(seed >>> 0, 1)
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', ihdr),
