@@ -40,3 +40,25 @@ test('after an outage a peer reconnects, and its writes arrive', { timeout: 6000
   await until(() => carol.isConnected() && alice.isConnected(), 30000)
   await until(() => alice.doc.getMap('notes').get('n1') === 'written during the outage', 10000)
 })
+
+// Soak, 2026-10-05: after a restart alice's Troparcel pushed while its copy
+// of the room was still empty, so transcriptions it had received looked new
+// and were written back over their authors' entries as alice's.
+test('connect resolves only once the room has arrived', { timeout: 60000 }, async (t) => {
+  let server = await startServer(t)
+  let peer = () => new WebSocketAdapter(new Y.Doc(),
+    { serverUrl: `ws://127.0.0.1:${server.port}`, room: 'letters' }, { info() {}, warn() {}, debug() {} })
+  let bob = peer()
+  await bob.connect()
+  for (let i = 0; i < 500; i++) bob.doc.getMap('transcriptions').set(`t${i}`, { text: `line ${i}`, author: 'bob' })
+  let alice = peer()
+  t.after(async () => {
+    for (let p of [bob, alice]) { await p.destroy(); p.doc.destroy() }
+  })
+  await until(async () => (await fetch(`http://127.0.0.1:${server.port}/api/rooms`)).ok, 5000)
+  await alice.connect()
+  // The order of 'open' and the first sync message is the network's; only
+  // the provider's own flag says the room has arrived.
+  assert.equal(alice.provider.synced, true)
+  assert.equal(alice.doc.getMap('transcriptions').size, 500)
+})

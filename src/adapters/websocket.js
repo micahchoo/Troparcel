@@ -89,27 +89,34 @@ class WebSocketAdapter extends SyncAdapter {
     await this._waitForConnection()
   }
 
+  /**
+   * Resolves once the server has sent the room, not when the socket opens.
+   * The first push compares this Tropy's work with the room: against a
+   * room that has not arrived yet, a transcription received from bob looks
+   * new and is written back over bob's entry as this user's (soak,
+   * 2026-10-05).
+   */
   _waitForConnection() {
     return new Promise((resolve, reject) => {
-      if (this.provider.wsconnected) {
+      if (this.provider.synced) {
         resolve()
         return
       }
 
-      let handler = (event) => {
-        if (event.status === 'connected') {
+      let handler = (synced) => {
+        if (synced) {
           clearTimeout(timeout)
-          this.provider.off('status', handler)
+          this.provider.off('sync', handler)
           resolve()
         }
       }
 
       let timeout = setTimeout(() => {
-        this.provider.off('status', handler)
+        this.provider.off('sync', handler)
         reject(new Error('Connection timeout (15s)'))
       }, 15000)
 
-      this.provider.on('status', handler)
+      this.provider.on('sync', handler)
     })
   }
 

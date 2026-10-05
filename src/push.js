@@ -106,6 +106,17 @@ module.exports = {
     }
   },
 
+  /**
+   * True when `key` is an entry another member wrote, by this vault's record,
+   * and the room as it stands does not hold it: a room that has not arrived
+   * yet, or an entry since purged. Writing it would publish their work as
+   * this user's, over their own entry once the room arrives.
+   */
+  _othersEntry(key, userId) {
+    let author = this.vault.getOriginalAuthor(key)
+    return !!author && author !== userId
+  },
+
   pushMetadata(item, itemIdentity, userId, pushSeq) {
     if (!this.options.syncMetadata) return
     let existing = schema.getMetadata(this.doc, itemIdentity)
@@ -238,6 +249,7 @@ module.exports = {
           pushedNoteKeys.add(noteUUID)
 
           let existingNote = existingNotes[noteUUID]
+          if (!existingNote && this._othersEntry(noteUUID, userId)) continue
           if (existingNote && !existingNote.deleted &&
               existingNote.text === text && existingNote.html === html) {
             this.vault.appliedNoteKeys.add(noteUUID)
@@ -304,6 +316,7 @@ module.exports = {
             pushedSelNoteKeys.add(compositeKey)
 
             let existingSelNote = existingSelNotes[compositeKey]
+            if (!existingSelNote && this._othersEntry(compositeKey, userId)) continue
             if (existingSelNote &&
                 existingSelNote.text === text && existingSelNote.html === html) {
               this.vault.appliedNoteKeys.add(compositeKey)
@@ -461,7 +474,7 @@ module.exports = {
             (existingSel.angle || 0) === (sel.angle || 0)
 
         // Logic-based conflict check
-        let remoteNewer = false
+        let remoteNewer = !existingSel && this._othersEntry(selUUID, userId)
         if (existingSel && !existingSel.deleted && existingSel.author !== userId) {
           let valueHash = this.vault._fastHash(`sel:${sel.x}:${sel.y}:${sel.width}:${sel.height}`)
           remoteNewer = !this.vault.hasLocalEdit(itemIdentity, `sel:${selUUID}`, valueHash)
@@ -558,6 +571,7 @@ module.exports = {
         this.vault.appliedTranscriptionKeys.add(txUUID)
 
         let existingTx = existingTranscriptions[txUUID]
+        if (!existingTx && this._othersEntry(txUUID, userId)) return
         if (existingTx && !existingTx.deleted && existingTx.text === (tx.text || '')) {
           return
         }
@@ -610,6 +624,7 @@ module.exports = {
           this.vault.appliedTranscriptionKeys.add(txUUID)
 
           let existingTx = existingTranscriptions[txUUID]
+          if (!existingTx && this._othersEntry(txUUID, userId)) return
           if (existingTx && !existingTx.deleted && existingTx.text === (tx.text || '')) {
             return
           }

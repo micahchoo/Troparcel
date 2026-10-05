@@ -500,3 +500,23 @@ test('a note deleted after a restart is retracted for the others, not silently d
   let bobs = bob.tropy.notes().map(n => n.text).filter(t => t.startsWith('soon gone'))
   assert.ok(bobs.every(t => t.includes('withdrawn by')), bobs.join(' | '))
 })
+
+// Soak, 2026-10-05: alice's Troparcel pushed after a restart before the room
+// had arrived. Her copy of bob's transcription found no entry under its key
+// and was written there as alice's, so bob received his own words back.
+test('a push into a room that has not arrived never claims another member\'s entries', async (t) => {
+  let { alice, bob } = await pair(t)
+  await bob.engine.adapter.createTranscription({ photo: 101, text: 'Dear Sir, I have the honour' })
+  await bob.engine.adapter.createSelection({ photo: 101, x: 1, y: 2, width: 30, height: 40 })
+  await cycle(bob, alice)
+  assert.ok(Object.values(alice.tropy.state().transcriptions).some(tr => tr.text.startsWith('Dear Sir')))
+
+  let empty = new Y.Doc()
+  alice.engine.doc = empty
+  alice.engine.vault.pushedHashes.clear()
+  await alice.engine.pushLocal(alice.engine.readSyncableItems(), alice.engine.vault.nextPushSeq())
+
+  let claimed = ['transcriptions', 'selections'].flatMap(section =>
+    [...empty.getMap(section).values()].filter(v => v.author === 'alice'))
+  assert.deepEqual(claimed, [])
+})
