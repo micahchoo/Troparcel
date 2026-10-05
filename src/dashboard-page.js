@@ -109,7 +109,7 @@ async function act(name, input = {}) {
   }
 }
 function stateOf(s) {
-  if (!s.configured) return ['', 'Not set up yet', 'Fill in the two fields below to join a group, or start a new room.']
+  if (!s.configured) return ['', 'Not set up yet', 'Choose your name, then join your group or start a new room.']
   if (!s.engine) return ['warn', 'Starting…', s.problems && s.problems[0] ? s.problems[0].text : 'Waiting for the project to load.']
   const e = s.engine
   const where = e.transport === 'file' ? 'shared folder' : 'server'
@@ -121,21 +121,23 @@ function stateOf(s) {
   return ['bad', 'Offline: working on this computer only', 'Your changes are kept and sent once Troparcel can reach the ' + where + ' again.']
 }
 function setup(s) {
-  const conn = $('input', { id: 'conn', placeholder: 'troparcel://…  or the path of a shared folder', value: s.options.connection || '', oninput: () => { typing = true } })
   const name = $('input', { id: 'name', placeholder: 'e.g. Ada L.', value: s.options.userId || '', oninput: () => { typing = true } })
-  const join = $('form', { onsubmit: e => { e.preventDefault(); typing = false; act('setup', { connection: conn.value.trim(), userId: name.value.trim() }) } },
-    $('label', {}, 'Connection', $('span', {}, 'The invite someone in your group sent you.'), conn),
-    $('label', {}, 'Your name', $('span', {}, 'How others see your work. Use one nobody else in the group uses.'), name),
-    $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Join'))
-  )
-  const kids = [$('h2', {}, 'Join a group'), join]
+  const conn = $('input', { id: 'conn', placeholder: 'troparcel://…  or the path of a shared folder', value: s.options.connection || '', oninput: () => { typing = true } })
+  const kids = [
+    $('h2', {}, 'Your name'),
+    $('label', {}, $('span', {}, 'How others see your work. Use one nobody else in the group uses.'), name),
+    $('h2', { style: 'margin-top:18px' }, 'Join a group'),
+    $('form', { onsubmit: e => { e.preventDefault(); typing = false; act('setup', { connection: conn.value.trim(), userId: name.value.trim() }) } },
+      $('label', {}, $('span', {}, 'Paste the invite someone in your group sent you.'), conn),
+      $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Join')))
+  ]
   if (s.syncRoots && s.syncRoots.length) {
     const root = $('select', { id: 'root' }, s.syncRoots.map(([label, p]) => $('option', { value: p }, label + ' (' + p + ')')))
     const room = $('input', { id: 'room', placeholder: 'e.g. tropy-letters', oninput: () => { typing = true } })
-    kids.push($('p', { class: 'or' }, 'or'), $('h2', {}, 'Start a new room in a shared folder'),
+    kids.push($('p', { class: 'or' }, 'or'), $('h2', {}, 'Start a new room'),
       $('form', { onsubmit: e => { e.preventDefault(); typing = false; act('create-room', { root: root.value, room: room.value.trim(), userId: name.value.trim() }) } },
-        $('label', {}, 'Where', $('span', {}, 'A folder your sync client keeps in step on every computer.'), root),
-        $('label', {}, 'Room name', $('span', {}, 'A new folder of this name is made there. Share it with your group in that app.'), room),
+        $('label', {}, 'In', $('span', {}, 'A folder your sync app keeps the same on every computer.'), root),
+        $('label', {}, 'Room name', $('span', {}, 'Troparcel makes a folder of this name there. Then share it with your group in that app.'), room),
         $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Start the room'))))
   }
   return $('section', {}, kids)

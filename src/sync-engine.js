@@ -132,6 +132,27 @@ class SyncEngine {
     }
   }
 
+  /** What arrived, as people say it: "bob added 2 notes and changed a field". */
+  _sayApplied(s) {
+    let n = (count, one, many = one + 's') => count === 1 ? `a ${one}` : `${count} ${many}`
+    let did = []
+    if (s.notesCreated) did.push(`added ${n(s.notesCreated, 'note')}`)
+    if (s.notesUpdated) did.push(`edited ${n(s.notesUpdated, 'note')}`)
+    if (s.notesRetracted) did.push(`withdrew ${n(s.notesRetracted, 'note')}`)
+    if (s.metadataUpdated) did.push(`changed ${n(s.metadataUpdated, 'field')}`)
+    if (s.tagsAdded) did.push(`added ${n(s.tagsAdded, 'tag')}`)
+    if (s.selectionsCreated) did.push(`marked ${n(s.selectionsCreated, 'selection')}`)
+    if (s.selectionsDeleted) did.push(`removed ${n(s.selectionsDeleted, 'selection')}`)
+    if (s.transcriptionsCreated) did.push(`added ${n(s.transcriptionsCreated, 'transcription')}`)
+    if (s.transcriptionsRemoved) did.push(`removed ${n(s.transcriptionsRemoved, 'transcription')}`)
+    if (s.listsAdded) did.push(`put items in ${n(s.listsAdded, 'list')}`)
+    let list = did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did[did.length - 1]}` : (did[0] || 'made changes')
+    let who = [...(s.authors || [])].map(a => this._resolveDisplayName(a))
+    let subject = who.length === 0 ? 'The group' : who.length === 1 ? who[0] : `${who.slice(0, -1).join(', ')} and ${who[who.length - 1]}`
+    let items = s.itemsChanged === 1 ? 'one item' : `${s.itemsChanged} items`
+    return `${subject} ${list}, on ${items}`
+  }
+
   _logApplyStats() {
     let s = this._applyStats
     if (!s) return
@@ -149,9 +170,7 @@ class SyncEngine {
     if (s.notesFailed) parts.push(`${s.notesFailed} notes failed`)
     if (parts.length > 0) {
       this._log(`applied: ${parts.join(', ')} across ${s.itemsChanged}/${s.itemsProcessed} items`)
-      let who = [...(s.authors || [])].map(a => this._resolveDisplayName(a))
-      this.journal.event(`Received ${parts.join(', ')}${who.length ? ` from ${who.join(', ')}` : ''}`,
-        { kind: 'received', items: s.itemsChanged })
+      this.journal.event(this._sayApplied(s), { kind: 'received', items: s.itemsChanged })
     } else {
       this._debug(`applied: nothing changed across ${s.itemsProcessed} items`)
     }
