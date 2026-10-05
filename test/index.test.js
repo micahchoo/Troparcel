@@ -3284,3 +3284,27 @@ describe('plugin: File > Export as IIIF', () => {
   })
 })
 
+
+describe('folder-first rooms', () => {
+  const fs = require('fs'), os = require('os'), path = require('path')
+  const { parseConnectionString, generateConnectionString } = require('../src/connection-string')
+  const { findRoomFolder, syncRoots } = require('../src/sync-folders')
+
+  it('troparcel://folder/<name> names a folder, not a path', () => {
+    let c = parseConnectionString('troparcel://folder/tropy-letters?photos=1')
+    assert.equal(c.transport, 'file')
+    assert.equal(c.syncFolder, 'tropy-letters')
+    assert.equal(c.sharePhotos, true)
+    assert.equal(generateConnectionString(c), 'troparcel://folder/tropy-letters?photos=1')
+  })
+
+  it('finds the folder in whichever sync client this computer has', () => {
+    let home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'))
+    fs.mkdirSync(path.join(home, 'Dropbox', 'Research', 'tropy-letters'), { recursive: true })
+    fs.mkdirSync(path.join(home, 'Nextcloud'), { recursive: true })
+    let roots = syncRoots(home)
+    assert.deepEqual(roots.map(r => r[0]).sort(), ['Dropbox', 'Nextcloud'])
+    assert.equal(findRoomFolder('tropy-letters', roots), path.join(home, 'Dropbox', 'Research', 'tropy-letters'))
+    assert.equal(findRoomFolder('missing', roots), null)
+  })
+})

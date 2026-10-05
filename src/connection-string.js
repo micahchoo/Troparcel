@@ -7,6 +7,9 @@
  *   troparcel://ws/host:port/room?token=secret   a Troparcel server
  *   troparcel://wss/host:port/room?token=secret  the same, over TLS
  *   troparcel://file/path/to/shared/folder       a shared folder
+ *   troparcel://folder/tropy-letters             a folder of that name in
+ *                                                this computer's Nextcloud,
+ *                                                Dropbox… (sync-folders.js)
  *
  * `photos=1` in the query makes a project room: photos travel with the
  * room, and items a member lacks are imported (option `sharePhotos`).
@@ -33,10 +36,18 @@ function parseConnectionString(str) {
     return { transport: 'file', syncDir: str }
   }
 
-  let match = str.match(/^troparcel:\/\/(wss|ws|file)\/(.+)$/i)
+  let match = str.match(/^troparcel:\/\/(wss|ws|file|folder)\/(.+)$/i)
   if (!match) return null
 
   let scheme = match[1].toLowerCase()
+  if (scheme === 'folder') {
+    let [name, query] = match[2].split('?', 2)
+    let params = _parseQuery(query)
+    let result = { transport: 'file', syncFolder: decodeURIComponent(name).replace(/\/+$/, '') }
+    if (params.photos === '1') result.sharePhotos = true
+    if (params.key) result.roomKey = params.key
+    return result
+  }
   if (scheme === 'file') return _parseFile(match[2])
   return _parseWebSocket(match[2], scheme === 'wss' ? 'wss' : null)
 }
@@ -114,6 +125,13 @@ function generateConnectionString(opts) {
     if (opts.sharePhotos) query.push('photos=1')
     if (opts.roomKey) query.push(`key=${opts.roomKey}`)
     return query.length ? `${str}?${query.join('&')}` : str
+  }
+
+  if (transport === 'file' && opts.syncFolder) {
+    let query = []
+    if (opts.sharePhotos) query.push('photos=1')
+    if (opts.roomKey) query.push(`key=${opts.roomKey}`)
+    return `troparcel://folder/${encodeURIComponent(opts.syncFolder)}${query.length ? `?${query.join('&')}` : ''}`
   }
 
   if (transport === 'file') {

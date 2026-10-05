@@ -17,6 +17,7 @@
 
 const { SyncEngine } = require('./sync-engine')
 const { parseConnectionString } = require('./connection-string')
+const { findRoomFolder } = require('./sync-folders')
 const { writeIIIF } = require('./iiif')
 
 const VALID_SYNC_MODES = new Set(['auto', 'review', 'push', 'pull'])
@@ -94,7 +95,9 @@ class TroparcelPlugin {
     return {
       transport: conn.transport,
       serverUrl: conn.serverUrl || null,
-      syncDir: conn.syncDir || null,
+      // troparcel://folder/<name>: that folder in this computer's sync client
+      syncFolder: conn.syncFolder || null,
+      syncDir: conn.syncDir || (conn.syncFolder ? findRoomFolder(conn.syncFolder) : null),
       address: conn.serverUrl || conn.syncDir,
       room: room || 'troparcel-default',
       _roomExplicit: !!room,

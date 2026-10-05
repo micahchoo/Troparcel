@@ -63,6 +63,11 @@ class FileAdapter extends SyncAdapter {
   }
 
   async connect() {
+    if (!this.options.syncDir && this.options.syncFolder) {
+      let roots = require('../sync-folders').syncRoots().map(([label]) => label)
+      throw new Error(`no folder named "${this.options.syncFolder}" in ${roots.length ? roots.join(', ') : 'any sync folder on this computer'}. ` +
+        'Has it been shared with you, and has your sync client finished copying it?')
+    }
     if (!this.options.syncDir) throw new Error('the shared folder is not set')
     let stat
     try {

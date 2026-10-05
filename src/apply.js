@@ -147,6 +147,7 @@ module.exports = {
   _credit(author) {
     if (!author || author === this._stableUserId || !this._crediting) return
     this.vault.addContributor(this._crediting, author)
+    if (this._applyStats && this._applyStats.authors) this._applyStats.authors.add(author)
   },
 
   async _applyAttribution(itemIdentity, localId, userId) {

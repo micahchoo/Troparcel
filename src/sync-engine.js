@@ -13,6 +13,8 @@ const { Assignments } = require('./assignments')
 const { ProjectRoom } = require('./project-room')
 const { Signer, Keyring } = require('./authorship')
 const { RoomKey } = require('./room-key')
+const { Journal } = require('./journal')
+const TEXT = 'http://www.w3.org/2001/XMLSchema#string'
 const path = require('path')
 
 /**
@@ -39,8 +41,11 @@ class SyncEngine {
     if (!store) throw new Error('SyncEngine needs the project window\'s Redux store')
 
     this.options = options
-    this.logger = logger
+    // What happened recently, for the dashboard; warnings are recorded too.
+    this.journal = new Journal()
+    this.logger = this.journal.watch(logger)
     this.debug = options.debug === true
+    this.peers = []
 
     this.doc = null
     this.transport = null
@@ -121,7 +126,8 @@ class SyncEngine {
       transcriptionsCreated: 0,
       listsAdded: 0,
       itemsProcessed: 0, itemsChanged: 0,
-      receivedItemIds: new Set()
+      receivedItemIds: new Set(),
+      authors: new Set()
     }
   }
 
@@ -142,6 +148,9 @@ class SyncEngine {
     if (s.notesFailed) parts.push(`${s.notesFailed} notes failed`)
     if (parts.length > 0) {
       this._log(`applied: ${parts.join(', ')} across ${s.itemsChanged}/${s.itemsProcessed} items`)
+      let who = [...(s.authors || [])].map(a => this._resolveDisplayName(a))
+      this.journal.event(`Received ${parts.join(', ')}${who.length ? ` from ${who.join(', ')}` : ''}`,
+        { kind: 'received', items: s.itemsChanged })
     } else {
       this._debug(`applied: nothing changed across ${s.itemsProcessed} items`)
     }
@@ -278,13 +287,16 @@ class SyncEngine {
 
     this._awarenessHandler = () => {
       this.peerCount = 0
+      let peers = []
       awareness.getStates().forEach((state, clientId) => {
         if (clientId === this.doc.clientID || !state.user) return
         this.peerCount++
+        if (state.user.name) peers.push(state.user.name)
         if (state.user.userId && state.user.name) {
           this.vault.setDisplayName(state.user.userId, state.user.name)
         }
       })
+      this.peers = peers.sort()
     }
     awareness.on('change', this._awarenessHandler)
   }
@@ -806,6 +818,9 @@ class SyncEngine {
   }
 
   _logConflict(type, itemIdentity, field, detail) {
+    if (type === 'metadata') {
+      this.journal.conflict({ identity: itemIdentity, field, ...detail, title: this._titleOf(itemIdentity) })
+    }
     this.logger.info({
       event: 'conflict', type, identity: itemIdentity.slice(0, 8), field, ...detail
     }, `[troparcel] Conflict: ${type} ${field} on ${itemIdentity.slice(0, 8)}`)
@@ -841,6 +856,79 @@ class SyncEngine {
       this.logger.info(`Purged ${result.purged} tombstone(s), ${result.uuidsPurged || 0} orphaned UUID(s), ` +
         `${result.aliasesPurged || 0} alias(es) across ${result.items} item(s)`)
     }, this.LOCAL_ORIGIN)
+  }
+
+  /** An item's title in this project, for messages; its identity's start otherwise. */
+  _titleOf(itemIdentity) {
+    let local = this.localIndex.get(itemIdentity)
+    let item = local && local.item
+    let title = item && (item['http://purl.org/dc/elements/1.1/title'] || {})
+    return (title && (title['@value'] || title.text)) || `item ${itemIdentity.slice(0, 8)}`
+  }
+
+  /**
+   * Room items no item here matches: in an overlay room, nearly always
+   * photo files that differ from the collaborator's (re-saved, converted).
+   */
+  unmatchedItems(limit = 10) {
+    if (!this.doc) return { count: 0, examples: [] }
+    let examples = []
+    let count = 0
+    for (let id of schema.getIdentities(this.doc)) {
+      if (this.localIndex.has(id)) continue
+      let alias = schema.resolveAlias(this.doc, id)
+      if (alias) continue
+      let meta = schema.getMetadata(this.doc, id)
+      let anyone = Object.values(meta)[0] || Object.values(schema.getNotes(this.doc, id))[0]
+      if (!anyone || anyone.author === this._stableUserId) continue
+      count++
+      if (examples.length < limit) {
+        let title = meta['http://purl.org/dc/elements/1.1/title']
+        examples.push({ title: (title && title.text) || null, from: this._resolveDisplayName(anyone.author) })
+      }
+    }
+    return { count, examples }
+  }
+
+  /**
+   * Settle a field two people changed: 'theirs' takes the room's value
+   * here; 'mine' sends this project's value to the room again.
+   */
+  async resolveConflict(itemIdentity, field, choice) {
+    let local = this.localIndex.get(itemIdentity)
+    let remote = schema.getMetadata(this.doc, itemIdentity)[field]
+    if (!local || !remote) throw new Error('that item or field is no longer in the room')
+    if (choice === 'theirs') {
+      await this.adapter.saveMetadata(local.localId, { [field]: { text: remote.text, type: remote.type || TEXT } })
+      this.vault.markFieldPushed(itemIdentity, field, this.vault._fastHash(`${remote.text || ''}|${remote.type || ''}`))
+    } else if (choice === 'mine') {
+      this.vault.pushedHashes.delete(itemIdentity)
+      this.vault.markFieldPushed(itemIdentity, field, this.vault._fastHash(`${remote.text || ''}|${remote.type || ''}`))
+      this._debounceSync(0)
+    } else {
+      throw new Error(`unknown choice ${choice}`)
+    }
+    this.vault.markDirty()
+    this.journal.resolve(itemIdentity, field)
+    this.journal.event(choice === 'theirs'
+      ? `Used ${this._resolveDisplayName(remote.author)}'s value for ${field.split(/[/#]/).pop()} on ${this._titleOf(itemIdentity)}`
+      : `Kept your value for ${field.split(/[/#]/).pop()} on ${this._titleOf(itemIdentity)}`)
+  }
+
+  /** Everything the dashboard shows. */
+  dashboardStatus() {
+    return {
+      ...this.getStatus(),
+      peers: this.peers,
+      user: this._stableUserId,
+      recent: this.journal.recent(),
+      problems: this.journal.problems(),
+      conflicts: this.journal.openConflicts(),
+      unmatched: this.unmatchedItems(),
+      photosWaiting: this.projectRoom ? this.projectRoom._waiting.size : 0,
+      projectRoom: !!this.projectRoom,
+      encrypted: !!this.roomKey
+    }
   }
 
   getStatus() {
