@@ -11,7 +11,7 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | 0 · Ground truth | Done | Passed | — |
 | 1 · Trustworthy overlay | Released as 6.0.0 | Soak test, to build | Build and run the soak test |
 | 2 · Stay compatible with Tropy | Done | Passed: CI against Tropy `main` | — |
-| 3 · Scale | Mostly done | Not yet measured right | Re-measure a 10,000-item start on the NVMe disk |
+| 3 · Scale | Done, one follow-up | Start: passed (1.5 s for 10,000 items). Memory: no baseline | Keep Troparcel's own markings out of an item's hash |
 | 4 · Shared project | Done (6.1) | Passed in real Tropy | — |
 | 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
 | 6 · Publishable rooms | IIIF export done (6.1) | Half: export passes; no viewer opened yet | Open a published folder in a IIIF viewer |
@@ -63,10 +63,11 @@ Done:
 - A backup over the size limit is split into parts; a 10,000-item first sync was the one sync with no backup.
 - The server runs y-websocket 2.1 and the client 3.1. `@y/websocket-server` needs Yjs 14 prereleases, so it waits for Yjs 14.
 
-Remaining:
+**Exit test, measured 2026-10-05 on the NVMe disk:** a 10,000-item project starts in **1.5 s**, from Tropy opening the project to Troparcel's first full cycle over all 10,000 items (target: 5 s). A first sync of 10,000 notes took 380 s (26 notes/s). With Troparcel running, the restarted Tropy idles at 824 MB; there is no figure yet for Tropy alone, so the memory half is open.
 
-- Measure the exit test again with the start-up fixes, off the busy disk (`E2E_DIR`).
-- Keeping the room on the client's disk, so a start exchanges only the difference: build it only if that measurement needs it.
+Keeping the room on the client's disk is not needed for that start time, so it is not built.
+
+Follow-up: the first cycle after a restart can push again items whose only change was Troparcel's own marking (`@name` tags, Contributors, the received list), 1,319 items in the measurement. Nothing of it reaches the room, but the cycle spends time on it. Those markings should not count in an item's hash.
 
 **Exit test:** a 10,000-item project starts in under 5 s, and memory grows with the items in use.
 

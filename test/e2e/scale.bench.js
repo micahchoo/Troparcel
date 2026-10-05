@@ -136,7 +136,9 @@ async function main() {
         { timeout: 600000, every: 1000 })
       console.log(`start with ${N} items: ${startSeconds(bob).toFixed(1)} s (project opened → first full cycle)`)
       await sleep(15000)
+      // Tropy writes several log files: order the lines by time, not file.
       let session = bob.log().split('\n').map(l => { try { return JSON.parse(l) } catch { return {} } })
+        .filter(j => j.time).sort((a, b) => a.time - b.time)
       let last = session.map(j => j.msg || '').filter(Boolean)
       let from = last.map(m => m.startsWith('Troparcel —')).lastIndexOf(true)
       let mine = last.slice(from)
