@@ -53,7 +53,7 @@ async function main() {
     await run.startServer()
     let connection = `troparcel://ws/${run.serverUrl.replace('ws://', '')}/${run.room}`
     let tropys = ['alice', 'bob', 'carol'].map(name => run.tropy(name, {
-      connection, userId: name, syncDeletions: true,
+      connection, userId: name, syncDeletions: true, debug: true,
       localDebounce: 300, remoteDebounce: 200, safetyNetInterval: 10, dataDir: run.dir
     }))
     let files = Array.from({ length: PHOTOS }, (_, i) => run.photo(1000 + i))
@@ -131,7 +131,8 @@ async function main() {
           ledger.transcriptions.set(`${c}|${text}`, true)
         } else {
           let victim = own.splice(rand(own.length), 1)[0]
-          peer.write((s, me, seq) => s.removeNote(peer.doc, identity, victim.uuid, me, seq))
+          let at = SyntheticPeer.identityOf([victim.checksum]) // the note's own item
+          peer.write((s, me, seq) => s.removeNote(peer.doc, at, victim.uuid, me, seq))
           ledger.notes.get(`${victim.checksum}|${victim.text}`).deleted = true
         }
       }

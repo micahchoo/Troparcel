@@ -334,12 +334,15 @@ module.exports = {
   },
 
   /**
-   * Remove stale CRDT note/selectionNote entries authored by this user
-   * that are no longer in the current local note set.
-   * Uses Y.Map.delete() for permanent removal (not tombstoning).
+   * Retract this member's room notes that are no longer in the project:
+   * deleted after a restart (previousSnapshot is in memory only, so
+   * pushDeletions does not know them), or pushed under a key the vault lost
+   * before it was saved.
    *
-   * Entries that are in previousSnapshot.noteKeys are left for pushDeletions
-   * to tombstone — Y.Map.delete() would prevent tombstone creation.
+   * Always a tombstone, never Y.Map.delete(). The other members keep their
+   * copy of a note whatever happens to its room entry, and only a tombstone
+   * tells them it is gone. Removing the entry outright left the note with
+   * them for ever (found by the soak test).
    */
   _cleanupStaleNotes(itemIdentity, userId, pushedNoteKeys, pushedSelNoteKeys) {
     // Only clean up stale entries when deletion propagation is enabled.
@@ -348,6 +351,7 @@ module.exports = {
     let prev = this.previousSnapshot.get(itemIdentity)
     let prevNoteKeys = prev && prev.noteKeys ? prev.noteKeys : null
     let prevSelNoteKeys = prev && prev.selectionNoteKeys ? prev.selectionNoteKeys : null
+    let pushSeq = this.vault.pushSeq || 0
 
     let allNotes = schema.getNotes(this.doc, itemIdentity)
     let removed = 0
@@ -359,7 +363,7 @@ module.exports = {
       // Leave for pushDeletions to tombstone
       if (prevNoteKeys && prevNoteKeys.has(key)) continue
 
-      schema.deleteNoteEntry(this.doc, itemIdentity, key)
+      schema.removeNote(this.doc, itemIdentity, key, userId, pushSeq)
       removed++
     }
 
@@ -370,12 +374,13 @@ module.exports = {
       if (pushedSelNoteKeys.has(key)) continue
       if (prevSelNoteKeys && prevSelNoteKeys.has(key)) continue
 
-      schema.deleteSelectionNoteEntry(this.doc, itemIdentity, key)
+      let [selKey, noteKey] = key.split(':')
+      schema.removeSelectionNote(this.doc, itemIdentity, selKey, noteKey, userId, pushSeq)
       removed++
     }
 
     if (removed > 0) {
-      this._log(`cleanupStaleNotes: removed ${removed} stale entry(s) for ${itemIdentity.slice(0, 8)}`)
+      this._log(`retracted ${removed} note(s) no longer in this project on ${itemIdentity.slice(0, 8)}`)
     }
   },
 

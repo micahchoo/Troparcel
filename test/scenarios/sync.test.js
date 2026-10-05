@@ -477,3 +477,20 @@ test('attribution: a collaborator is credited only for what changed this project
   assert.ok(!tagsOf(bob, 1).includes('@alice'), 'alice changed nothing on item 1 for bob')
   assert.ok(tagsOf(bob, 2).includes('@alice'), 'her note on item 2 is credited')
 })
+
+test('a note deleted after a restart is retracted for the others, not silently dropped (found by the soak test)', async (t) => {
+  let { alice, bob } = await pair(t, { syncDeletions: true })
+  let { id } = await alice.engine.adapter.createNote({ photo: 101, html: '<p>soon gone</p>' })
+  await cycle(alice, bob)
+  assert.ok(Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('soon gone')))
+
+  alice.engine.previousSnapshot.clear() // what a restart leaves: no memory of the last push
+  await alice.engine.adapter.deleteNote(id)
+  await cycle(alice, bob)
+
+  let room = Object.values(schema.getNotes(alice.engine.doc, ITEM1)).find(n => (n.text || '').startsWith('soon gone'))
+  assert.ok(room, 'the room keeps an entry for the note')
+  assert.equal(room.deleted, true, 'as a tombstone, so every member learns of the deletion')
+  let bobs = Object.values(bob.tropy.state().notes).map(n => n.text).filter(t => t.startsWith('soon gone'))
+  assert.ok(bobs.every(t => t.includes('retracted by')), bobs.join(' | '))
+})
