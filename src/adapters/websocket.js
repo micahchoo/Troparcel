@@ -58,24 +58,32 @@ class WebSocketAdapter extends SyncAdapter {
       }
     )
 
-    // Forward connection lifecycle events
-    this.provider.on('status', (e) => {
+    // These run inside y-websocket's and ws's own event dispatch, before
+    // y-websocket schedules its next attempt. A throw escaping one of them
+    // stops reconnection for good, silently (soak run 2, 2026-10-05), so
+    // none of them may throw.
+    let guard = (fn) => (...args) => {
+      try { fn(...args) } catch (err) {
+        try { this.logger.error(`[troparcel] while reporting the connection: ${err.message}`) } catch {}
+      }
+    }
+    this.provider.on('status', guard((e) => {
       this.emit('status', e)
-    })
-    this.provider.on('connection-error', (e) => {
+    }))
+    this.provider.on('connection-error', guard((e) => {
       this.logger.warn(
         `[troparcel] connection error: ${e.message || String(e)} — ` +
         'check that the Troparcel server is running')
       this.emit('problem', { message: e.message || String(e) })
-    })
+    }))
     // y-websocket 3 closes with a null event when we destroy the provider
-    this.provider.on('connection-close', (e) => {
+    this.provider.on('connection-close', guard((e) => {
       if (e && e.code !== 1000) {
         this.logger.info(
           `[troparcel] connection closed (code: ${e.code}` +
           `${e.reason ? ', ' + e.reason : ''}), reconnecting...`)
       }
-    })
+    }))
 
     // Wait for initial connection
     await this._waitForConnection()

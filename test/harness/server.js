@@ -39,19 +39,32 @@ async function until(fn, ms = 10000) {
 async function startServer(t, env = {}) {
   let port = await freePort()
   let dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'troparcel-compact-'))
-  let proc = spawn('node', [path.join(__dirname, '../../server/index.js')], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PERSISTENCE_DIR: dataDir, ...env },
-    stdio: 'ignore'
-  })
+  let proc
+  let spawnServer = async () => {
+    proc = spawn('node', [path.join(__dirname, '../../server/index.js')], {
+      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', PERSISTENCE_DIR: dataDir, ...env },
+      stdio: 'ignore'
+    })
+    await until(async () => {
+      try { return (await fetch(`http://127.0.0.1:${port}/health`)).ok } catch { return false }
+    }, 30000) // a loaded machine starts node slowly; startup is not what these tests measure
+  }
   process.on('exit', () => { if (proc.exitCode === null) proc.kill('SIGKILL') })
   t.after(() => {
     proc.kill('SIGTERM')
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
-  await until(async () => {
-    try { return (await fetch(`http://127.0.0.1:${port}/health`)).ok } catch { return false }
-  })
-  return { port, dataDir }
+  await spawnServer()
+
+  /** Kill the server as a crash would, then start it again on the same port and data. */
+  let outage = async (ms) => {
+    let dead = new Promise(r => proc.once('exit', r))
+    proc.kill('SIGKILL')
+    await dead
+    await sleep(ms)
+    await spawnServer()
+  }
+  return { port, dataDir, outage }
 }
 
 module.exports = { startServer, until, sleep }

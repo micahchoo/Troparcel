@@ -201,6 +201,7 @@ async function main() {
     let problems = []
     let check = async () => {
       problems = []
+      let unset = new Map() // a field no member set holds what Tropy gave it on import: all must agree
       for (let t of tropys) {
         let snap = await snapshot(t)
         for (let [c, want] of expected) {
@@ -215,8 +216,20 @@ async function main() {
             if (dupes.length) problems.push(`${t.name} ${c.slice(0, 8)} ${part} duplicated: ${dupes.join(', ')}`)
           }
           for (let [f, v] of Object.entries(want.fields)) {
-            if (got.fields[f] !== v) problems.push(`${t.name} ${c.slice(0, 8)} ${f.split('/').pop()}: ${got.fields[f]} (want ${v})`)
+            if (v === null) {
+              let k = `${c}|${f}`
+              if (!unset.has(k)) unset.set(k, new Map())
+              unset.get(k).set(t.name, got.fields[f])
+            } else if (got.fields[f] !== v) {
+              problems.push(`${t.name} ${c.slice(0, 8)} ${f.split('/').pop()}: ${got.fields[f]} (want ${v})`)
+            }
           }
+        }
+      }
+      for (let [k, byTropy] of unset) {
+        if (new Set(byTropy.values()).size > 1) {
+          let [c, f] = k.split('|')
+          problems.push(`${c.slice(0, 8)} ${f.split('/').pop()} differs: ${[...byTropy].map(([n, v]) => `${n}=${v}`).join(' ')}`)
         }
       }
       return problems.length === 0
