@@ -65,7 +65,7 @@ async function main() {
   await time('alice: cycle after one edit', () => alice.engine.syncOnce())
   await time('bob: apply of that one edit', () => bob.engine.applyPendingRemote())
 
-  let notes = Object.values(bob.tropy.state().notes).length
+  let notes = bob.tropy.notes().length
   let titled = bob.tropy.state().metadata[1]?.[TITLE]?.text
   console.log(`\nbob received ${notes} notes; item 1 title: ${titled}`)
 

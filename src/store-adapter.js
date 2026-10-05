@@ -253,8 +253,9 @@ class StoreAdapter {
     return this._getState().lists || {}
   }
 
+  /** A note, while its photo or selection still lists it. */
   getNote(id) {
-    return this._getState().notes[id] || null
+    return liveNote(this._getState(), id)
   }
 
   /**
@@ -354,16 +355,17 @@ class StoreAdapter {
    * An id is returned only if that note still exists.
    */
   findNoteByKey(key) {
-    let notes = this._getState().notes
+    let state = this._getState()
+    let notes = state.notes
     if (!this._noteIndex) {
       this._noteIndex = new Map()
       for (let [id, note] of Object.entries(notes)) {
         let k = footerKeyOfNote(note)
-        if (k) this._noteIndex.set(k, Number(id))
+        if (k && liveNote(state, id)) this._noteIndex.set(k, Number(id))
       }
     }
     let id = this._noteIndex.get(key)
-    return (id != null && notes[id]) ? id : null
+    return (id != null && liveNote(state, id)) ? id : null
   }
 
   // ----------------------------------------------------------------- Writes
@@ -469,7 +471,7 @@ class StoreAdapter {
   }
 
   deleteNote(id) {
-    return this._command(this._cmd(NOTE.DELETE, [id]), s => !s.notes[id] || s.notes[id].deleted)
+    return this._command(this._cmd(NOTE.DELETE, [id]), s => !liveNote(s, id))
   }
 
   /**
@@ -735,6 +737,19 @@ function childrenOf(node) {
   if (!c) return []
   if (Array.isArray(c)) return c
   return Array.isArray(c.content) ? c.content : []
+}
+
+/**
+ * A note in Tropy's state, or null once it is deleted. Tropy's note.delete
+ * takes the id out of the parent's `notes` and leaves the note itself in
+ * `state.notes`, unmarked (reducers/notes.js has no NOTE.DELETE case), so
+ * the parent's list is the only sign of a delete.
+ */
+function liveNote(state, id) {
+  let note = state.notes[id]
+  if (!note) return null
+  let parent = note.selection ? state.selections[note.selection] : state.photos[note.photo]
+  return parent && (parent.notes || []).includes(Number(id)) ? note : null
 }
 
 function isLoaded(state) {

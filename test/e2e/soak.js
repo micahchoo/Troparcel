@@ -105,7 +105,7 @@ async function main() {
           await tropy.api.createTag(`tag-${word()}`.slice(0, 7), [at.item])
             .then(tag => ledger.tags.set(`${c}|${tag.name}`, true))
         } else if (kind === 'transcription') {
-          await tropy.api.createTranscription(at.photo, text)
+          await tropy.driver.createTranscription(at.photo, text)
           ledger.transcriptions.set(`${c}|${text}`, true)
         } else {
           let victim = own.splice(rand(own.length), 1)[0]
@@ -180,8 +180,9 @@ async function main() {
         let photo = s.photos[item.photos[0]]
         if (!photo) continue
         let notes = (photo.notes || []).map(id => s.notes[id]).filter(Boolean)
-          .map(n => String(n.text || '').replace(FOOTER, '').trim())
-          .filter(tx => !/withdrawn by|retracted by/.test(tx))
+          .map(n => String(n.text || ''))
+          .filter(tx => !/withdrawn by|retracted by/.test(tx)) // before FOOTER strips the words
+          .map(tx => tx.replace(FOOTER, '').trim())
         let tags = (item.tags || []).map(id => s.tags[id] && s.tags[id].name).filter(n => n && !n.startsWith('@'))
         let meta = s.metadata[item.id] || {}
         let fields = Object.fromEntries(Object.values(FIELD).map(f => [f, meta[f] ? meta[f].text : null]))

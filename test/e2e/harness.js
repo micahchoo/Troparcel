@@ -127,7 +127,9 @@ class Api {
   createTag(name, items) { return this.post('/project/tags', { name, item: items }) }
   saveData(id, data) { return this.post(`/project/data/${id}`, data) }
   createNote(photo, html) { return this.post('/project/notes', { photo, html }) }
-  createTranscription(photo, text) { return this.post('/project/transcriptions', { photo, text }) }
+  // Tropy 1.17's POST /project/transcriptions reads act.transcriptions from
+  // actions/api, which has none, so it always answers 500. Use
+  // tropy.driver.createTranscription.
 
   /** Notes on an item's photos, as plain text. */
   async notesOf(item) {
@@ -327,6 +329,11 @@ class Driver {
   }
 
   dispatch(action) { return this.post('/dispatch', { action }) }
+
+  /** A transcription, made as Tropy's own panel makes one (see Api above). */
+  createTranscription(photo, text) {
+    return this.dispatch({ type: 'transcriptions/create', payload: { photo, text }, meta: { cmd: 'project' } })
+  }
 
   /** File > Export with plugin entry #plugin (see installPlugin). */
   exportItems(items, plugin) { return this.post('/export', { items, plugin }) }

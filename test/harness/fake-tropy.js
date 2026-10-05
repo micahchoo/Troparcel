@@ -87,13 +87,15 @@ function fakeTropy(initial = {}) {
 
     'note.delete'(ids) {
       need(Array.isArray(ids), 'note.delete: payload must be an array of ids')
-      let notes = { ...state.notes }
+      // As Tropy's commands/note/create.js#Delete: the note leaves its
+      // parent's list and the database, but stays in state.notes, unmarked
+      // (reducers/notes.js has no case for NOTE.DELETE).
+      let notes = state.notes
       let photos = { ...state.photos }
       let selections = { ...state.selections }
       for (let id of ids) {
         let n = notes[id]
         if (!n) continue
-        delete notes[id]
         if (n.photo && photos[n.photo]) {
           photos[n.photo] = { ...photos[n.photo], notes: photos[n.photo].notes.filter(x => x !== id) }
         }
@@ -301,6 +303,11 @@ function fakeTropy(initial = {}) {
 
   tropy.store = store
   tropy.state = () => state
+  /** The notes a person sees: those their photo or selection still lists. */
+  tropy.notes = () => Object.values(state.notes).filter(n => {
+    let parent = n.selection ? state.selections[n.selection] : state.photos[n.photo]
+    return parent && (parent.notes || []).includes(n.id)
+  })
   tropy.replace = (next) => set(next)
   return tropy
 }

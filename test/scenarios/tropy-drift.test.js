@@ -69,3 +69,10 @@ test('Tropy still runs a command only without meta.done', () => {
   assert.match(src, /!meta\.done && meta\.cmd === scope/,
     'store-adapter.js relies on this; see its header')
 })
+
+test('Tropy still deletes a note only from its parent, leaving it in state.notes (liveNote)', () => {
+  let reducer = fs.readFileSync(path.join(SRC, 'reducers', 'notes.js'), 'utf8')
+  assert.doesNotMatch(reducer, /NOTE\.DELETE/, 'store-adapter.js#liveNote reads a delete from the parent list only')
+  let cmd = fs.readFileSync(path.join(SRC, 'commands', 'note', 'create.js'), 'utf8')
+  assert.match(cmd, /put\(act\[type\]\.notes\.remove\(\{ id, notes \}\)\)/)
+})

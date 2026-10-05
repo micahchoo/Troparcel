@@ -169,6 +169,25 @@ test('collaborators see each other\'s work', { timeout: 600000 }, async (t) => {
     }
   })
 
+  // Tropy's note.delete leaves the note in state.notes; until 2026-10-05 the
+  // adapter waited for it to go, so every withdrawal "failed", was retried
+  // each cycle, and left the note deleted rather than struck through.
+  await t.test('a note its author withdraws is struck through, once', async () => {
+    carol.write((s, me, seq) => s.setNote(carol.doc, item, 'n_carol-w',
+      { text: 'A reading carol withdraws', html: '<p>A reading carol withdraws</p>', language: null, photo: checksum }, me, seq))
+    for (let [tropy, id] of [[alice, a1], [bob, b1]]) {
+      await until(`${tropy.name} to have carol's note`, async () =>
+        (await tropy.api.notesOf(id)).some(n => n.includes('A reading carol withdraws')))
+    }
+    carol.write((s, me, seq) => s.removeNote(carol.doc, item, 'n_carol-w', me, seq))
+    for (let [tropy, id] of [[alice, a1], [bob, b1]]) {
+      await until(`${tropy.name} to mark it withdrawn`, async () =>
+        (await tropy.api.notesOf(id)).some(n => n.includes('withdrawn by carol')))
+      let copies = (await tropy.api.notesOf(id)).filter(n => n.includes('A reading carol withdraws'))
+      assert.equal(copies.length, 1, copies.join(' | '))
+    }
+  })
+
   await t.test('items that received changes are in the received list', async () => {
     let lists = JSON.stringify(await bob.api.lists())
     assert.ok(lists.includes('Troparcel: received'), lists)

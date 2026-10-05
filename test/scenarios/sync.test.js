@@ -53,7 +53,7 @@ test('a tag, a title and a note reach the other project', async (t) => {
 
   assert.ok(tagsOf(bob, 1).includes('evidence'))
   assert.equal(bob.tropy.state().metadata[1][TITLE].text, 'Letter')
-  let notes = Object.values(bob.tropy.state().notes)
+  let notes = bob.tropy.notes()
   assert.equal(notes.filter(n => n.text.includes('Hello from alice')).length, 1)
   assert.deepEqual(bob.tropy.rejected, [], 'every command bob received was well-formed')
 })
@@ -133,7 +133,7 @@ test('a note shortened in place is applied (the old "contains" check refused it)
   let st = alice.tropy.state()
   alice.tropy.replace({ ...st, notes: { ...st.notes, [id]: { ...st.notes[id], text: 'Hello', html: '<p>Hello</p>' } } })
   await cycle(alice, bob)
-  let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
+  let texts = bob.tropy.notes().map(n => n.text)
   assert.equal(texts.length, 1, texts.join(' | '))
   assert.match(texts[0], /^Hello— alice$/)
 })
@@ -226,7 +226,7 @@ test('an oversized entry is skipped alone; the rest of its item still arrives', 
   await alice.engine.adapter.createNote({ photo: 101, html: '<p>small</p>' })
   await alice.engine.adapter.createTag({ name: 'evidence', items: [1] })
   await cycle(alice, bob)
-  let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
+  let texts = bob.tropy.notes().map(n => n.text)
   assert.ok(texts.some(tx => tx.startsWith('small')), texts.join(' | '))
   assert.ok(!texts.some(tx => tx.includes('xxxx')), 'the oversized note is not applied')
   assert.ok(tagsOf(bob, 1).includes('evidence'))
@@ -332,7 +332,7 @@ test('project room: a member with an empty project receives the item, its photos
     let p = carol.tropy.state().photos[id]
     assert.equal(crypto.createHash('md5').update(fs.readFileSync(p.path)).digest('hex'), p.checksum)
   }
-  let notes = Object.values(carol.tropy.state().notes).map(n => n.text)
+  let notes = carol.tropy.notes().map(n => n.text)
   assert.ok(notes.some(n => n.startsWith('Read the postmark')), notes.join(' | '))
   for (let id of items[0].photos) {
     let title = (carol.tropy.state().metadata[id] || {})['http://purl.org/dc/elements/1.1/title']
@@ -404,7 +404,7 @@ test('authorship: someone posing as alice cannot retract her note, and alice wri
   bob.engine.doc.getMap('notes').set(schema.entryKey(ITEM1, key),
     { ...note, deleted: true, deletedAt: Date.now(), sig: 'forged' })
   await cycle(bob)
-  let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
+  let texts = bob.tropy.notes().map(n => n.text)
   assert.ok(texts.some(tx => tx.startsWith('mine') && !tx.includes('retracted')), texts.join(' | '))
 
   await cycle(alice)
@@ -423,7 +423,7 @@ test('authorship: a note signed with the wrong key is ignored', async (t) => {
   bob.engine.doc.getMap('notes').set(key, { ...value, sig: impostor.sign('notes', key, value) })
   bob.engine.doc.getMap('items').set(ITEM1, { checksums: ['c1'] })
   await cycle(bob)
-  assert.ok(!Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('fake')))
+  assert.ok(!bob.tropy.notes().some(n => n.text.startsWith('fake')))
 })
 
 test('authorship: an unsigned entry by a name with no key (Troparcel 6.0) is still applied', async (t) => {
@@ -431,7 +431,7 @@ test('authorship: an unsigned entry by a name with no key (Troparcel 6.0) is sti
   alice.engine.doc.getMap('notes').set(schema.entryKey(ITEM1, 'n_old'),
     { uuid: 'n_old', text: 'from 6.0', html: '<p>from 6.0</p>', photo: 'c1', author: 'olga', pushSeq: 1 })
   await cycle(alice, bob)
-  assert.ok(Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('from 6.0')))
+  assert.ok(bob.tropy.notes().some(n => n.text.startsWith('from 6.0')))
 })
 
 // --- End-to-end encryption (ROADMAP Phase 5) ---
@@ -449,7 +449,7 @@ test('encrypted project room: everything arrives, and the room and its photos ho
 
   await cycle(alice, carol)
 
-  let notes = Object.values(carol.tropy.state().notes).map(n => n.text)
+  let notes = carol.tropy.notes().map(n => n.text)
   assert.ok(notes.some(n => n.startsWith('SECRET-NOTE')), notes.join(' | '))
   assert.ok(tagsOf(carol, Number(Object.keys(carol.tropy.state().items)[0])).includes('SECRET-TAG'))
   let room = Buffer.from(Y.encodeStateAsUpdate(alice.engine.doc)).toString('latin1')
@@ -468,7 +468,7 @@ test('a member without the room key reads nothing', async (t) => {
   seedItem(eve.tropy, { id: 1, photos: ['c1'] })
   await alice.engine.adapter.createNote({ photo: 101, html: '<p>private</p>' })
   await cycle(alice, eve)
-  assert.deepEqual(Object.values(eve.tropy.state().notes), [])
+  assert.deepEqual(eve.tropy.notes(), [])
 })
 
 test('attribution: a collaborator is credited only for what changed this project (seen on film)', async (t) => {
@@ -488,7 +488,7 @@ test('a note deleted after a restart is retracted for the others, not silently d
   let { alice, bob } = await pair(t, { syncDeletions: true })
   let { id } = await alice.engine.adapter.createNote({ photo: 101, html: '<p>soon gone</p>' })
   await cycle(alice, bob)
-  assert.ok(Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('soon gone')))
+  assert.ok(bob.tropy.notes().some(n => n.text.startsWith('soon gone')))
 
   alice.engine.previousSnapshot.clear() // what a restart leaves: no memory of the last push
   await alice.engine.adapter.deleteNote(id)
@@ -497,6 +497,6 @@ test('a note deleted after a restart is retracted for the others, not silently d
   let room = Object.values(schema.getNotes(alice.engine.doc, ITEM1)).find(n => (n.text || '').startsWith('soon gone'))
   assert.ok(room, 'the room keeps an entry for the note')
   assert.equal(room.deleted, true, 'as a tombstone, so every member learns of the deletion')
-  let bobs = Object.values(bob.tropy.state().notes).map(n => n.text).filter(t => t.startsWith('soon gone'))
+  let bobs = bob.tropy.notes().map(n => n.text).filter(t => t.startsWith('soon gone'))
   assert.ok(bobs.every(t => t.includes('withdrawn by')), bobs.join(' | '))
 })
