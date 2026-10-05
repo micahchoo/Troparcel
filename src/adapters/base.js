@@ -58,13 +58,18 @@ class SyncAdapter extends EventEmitter {
     this.removeAllListeners()
   }
 
-  /** Store a photo under its MD5. Storing one that is there does nothing. */
-  async putBlob(md5, bytes) {
+  /**
+   * Store a photo under its MD5. Storing one that is there does nothing.
+   * With `{ sealed: true }` (an encrypted room) the bytes are ciphertext
+   * and the name an HMAC, so no MD5 is checked here; room-key.js and
+   * project-room.js check the photo once opened.
+   */
+  async putBlob(name, bytes, opts) {
     throw new Error('putBlob() not implemented')
   }
 
   /** A photo's bytes, or null if the room does not have it. */
-  async getBlob(md5) {
+  async getBlob(name, opts) {
     throw new Error('getBlob() not implemented')
   }
 

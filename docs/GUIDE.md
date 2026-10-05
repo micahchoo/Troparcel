@@ -140,6 +140,25 @@ In a project room:
 
 The server stores photos up to 200 MB each (`MAX_BLOB_MB`). Anyone with the room token can download them, so give the token only to the group.
 
+## 4c. Private rooms: end-to-end encryption
+
+With a **room key** in the connection string, every member's Troparcel encrypts what it writes before it leaves the computer. The server, or the shared folder, then holds only ciphertext: no notes, titles, tag names, list names or photos. Make a key once, on any computer with the server's files:
+
+```bash
+node server/index.js --new-key
+```
+
+and add it to the connection string as `key=`:
+
+```
+troparcel://wss/tropy.example.edu/letters?token=7f3k9q2mz8x1p4vw&key=Xq3…(43 characters)
+```
+
+- Anyone with the string can read the room. Send it as you would a password.
+- Choose encryption when you start a room. A room already in use cannot be switched: entries written without the key are ignored.
+- If the key is lost, the room cannot be read. Each member's own project is unaffected.
+- The server can still see the room's shape: how many items and entries there are, the members' names (each is published with its signing key), who is connected, and which metadata fields are filled in, not what they say.
+
 ## 5. Contributor: join a group
 
 1. **Import the photos** the coordinator gave you into a Tropy project. Do not edit or convert them.
@@ -222,6 +241,16 @@ Troparcel writes to Tropy's log: **Help > Show Log Files**. Turn on **Debug logg
 | You see theirs, they do not see yours | Mode is `pull` or `review`, or two people share a name | Check Mode and Your name |
 | A deleted note or tag comes back | It is a collaborator's, and Share deletions is off | Expected: see [Deleting](#deleting) |
 | `room "…" was written by a newer Troparcel` | Someone in the group upgraded | Update Troparcel |
+
+## 8b. Publishing the group's work
+
+When the work is ready to show, publish it as IIIF, the format museum and library viewers read (Mirador, Universal Viewer, PosterForker):
+
+1. In **Preferences > Plugins**, add a second Troparcel entry, named for example "Publish". Set **Publish as IIIF to** to an empty folder, and **IIIF web address** to where that folder will be online, such as `https://example.edu/letters`.
+2. Select the items to publish, then choose **File > Export > Publish**.
+3. Upload the folder's contents to that address. Open `collection.json` in a IIIF viewer.
+
+Each item becomes a manifest and each photo a canvas. Notes and transcriptions become annotations; a note on a selection is placed on that region. A note a collaborator wrote keeps their name as its author, and Troparcel's footer is left out. Publishing copies the photos into the folder: publish only what you may share.
 
 ## 9. Maintenance and recovery
 

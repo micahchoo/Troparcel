@@ -146,12 +146,65 @@ function setSigner(doc, signer) {
   else _signers.delete(doc)
 }
 
+// doc → RoomKey (room-key.js), in an end-to-end encrypted room. Every value
+// is sealed as it is written and opened as it is read; nothing else in this
+// file, or outside it, sees the difference.
+const _roomKeys = new WeakMap()
+
+function setRoomKey(doc, roomKey) {
+  if (roomKey) _roomKeys.set(doc, roomKey)
+  else _roomKeys.delete(doc)
+}
+
+function _seal(doc, section, key, value) {
+  let rk = _roomKeys.get(doc)
+  return rk ? rk.seal(section, key, value) : value
+}
+
+/** The stored value, opened; undefined if absent or, when encrypted, unreadable. */
+function _open(doc, section, key, stored) {
+  if (stored === undefined) return undefined
+  let rk = _roomKeys.get(doc)
+  if (!rk) return stored
+  let value = rk.open(section, key, stored)
+  return value === null ? undefined : value
+}
+
+/** A tag's key: its lowercase name, or in an encrypted room an HMAC of it. */
+function _tagKey(doc, name) {
+  let rk = _roomKeys.get(doc)
+  return rk ? rk.tagKey(name) : String(name).toLowerCase()
+}
+
+/** A whole-map value (templates, the list tree), sealed per key. */
+function _mapSet(doc, mapName, key, value) {
+  doc.getMap(mapName).set(key, _seal(doc, mapName, key, value))
+}
+
+function _mapRead(doc, mapName) {
+  let out = {}
+  doc.getMap(mapName).forEach((stored, key) => {
+    let value = _open(doc, mapName, key, stored)
+    if (value !== undefined) out[key] = value
+  })
+  return out
+}
+
+function _getItem(doc, identity) {
+  return _open(doc, 'items', identity, _map(doc, 'items').get(identity))
+}
+
+function _putItem(doc, identity, value) {
+  _map(doc, 'items').set(identity, _seal(doc, 'items', identity, value))
+}
+
 function _set(doc, section, identity, rest, value) {
   let key = keyOf(identity, rest)
   let signer = _signers.get(doc)
   if (signer && value && typeof value === 'object' && value.author === signer.userId) {
     value = { ...value, sig: signer.sign(section, key, value) }
   }
+  value = _seal(doc, section, key, value)
   _ensureItem(doc, identity)
   if (KV_SECTIONS.includes(section)) _kvOf(doc, section).set(key, value)
   else _map(doc, section).set(key, value)
@@ -162,9 +215,9 @@ function _get(doc, section, identity, rest) {
   let key = keyOf(identity, rest)
   if (KV_SECTIONS.includes(section)) {
     let e = _kvOf(doc, section).map.get(key)
-    return e ? (e.val ?? e) : undefined
+    return _open(doc, section, key, e ? (e.val ?? e) : undefined)
   }
-  return _map(doc, section).get(key)
+  return _open(doc, section, key, _map(doc, section).get(key))
 }
 
 function _delete(doc, section, identity, rest) {
@@ -187,8 +240,7 @@ function _entries(doc, section, identity) {
 }
 
 function _ensureItem(doc, identity) {
-  let items = _map(doc, 'items')
-  if (!items.has(identity)) items.set(identity, { checksums: [] })
+  if (!_map(doc, 'items').has(identity)) _putItem(doc, identity, { checksums: [] })
 }
 
 const active = obj => Object.fromEntries(Object.entries(obj).filter(([, v]) => !v.deleted))
@@ -230,7 +282,7 @@ function getMetadata(doc, identity) {
 // --- Tags (keyed by lowercase name: Tropy compares tag names NOCASE) --------
 
 function setTag(doc, identity, tag, author, pushSeq) {
-  let key = tag.name.toLowerCase()
+  let key = _tagKey(doc, tag.name)
   let existing = _get(doc, 'tags', identity, key)
   if (!existing || existing.deleted || tag.color !== existing.color) {
     _set(doc, 'tags', identity, key, {
@@ -240,7 +292,7 @@ function setTag(doc, identity, tag, author, pushSeq) {
 }
 
 function removeTag(doc, identity, tagName, author, pushSeq) {
-  let key = tagName.toLowerCase()
+  let key = _tagKey(doc, tagName)
   let existing = _get(doc, 'tags', identity, key)
   if (existing && !existing.deleted) _set(doc, 'tags', identity, key, _tombstone(existing, author, pushSeq))
 }
@@ -482,11 +534,10 @@ function resolveAlias(doc, identity) {
 // --- Items ------------------------------------------------------------------------
 
 function setItemChecksums(doc, identity, checksums) {
-  let items = _map(doc, 'items')
-  let current = items.get(identity)
+  let current = _getItem(doc, identity)
   let sorted = [...checksums].sort()
   if (!current || JSON.stringify(current.checksums) !== JSON.stringify(sorted)) {
-    items.set(identity, { ...(current || {}), checksums: sorted })
+    _putItem(doc, identity, { ...(current || {}), checksums: sorted })
   }
 }
 
@@ -496,19 +547,18 @@ function setItemChecksums(doc, identity, checksums) {
  * dimensions…). The bytes are blobs on the transport, named by checksum.
  */
 function setItemRecord(doc, identity, { template, photos }) {
-  let items = _map(doc, 'items')
-  let current = items.get(identity) || {}
+  let current = _getItem(doc, identity) || {}
   let next = { ...current, template: template || null, photos }
-  if (JSON.stringify(current) !== JSON.stringify(next)) items.set(identity, next)
+  if (JSON.stringify(current) !== JSON.stringify(next)) _putItem(doc, identity, next)
 }
 
 /** { checksums, template?, photos? } for one item, or null. */
 function getItemRecord(doc, identity) {
-  return _map(doc, 'items').get(identity) || null
+  return _getItem(doc, identity) || null
 }
 
 function getItemChecksums(doc, identity) {
-  let item = _map(doc, 'items').get(identity)
+  let item = _getItem(doc, identity)
   return item ? (item.checksums || []) : []
 }
 
@@ -677,11 +727,11 @@ function getRoomConfig(doc) {
 // --- Templates (keyed by URI) ---------------------------------------------------------------
 
 function getTemplateSchema(doc) {
-  return doc.getMap('schema').toJSON()
+  return _mapRead(doc, 'schema')
 }
 
 function setTemplateSchema(doc, uri, templateDef, author, pushSeq) {
-  doc.getMap('schema').set(uri, {
+  _mapSet(doc, 'schema', uri, {
     uri,
     name: templateDef.name,
     type: templateDef.type,
@@ -705,17 +755,17 @@ function setTemplateSchema(doc, uri, templateDef, author, pushSeq) {
 }
 
 function removeTemplateSchema(doc, uri, author, pushSeq) {
-  doc.getMap('schema').set(uri, { uri, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() })
+  _mapSet(doc, 'schema', uri, { uri, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() })
 }
 
 // --- List tree (keyed by list UUID) -------------------------------------------------------------
 
 function getListHierarchy(doc) {
-  return doc.getMap('projectLists').toJSON()
+  return _mapRead(doc, 'projectLists')
 }
 
 function setListHierarchyEntry(doc, uuid, entry, author, pushSeq) {
-  doc.getMap('projectLists').set(uuid, {
+  _mapSet(doc, 'projectLists', uuid, {
     uuid,
     name: entry.name,
     parent: entry.parent || null,
@@ -726,7 +776,7 @@ function setListHierarchyEntry(doc, uuid, entry, author, pushSeq) {
 }
 
 function removeListHierarchyEntry(doc, uuid, author, pushSeq) {
-  doc.getMap('projectLists').set(uuid, { uuid, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() })
+  _mapSet(doc, 'projectLists', uuid, { uuid, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() })
 }
 
 // --- Observers ---------------------------------------------------------------------------------
@@ -842,8 +892,9 @@ module.exports = {
   // Snapshots
   getSnapshot,
   getItemSnapshot,
-  // Authorship
+  // Authorship and encryption
   setSigner,
+  setRoomKey,
   publishKey,
   getMembers,
   entryKey,

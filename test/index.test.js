@@ -3147,3 +3147,86 @@ describe('store-adapter: whenLoaded', () => {
     assert.equal(done, true)
   })
 })
+
+describe('end-to-end encryption (room key)', () => {
+  const Y = require('yjs')
+  const schema = require('../src/crdt-schema')
+  const { RoomKey } = require('../src/room-key')
+
+  let keyed = () => {
+    let doc = new Y.Doc()
+    let secret = RoomKey.generate()
+    schema.setRoomKey(doc, new RoomKey(secret))
+    return { doc, secret }
+  }
+  let plainText = doc => JSON.stringify(Y.encodeStateAsUpdate(doc).toString())
+
+  it('the room holds no annotation text, tag name, list name or template name', () => {
+    let { doc } = keyed()
+    schema.setNote(doc, 'item1', 'n_1', { text: 'SECRET-NOTE', html: '<p>SECRET-NOTE</p>' }, 'alice', 1)
+    schema.setTag(doc, 'item1', { name: 'SECRET-TAG' }, 'alice', 1)
+    schema.setMetadata(doc, 'item1', 'dc:title', { text: 'SECRET-TITLE' }, 'alice', 1)
+    schema.setListMembership(doc, 'item1', 'l_1', 'SECRET-LIST', 'alice', 1)
+    schema.setTemplateSchema(doc, 'https://x/t', { name: 'SECRET-TEMPLATE', fields: [] }, 'alice', 1)
+    schema.setListHierarchyEntry(doc, 'l_1', { name: 'SECRET-LIST' }, 'alice', 1)
+    schema.setItemRecord(doc, 'item1', { template: 'https://x/t', photos: [{ checksum: 'c1', filename: 'SECRET-FILE.png' }] })
+    let bytes = Buffer.from(Y.encodeStateAsUpdate(doc)).toString('latin1')
+    for (let word of ['SECRET-NOTE', 'SECRET-TAG', 'secret-tag', 'SECRET-TITLE', 'SECRET-LIST', 'SECRET-TEMPLATE', 'SECRET-FILE']) {
+      assert.ok(!bytes.includes(word), `${word} is readable`)
+    }
+  })
+
+  it('a member with the key reads everything back', () => {
+    let { doc, secret } = keyed()
+    schema.setNote(doc, 'item1', 'n_1', { text: 'hello' }, 'alice', 1)
+    schema.setTag(doc, 'item1', { name: 'Evidence' }, 'alice', 1)
+    schema.setTemplateSchema(doc, 'https://x/t', { name: 'Letter', fields: [] }, 'alice', 1)
+    let other = new Y.Doc()
+    schema.setRoomKey(other, new RoomKey(secret))
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(doc))
+    assert.equal(schema.getNotes(other, 'item1').n_1.text, 'hello')
+    assert.equal(schema.getTags(other, 'item1')[0].name, 'Evidence')
+    assert.equal(schema.getTemplateSchema(other)['https://x/t'].name, 'Letter')
+    assert.deepEqual(schema.getIdentities(other), ['item1'])
+  })
+
+  it('without the key, or with another, nothing reads; plain entries are not trusted', () => {
+    let { doc } = keyed()
+    schema.setNote(doc, 'item1', 'n_1', { text: 'hello' }, 'alice', 1)
+    let wrong = new Y.Doc()
+    schema.setRoomKey(wrong, new RoomKey(RoomKey.generate()))
+    Y.applyUpdate(wrong, Y.encodeStateAsUpdate(doc))
+    assert.deepEqual(schema.getNotes(wrong, 'item1'), {})
+    doc.getMap('notes').set('item1|n_injected', { uuid: 'n_injected', text: 'plain', author: 'mallory' })
+    assert.ok(!('n_injected' in schema.getNotes(doc, 'item1')))
+  })
+
+  it('tombstones keep deleted and deletedAt readable, so the server can purge them', () => {
+    let { doc } = keyed()
+    schema.setNote(doc, 'item1', 'n_1', { text: 'x' }, 'alice', 1)
+    schema.removeNote(doc, 'item1', 'n_1', 'alice', 2)
+    let raw = doc.getMap('notes').get('item1|n_1')
+    assert.equal(raw.deleted, true)
+    assert.ok(raw.deletedAt)
+    assert.ok(!('text' in raw))
+    assert.equal(require('../src/purge').purgeTombstones(doc).purged, 1)
+  })
+})
+
+describe('plugin: File > Export as IIIF', () => {
+  const TroparcelPlugin = require('../src/plugin')
+  const fs = require('fs'), os = require('os'), path = require('path')
+
+  it('an entry with a IIIF folder publishes instead of sharing', async () => {
+    let dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iiif-plugin-'))
+    let photo = path.join(dir, 'p.jpg')
+    fs.writeFileSync(photo, 'jpeg')
+    let logs = []
+    let logger = { info: m => logs.push(m), warn: m => logs.push(m), error: m => logs.push(m), debug() {} }
+    let plugin = new TroparcelPlugin({ autoSync: false, iiifFolder: path.join(dir, 'site'), iiifBaseUrl: 'https://ex.edu/x' },
+      { logger, window: {} })
+    await plugin.export({ '@graph': [{ '@type': 'Item', title: 'T', photo: [{ checksum: 'c1', path: photo, filename: 'p.jpg', mimetype: 'image/jpeg' }] }] })
+    assert.ok(fs.existsSync(path.join(dir, 'site', 'collection.json')), logs.join(' | '))
+    assert.equal(plugin.engine, null, 'no room was joined')
+  })
+})

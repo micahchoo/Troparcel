@@ -13,8 +13,8 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | 2 · Upstream track | Proposal drafted, not sent |
 | 3 · Scale | In progress |
 | 4 · Shared project | Done: exit test passes in real Tropy |
-| 5 · Verifiable authorship, private rooms | In progress |
-| 6 · Publishable rooms | Not started |
+| 5 · Verifiable authorship, private rooms | Built; real-Tropy test pending |
+| 6 · Publishable rooms | IIIF export built; viewer check open |
 
 ## Phase 0 · Ground truth — done
 
@@ -85,6 +85,8 @@ Built as `src/project-room.js`: a connection string ending in `photos=1` makes a
 
 **Exit test:** a peer that claims another person's name cannot retract that person's notes, and the server's database holds no plaintext.
 
+Built as `src/authorship.js` (signatures, trust on first use) and `src/room-key.js` (AES-256-GCM per value; tag keys and photo names are HMACs). Encryption works inside the values, not on Yjs updates: the y-websocket server must read updates, and the server's tombstone purge still needs `deleted`/`deletedAt`.
+
 ## Phase 6 · Publishable rooms
 
 - Export a room as IIIF manifests with W3C Web Annotations: notes and selections become annotations on image regions (`#xywh=`), the format PosterForker reads.
@@ -92,3 +94,7 @@ Built as `src/project-room.js`: a connection string ending in `photos=1` makes a
 - Later, only if Tropy adds an editor hook: character-level co-editing of notes through y-prosemirror.
 
 **Exit test:** an exported room opens in a IIIF viewer with every note on its region.
+
+Built: `src/iiif.js` turns Tropy's own export JSON-LD into Presentation 3 manifests with web annotations (`#xywh=` regions); a Troparcel entry with "Publish as IIIF to" set writes them on **File > Export**. Checked by `test/iiif.test.js` and the IIIF community parser (`@iiif/parser`). Not yet checked: opening a published folder in a viewer, and the export from inside real Tropy (the e2e harness cannot open Tropy's File menu).
+
+Not built: the `/monitor` web view of a room. A server cannot read an encrypted room, and for an open room a static IIIF export does the same job with less to maintain; it is dropped unless a group asks for it.

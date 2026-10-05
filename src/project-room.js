@@ -32,8 +32,9 @@ const PHOTO_FIELDS = [
 const IMPORT_BATCH = 50
 
 class ProjectRoom {
-  constructor({ doc, transport, adapter, vault, dir, logger, origin }) {
+  constructor({ doc, transport, adapter, vault, dir, logger, origin, roomKey = null }) {
     this.doc = doc
+    this.roomKey = roomKey // an encrypted room: photos are sealed (room-key.js)
     this.transport = transport
     this.adapter = adapter
     this.vault = vault
@@ -73,7 +74,7 @@ class ProjectRoom {
       if (this.vault.sharedPhotos.has(p.checksum)) continue
       try {
         if (p.protocol && p.protocol !== 'file') continue
-        await this.transport.putBlob(p.checksum, await fs.promises.readFile(p.path))
+        await this._upload(p.checksum, await fs.promises.readFile(p.path))
         this.vault.sharedPhotos.add(p.checksum)
         this.vault.markDirty()
         shared++
@@ -127,6 +128,22 @@ class ProjectRoom {
     return imported
   }
 
+  async _upload(checksum, bytes) {
+    if (!this.roomKey) return this.transport.putBlob(checksum, bytes)
+    return this.transport.putBlob(this.roomKey.blobName(checksum), this.roomKey.sealBlob(bytes), { sealed: true })
+  }
+
+  /** A photo's plain bytes, or null. In an encrypted room, opened and checked. */
+  async _fetch(checksum) {
+    if (!this.roomKey) return this.transport.getBlob(checksum)
+    let sealed = await this.transport.getBlob(this.roomKey.blobName(checksum), { sealed: true })
+    if (!sealed) return null
+    let bytes = this.roomKey.openBlob(sealed)
+    let md5 = require('crypto').createHash('md5').update(bytes).digest('hex')
+    if (md5 !== checksum) throw new Error(`photo ${checksum} opened to other bytes (${md5})`)
+    return bytes
+  }
+
   /** Local paths of the photos, downloading those not here; null if any is missing. */
   async _download(photos) {
     let files = []
@@ -134,7 +151,7 @@ class ProjectRoom {
       let file = path.join(this.dir, p.checksum + extension(p))
       if (!fs.existsSync(file)) {
         let bytes
-        try { bytes = await this.transport.getBlob(p.checksum) } catch (err) {
+        try { bytes = await this._fetch(p.checksum) } catch (err) {
           this.logger.warn(`[troparcel] could not download photo ${p.checksum}: ${err.message}`)
           return null
         }

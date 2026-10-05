@@ -23,8 +23,8 @@ const { SyncAdapter, checkBlob } = require('./base')
  */
 class FileAdapter extends SyncAdapter {
   /** Photos live in `<syncDir>/<room>/blobs/<md5>`. */
-  async putBlob(md5, bytes) {
-    checkBlob(md5, bytes)
+  async putBlob(md5, bytes, { sealed = false } = {}) {
+    if (!sealed) checkBlob(md5, bytes)
     let dir = path.join(this._dir, 'blobs')
     let file = path.join(dir, md5)
     if (fs.existsSync(file)) return
@@ -34,13 +34,14 @@ class FileAdapter extends SyncAdapter {
     await fs.promises.rename(tmp, file)
   }
 
-  async getBlob(md5) {
+  async getBlob(md5, { sealed = false } = {}) {
     let bytes
     try {
       bytes = await fs.promises.readFile(path.join(this._dir, 'blobs', md5))
     } catch {
       return null
     }
+    if (sealed) return bytes
     // A sync client may still be copying it in: treat a mismatch as absent.
     try { return checkBlob(md5, bytes) } catch { return null }
   }

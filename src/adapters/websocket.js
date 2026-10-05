@@ -26,17 +26,19 @@ class WebSocketAdapter extends SyncAdapter {
     return this.options.roomToken ? { Authorization: `Bearer ${this.options.roomToken}` } : {}
   }
 
-  async putBlob(md5, bytes) {
-    checkBlob(md5, bytes)
-    let res = await fetch(this._blobUrl(md5), { method: 'PUT', headers: this._headers(), body: bytes })
+  async putBlob(md5, bytes, { sealed = false } = {}) {
+    if (!sealed) checkBlob(md5, bytes)
+    let headers = { ...this._headers(), ...(sealed ? { 'X-Troparcel-Sealed': '1' } : {}) }
+    let res = await fetch(this._blobUrl(md5), { method: 'PUT', headers, body: bytes })
     if (!res.ok) throw new Error(`the server refused photo ${md5}: ${res.status} ${await res.text()}`)
   }
 
-  async getBlob(md5) {
+  async getBlob(md5, { sealed = false } = {}) {
     let res = await fetch(this._blobUrl(md5), { headers: this._headers() })
     if (res.status === 404) return null
     if (!res.ok) throw new Error(`the server refused photo ${md5}: ${res.status}`)
-    return checkBlob(md5, Buffer.from(await res.arrayBuffer()))
+    let bytes = Buffer.from(await res.arrayBuffer())
+    return sealed ? bytes : checkBlob(md5, bytes)
   }
 
   async connect() {

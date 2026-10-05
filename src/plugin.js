@@ -17,6 +17,7 @@
 
 const { SyncEngine } = require('./sync-engine')
 const { parseConnectionString } = require('./connection-string')
+const { writeIIIF } = require('./iiif')
 
 const VALID_SYNC_MODES = new Set(['auto', 'review', 'push', 'pull'])
 
@@ -99,6 +100,9 @@ class TroparcelPlugin {
       _roomExplicit: !!room,
       roomToken,
       sharePhotos: flag(options.sharePhotos, conn.sharePhotos === true),
+      roomKey: options.roomKey || conn.roomKey || null,
+      iiifFolder: options.iiifFolder || null,
+      iiifBaseUrl: options.iiifBaseUrl || null,
       userId: options.userId || '',
       // Where vaults, backups and downloaded photos go (tests, embedders).
       dataDir: options.dataDir || null,
@@ -200,6 +204,7 @@ class TroparcelPlugin {
    */
   async export(data) {
     if (this._isPrefsWindow()) return
+    if (this.options.iiifFolder) return this._publishIIIF(data)
     if (this.options.syncMode === 'pull') {
       this.context.logger.warn('Troparcel Export: mode is "pull" — nothing is shared')
       return
@@ -218,6 +223,25 @@ class TroparcelPlugin {
     } catch (err) {
       this.context.logger.error(`Troparcel Export: failed — ${err.message}`)
       this.notify('sync.error', { op: 'export', room: this.options.room, message: err.message })
+    }
+  }
+
+  /**
+   * File > Export with an entry whose "Publish as IIIF to" is set: the
+   * selected items, as Tropy exports them, become IIIF manifests with web
+   * annotations (src/iiif.js). Nothing is shared with the room.
+   */
+  async _publishIIIF(data) {
+    let log = this.context.logger
+    if (!this.options.iiifBaseUrl) {
+      log.warn('Troparcel IIIF: set "IIIF web address" to where the folder will be published')
+      return
+    }
+    try {
+      let out = await writeIIIF(data, this.options.iiifFolder, { baseUrl: this.options.iiifBaseUrl })
+      log.info(`Troparcel IIIF: wrote ${out.manifests.length} manifest(s) and ${out.images.length} image(s) to ${this.options.iiifFolder}`)
+    } catch (err) {
+      log.error(`Troparcel IIIF: failed — ${err.message}`)
     }
   }
 

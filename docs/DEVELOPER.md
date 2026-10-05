@@ -33,6 +33,8 @@ A cycle **applies** the room's changes to Tropy, then **pushes** Tropy's changes
 | `crdt-schema.js` | The room's layout (schema 5) and v4 migration |
 | `purge.js` | Tombstone purge; shared with the server |
 | `project-room.js` | Project rooms: record each item, upload its photos, import the items a member lacks |
+| `authorship.js` | ed25519 keys: sign what a member authors, verify what others wrote (trust on first use) |
+| `room-key.js` | End-to-end encryption: seal and open values and photos with the room key |
 | `local-only.js` | What Troparcel writes for the owner only, and never pushes |
 | `vault.js` | Per-user state on disk: id ↔ UUID maps, merge bases, what was applied |
 | `identity.js` | Item identity from photo checksums; UUIDs |

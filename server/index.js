@@ -39,6 +39,14 @@
  */
 
 const crypto = require('crypto')
+
+// `node index.js --new-key` prints a key for an end-to-end encrypted room
+// and exits. The server stores nothing: the key lives only in the
+// connection strings the coordinator hands out.
+if (process.argv.includes('--new-key')) {
+  console.log(crypto.randomBytes(32).toString('base64url'))
+  process.exit(0)
+}
 const fs = require('fs')
 const path = require('path')
 const http = require('http')
@@ -391,7 +399,10 @@ async function handleBlob(req, res, roomName, md5, url) {
       chunks.push(chunk)
     }
     let body = Buffer.concat(chunks)
-    if (crypto.createHash('md5').update(body).digest('hex') !== md5) {
+    // A sealed photo (an encrypted room) is ciphertext under an HMAC name:
+    // only its members can check it, and they do.
+    let sealed = req.headers['x-troparcel-sealed'] === '1'
+    if (!sealed && crypto.createHash('md5').update(body).digest('hex') !== md5) {
       res.writeHead(400)
       return res.end('the body\'s MD5 is not its name')
     }

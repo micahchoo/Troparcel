@@ -86,6 +86,10 @@ In a **project room** (a connection string ending in `photos=1`), each photo fil
 
 Before applying anything, Troparcel saves a JSON copy of each item it is about to change to `~/.troparcel/backups/<room>/`.
 
+## Publish as IIIF
+
+Troparcel can also publish items for the web, as [IIIF](https://iiif.io) manifests: each photo a canvas, each note and transcription a web annotation, a note on a selection placed on its region. Add a second Troparcel entry in **Preferences > Plugins**, set **Publish as IIIF to** (a folder) and **IIIF web address** (where you will put that folder online), then select items and choose **File > Export** with that entry. Upload the folder; any IIIF viewer opens `collection.json`.
+
 ## Options
 
 | Option | Default | What it does |
@@ -96,6 +100,7 @@ Before applying anything, Troparcel saves a JSON copy of each item it is about t
 | Share deletions | off | A note you delete is struck through for others (only its author can retract it); a tag or list membership you remove is removed for others. A selection or transcription you delete is deleted for others |
 | Share lists | off | Share your list tree and list membership |
 | Share photo and selection metadata | off | Share metadata on photos and selections, not only on items |
+| Publish as IIIF to, IIIF web address | | Make this entry publish IIIF on File > Export (see above) |
 | Debug logging | off | Detailed messages in Tropy's log (**Help > Show Log Files**) |
 
 ## When people edit the same thing
@@ -112,8 +117,10 @@ Before applying anything, Troparcel saves a JSON copy of each item it is about t
 ## Security
 
 - A **room token** in the connection string keeps other people out of a room.
+- **Signed authorship.** Each member signs what they write with a key made on their computer. Nobody can retract your notes or write in your name, even with the room token.
+- **End-to-end encryption**, optional: a connection string with `key=…` encrypts the room, its photos included, so the server stores only ciphertext. Make a key with `node server/index.js --new-key`.
 - Notes from others are **sanitised** before they reach Tropy: only the formatting Tropy's editor supports gets through.
-- The server does **not** encrypt. Over the internet, put it behind a TLS proxy (the guide shows Caddy) and use a `troparcel://wss/…` string.
+- The server itself does not use TLS. Over the internet, put it behind a TLS proxy (the guide shows Caddy) and use a `troparcel://wss/…` string.
 
 ## Server
 

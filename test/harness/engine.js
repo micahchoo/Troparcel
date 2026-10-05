@@ -69,8 +69,8 @@ class MemoryTransport extends EventEmitter {
     this.removeAllListeners()
   }
 
-  async putBlob(md5, bytes) {
-    this.hub.blobs.set(md5, checkBlob(md5, Buffer.from(bytes)))
+  async putBlob(md5, bytes, { sealed = false } = {}) {
+    this.hub.blobs.set(md5, sealed ? Buffer.from(bytes) : checkBlob(md5, Buffer.from(bytes)))
   }
 
   async getBlob(md5) {

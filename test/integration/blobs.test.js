@@ -27,7 +27,7 @@ function server(port, roomToken) {
 }
 
 test('server: a photo stored by one peer is read back by another', async (t) => {
-  let port = await startServer(t, { AUTH_TOKENS: `letters:${TOKEN}` })
+  let { port } = await startServer(t, { AUTH_TOKENS: `letters:${TOKEN}` })
   assert.equal(await server(port, TOKEN).getBlob(md5), null, 'absent before')
   await server(port, TOKEN).putBlob(md5, photo)
   await server(port, TOKEN).putBlob(md5, photo) // again: no error
@@ -35,14 +35,14 @@ test('server: a photo stored by one peer is read back by another', async (t) => 
 })
 
 test('server: the room token is required', async (t) => {
-  let port = await startServer(t, { AUTH_TOKENS: `letters:${TOKEN}` })
+  let { port } = await startServer(t, { AUTH_TOKENS: `letters:${TOKEN}` })
   await assert.rejects(server(port, 'wrong-token-wrong-token').putBlob(md5, photo), /401/)
   await server(port, TOKEN).putBlob(md5, photo)
   await assert.rejects(server(port, 'wrong-token-wrong-token').getBlob(md5), /401/)
 })
 
 test('server: a body whose MD5 is not its name is refused', async (t) => {
-  let port = await startServer(t)
+  let { port } = await startServer(t)
   let res = await fetch(`http://127.0.0.1:${port}/blobs/letters/${md5}`, { method: 'PUT', body: 'other bytes' })
   assert.equal(res.status, 400)
   assert.equal(await server(port).getBlob(md5), null)

@@ -88,6 +88,6 @@ In a project room (`photos=1`), the room also holds each item's record (template
 
 ## Known limits
 
-- **Authorship is claimed, not proven.** Anyone with the room token can write as any name. The room token is the trust boundary.
+- **Authorship is proven by signatures, trusted on first use.** Each member's key pair is made on their computer (`keys/` in Troparcel's data folder) and signs what they write; others pin each name's key the first time they see it and ignore anything that name did not sign. A member who first joins while someone has put a false key under a name pins that false key. A name with no key at all (Troparcel 6.0) is accepted unsigned.
 - **Same-name lists merge.** Two different lists called "Letters" in two projects become one.
 - **Selections match by exact region.** Two people drawing the same box are linked; nearly the same box gives two selections.

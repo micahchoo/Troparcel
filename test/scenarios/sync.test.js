@@ -14,6 +14,7 @@ const assert = require('node:assert/strict')
 const { Hub, makeEngine } = require('../harness/engine')
 const { fakeTropy, seedItem } = require('../harness/fake-tropy')
 const schema = require('../../src/crdt-schema')
+const Y = require('yjs')
 const identity = require('../../src/identity')
 
 const TITLE = 'http://purl.org/dc/elements/1.1/title'
@@ -425,4 +426,41 @@ test('authorship: an unsigned entry by a name with no key (Troparcel 6.0) is sti
     { uuid: 'n_old', text: 'from 6.0', html: '<p>from 6.0</p>', photo: 'c1', author: 'olga', pushSeq: 1 })
   await cycle(alice, bob)
   assert.ok(Object.values(bob.tropy.state().notes).some(n => n.text.startsWith('from 6.0')))
+})
+
+// --- End-to-end encryption (ROADMAP Phase 5) ---
+
+test('encrypted project room: everything arrives, and the room and its photos hold no plaintext', async (t) => {
+  let { RoomKey } = require('../../src/room-key')
+  let roomKey = RoomKey.generate()
+  let hub = new Hub()
+  let alice = await makeEngine({ userId: 'alice', hub, options: { sharePhotos: true, roomKey } })
+  let carol = await makeEngine({ userId: 'carol', hub, options: { sharePhotos: true, roomKey } })
+  t.after(() => Promise.all([alice.stop(), carol.stop()]))
+  let { photos, checksums } = seedRealItem(t, alice, 1, ['PHOTO-BYTES-IN-THE-CLEAR'])
+  await alice.engine.adapter.createNote({ photo: photos[0], html: '<p>SECRET-NOTE</p>' })
+  await alice.engine.adapter.createTag({ name: 'SECRET-TAG', items: [1] })
+
+  await cycle(alice, carol)
+
+  let notes = Object.values(carol.tropy.state().notes).map(n => n.text)
+  assert.ok(notes.some(n => n.startsWith('SECRET-NOTE')), notes.join(' | '))
+  assert.ok(tagsOf(carol, Number(Object.keys(carol.tropy.state().items)[0])).includes('SECRET-TAG'))
+  let room = Buffer.from(Y.encodeStateAsUpdate(alice.engine.doc)).toString('latin1')
+  for (let word of ['SECRET-NOTE', 'SECRET-TAG', 'secret-tag']) assert.ok(!room.includes(word), word)
+  assert.ok(!hub.blobs.has(checksums[0]), 'the photo is not stored under its checksum')
+  for (let bytes of hub.blobs.values()) assert.ok(!bytes.toString('latin1').includes('PHOTO-BYTES'))
+})
+
+test('a member without the room key reads nothing', async (t) => {
+  let { RoomKey } = require('../../src/room-key')
+  let hub = new Hub()
+  let alice = await makeEngine({ userId: 'alice', hub, options: { roomKey: RoomKey.generate() } })
+  let eve = await makeEngine({ userId: 'eve', hub, options: { roomKey: RoomKey.generate() } })
+  t.after(() => Promise.all([alice.stop(), eve.stop()]))
+  seedItem(alice.tropy, { id: 1, photos: ['c1'] })
+  seedItem(eve.tropy, { id: 1, photos: ['c1'] })
+  await alice.engine.adapter.createNote({ photo: 101, html: '<p>private</p>' })
+  await cycle(alice, eve)
+  assert.deepEqual(Object.values(eve.tropy.state().notes), [])
 })

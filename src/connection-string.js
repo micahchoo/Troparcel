@@ -10,6 +10,8 @@
  *
  * `photos=1` in the query makes a project room: photos travel with the
  * room, and items a member lacks are imported (option `sharePhotos`).
+ * `key=<43 characters>` encrypts the room end to end (option `roomKey`).
+ * Anyone with the string can read the room: share it like a password.
  *   ws://host:port, wss://host                   a server, bare URL
  *   /path/to/shared/folder                       a shared folder, bare path
  *
@@ -63,6 +65,7 @@ function _parseWebSocket(rest, protocolHint) {
   if (room) result.room = room
   if (params.token) result.roomToken = params.token
   if (params.photos === '1') result.sharePhotos = true
+  if (params.key) result.roomKey = params.key
 
   return result
 }
@@ -73,7 +76,9 @@ function _parseFile(rest) {
     transport: 'file',
     syncDir: '/' + pathPart.replace(/^\//, '')
   }
-  if (_parseQuery(query).photos === '1') result.sharePhotos = true
+  let params = _parseQuery(query)
+  if (params.photos === '1') result.sharePhotos = true
+  if (params.key) result.roomKey = params.key
   return result
 }
 
@@ -107,12 +112,16 @@ function generateConnectionString(opts) {
     let query = []
     if (opts.roomToken) query.push(`token=${encodeURIComponent(opts.roomToken)}`)
     if (opts.sharePhotos) query.push('photos=1')
+    if (opts.roomKey) query.push(`key=${opts.roomKey}`)
     return query.length ? `${str}?${query.join('&')}` : str
   }
 
   if (transport === 'file') {
     let dir = (opts.syncDir || '').replace(/^\//, '')
-    return `troparcel://file/${dir}${opts.sharePhotos ? '?photos=1' : ''}`
+    let query = []
+    if (opts.sharePhotos) query.push('photos=1')
+    if (opts.roomKey) query.push(`key=${opts.roomKey}`)
+    return `troparcel://file/${dir}${query.length ? `?${query.join('&')}` : ''}`
   }
 
   return ''

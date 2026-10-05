@@ -74,6 +74,20 @@
       "hint": "When on, metadata on photos and selections is shared too, not only item metadata."
     },
     {
+      "field": "iiifFolder",
+      "label": "Publish as IIIF to",
+      "type": "string",
+      "default": "",
+      "hint": "A folder. When set, File > Export with this entry writes IIIF manifests and images there instead of sharing. Add a second Troparcel entry for publishing."
+    },
+    {
+      "field": "iiifBaseUrl",
+      "label": "IIIF web address",
+      "type": "string",
+      "default": "",
+      "hint": "Where that folder will be published, e.g. https://example.edu/letters. IIIF links need it."
+    },
+    {
       "field": "debug",
       "label": "Debug logging",
       "type": "boolean",
@@ -99,6 +113,7 @@
     "yjs": "^13.6.0"
   },
   "devDependencies": {
+    "@iiif/parser": "^4.0.3",
     "esbuild": "^0.28.2"
   }
 }

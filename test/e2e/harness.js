@@ -310,7 +310,9 @@ class SyntheticPeer {
 
 class Run {
   constructor(label = 'run') {
-    this.dir = path.join(ROOT, '.e2e', `${label}-${Date.now()}`)
+    // E2E_DIR moves the runs, e.g. off a busy disk: each Tropy writes its
+    // database there, and a timing measures that disk as much as Troparcel.
+    this.dir = path.join(process.env.E2E_DIR || path.join(ROOT, '.e2e'), `${label}-${Date.now()}`)
     this.photosDir = path.join(this.dir, 'photos')
     this.instances = []
     this.server = null

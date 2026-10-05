@@ -4,7 +4,7 @@
  * A real Troparcel server in a child process, on a free port, with its data
  * in a temp folder. Stopped and removed when the test ends.
  *
- *   let port = await startServer(t, { AUTH_TOKENS: 'r:0123456789abcdef' })
+ *   let { port, dataDir } = await startServer(t, { AUTH_TOKENS: 'r:0123456789abcdef' })
  */
 
 const fs = require('node:fs')
@@ -51,7 +51,7 @@ async function startServer(t, env = {}) {
   await until(async () => {
     try { return (await fetch(`http://127.0.0.1:${port}/health`)).ok } catch { return false }
   })
-  return port
+  return { port, dataDir }
 }
 
 module.exports = { startServer, until, sleep }

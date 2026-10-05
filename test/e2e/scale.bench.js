@@ -9,6 +9,8 @@
  * writes one note per item into the room in one transaction. The bench
  * counts bob's saved notes (project.tpy) every 2 s until all N are there.
  *
+ * Run it off a busy disk with E2E_DIR (each Tropy writes its database there).
+ *
  * Read the rate column: if it falls as the count rises, each note costs
  * more than the last, and a first sync grows with N².
  *

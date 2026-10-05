@@ -12,6 +12,7 @@ const { RECEIVED_LIST } = require('./local-only')
 const { Assignments } = require('./assignments')
 const { ProjectRoom } = require('./project-room')
 const { Signer, Keyring } = require('./authorship')
+const { RoomKey } = require('./room-key')
 const path = require('path')
 
 /**
@@ -181,6 +182,9 @@ class SyncEngine {
 
     try {
       this.doc = new Y.Doc()
+      // An encrypted room: every value is sealed and opened with this key.
+      this.roomKey = this.options.roomKey ? new RoomKey(this.options.roomKey) : null
+      schema.setRoomKey(this.doc, this.roomKey)
       this.transport = createTransport(this.doc,
         { ...this.options, peerId: this._stableUserId }, this.logger)
       await this.transport.connect()
@@ -195,6 +199,7 @@ class SyncEngine {
           transport: this.transport,
           adapter: this.adapter,
           vault: this.vault,
+          roomKey: this.roomKey,
           dir: path.join(this.dataDir, 'photos', String(this.options.room).replace(/[^a-zA-Z0-9_.@-]/g, '_')),
           logger: this.logger,
           origin: this.LOCAL_ORIGIN

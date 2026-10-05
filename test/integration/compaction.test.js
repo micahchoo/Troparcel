@@ -34,7 +34,7 @@ const compact = (port, room) =>
   fetch(`http://127.0.0.1:${port}/api/rooms/${room}/compact`, { method: 'POST' }).then(r => r.json())
 
 test('compaction purges old tombstones from an open room, and peers see it', async (t) => {
-  let port = await startServer(t)
+  let { port } = await startServer(t)
   let alice = peer(port, 'open-room')
   t.after(() => alice.provider.destroy())
   await until(() => alice.provider.synced)
@@ -48,7 +48,7 @@ test('compaction purges old tombstones from an open room, and peers see it', asy
 })
 
 test('compaction purges old tombstones from a closed room, durably', async (t) => {
-  let port = await startServer(t)
+  let { port } = await startServer(t)
   let alice = peer(port, 'closed-room')
   await until(() => alice.provider.synced)
   writeOldTombstone(alice.doc)
