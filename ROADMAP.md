@@ -6,15 +6,17 @@ Troparcel is an **annotation overlay**: each person keeps their own photos, and 
 
 Each phase ends with an exit test you can run, not a list of features. Status as of 2026-10-05.
 
-| Phase | Status |
-|---|---|
-| 0 · Ground truth | Done |
-| 1 · Trustworthy overlay | Code done; the two-person trial is open |
-| 2 · Upstream track | Proposal drafted, not sent |
-| 3 · Scale | In progress |
-| 4 · Shared project | Done: exit test passes in real Tropy |
-| 5 · Verifiable authorship, private rooms | Built; real-Tropy test pending |
-| 6 · Publishable rooms | IIIF export built; viewer check open |
+| Phase | Status | Exit test | Next step |
+|---|---|---|---|
+| 0 · Ground truth | Done | Passed | — |
+| 1 · Trustworthy overlay | Released as 6.0.0 | Open: needs people | A week's trial on two computers |
+| 2 · Upstream track | Proposal drafted | Open: needs a reply | Post `docs/upstream-proposal.md` to Tropy |
+| 3 · Scale | Mostly done | Not yet measured right | Re-measure a 10,000-item start on the NVMe disk |
+| 4 · Shared project | Done (6.1) | Passed in real Tropy | — |
+| 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
+| 6 · Publishable rooms | IIIF export done (6.1) | Half: export passes; no viewer opened yet | Open a published folder in a IIIF viewer |
+
+6.1 is everything on `main` since 6.0.0; it is not released yet. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
 
 ## Phase 0 · Ground truth — done
 
@@ -22,7 +24,7 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 - `npm test` passes on a fresh clone, with no sibling folders.
 - `.github/workflows/test.yml` runs the tests against Tropy 1.17.3 and `main`.
 
-**Exit test:** a fresh clone passes `npm install && npm test`. Passed 2026-10-05. (CI has not yet run on GitHub.)
+**Exit test:** a fresh clone passes `npm install && npm test`. Passed 2026-10-05, locally and in CI on GitHub.
 
 ## Phase 1 · Trustworthy overlay
 
@@ -37,11 +39,9 @@ Done in 6.0.0:
 
 Also done: an oversized entry is skipped alone; a deleted selection or transcription reaches the others; only an entry's author can tombstone it in the room.
 
-Remaining:
+Released as [6.0.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.0.0) on 2026-10-05.
 
-- Release 6.0.0.
-
-**Exit test:** two researchers on two machines use it for a week: no duplicate notes, no dialogs, no lost work. Open.
+**Exit test:** two researchers on two machines use it for a week: no duplicate notes, no dialogs, no lost work. **Open** — it needs two people, not code.
 
 ## Phase 2 · Upstream track
 
@@ -53,17 +53,22 @@ Troparcel's largest risk is that it depends on Tropy internals: any release can 
 
 These change the platform, not a fork, so "no host modification" still holds.
 
-**Exit test:** a maintainer replies. This track is uncertain, so no other phase waits on it.
+**Exit test:** a maintainer replies. This track is uncertain, so no other phase waits on it. **Status:** drafted; not posted, because it speaks to Tropy's maintainers in the owner's name.
 
 ## Phase 3 · Scale
 
-Done: create effects read a parent's child list; notes are found by a footer-key index; unchanged items keep their object and hash; one transaction per push; tag and list assignments are one command per tag or list. A first sync in real Tropy is linear, about 50 ms per note, spent in Tropy's own command (`test/e2e/scale.bench.js`).
+Done:
+
+- Create effects read a parent's child list; notes are found by a footer-key index; unchanged items keep their object and hash; one transaction per push; tag and list assignments are one command per tag or list.
+- A first sync in real Tropy grows linearly: 18–19 notes/s at 2,000 and at 10,000 items, the time spent in Tropy's own command (`test/e2e/scale.bench.js`; measured while the disk ran a RAID check, so slower than normal).
+- Start-up, found by measuring in real Tropy: the first cycle ran before Tropy had loaded the project, and every start pushed every item again. Fixed: the vault keeps its push hashes, and Troparcel waits for the project to load, detected from Tropy's search result (`whenLoaded`) rather than from timing.
+- A backup over the size limit is split into parts; a 10,000-item first sync was the one sync with no backup.
+- The server runs y-websocket 2.1 and the client 3.1. `@y/websocket-server` needs Yjs 14 prereleases, so it waits for Yjs 14.
 
 Remaining:
 
-- Keep the room on the client's disk, so a start sends and receives only the difference.
-- Move the server from y-websocket 1.x to `@y/websocket-server`.
-- Measure the exit test in real Tropy.
+- Measure the exit test again with the start-up fixes, off the busy disk (`E2E_DIR`).
+- Keeping the room on the client's disk, so a start exchanges only the difference: build it only if that measurement needs it.
 
 **Exit test:** a 10,000-item project starts in under 5 s, and memory grows with the items in use.
 
@@ -87,6 +92,10 @@ Built as `src/project-room.js`: a connection string ending in `photos=1` makes a
 
 Built as `src/authorship.js` (signatures, trust on first use) and `src/room-key.js` (AES-256-GCM per value; tag keys and photo names are HMACs). Encryption works inside the values, not on Yjs updates: the y-websocket server must read updates, and the server's tombstone purge still needs `deleted`/`deletedAt`.
 
+**Exit test: passed.** A forged retraction is ignored, and the author's Troparcel writes the entry back (`test/scenarios/sync.test.js`). The server's stored files hold none of an encrypted room's text (`test/integration/e2ee-server.test.js`), and in real Tropy an encrypted project room delivers items, photos and notes to an empty project while the server stores no note text or photo in the clear (`test/e2e/project-room.e2e.js`). Every e2e run signs, so ed25519 works in Tropy's Electron.
+
+Known limit: trust on first use. A member who first joins while someone has put a false key under a name pins that false key.
+
 ## Phase 6 · Publishable rooms
 
 - Export a room as IIIF manifests with W3C Web Annotations: notes and selections become annotations on image regions (`#xywh=`), the format PosterForker reads.
@@ -95,6 +104,6 @@ Built as `src/authorship.js` (signatures, trust on first use) and `src/room-key.
 
 **Exit test:** an exported room opens in a IIIF viewer with every note on its region.
 
-Built: `src/iiif.js` turns Tropy's own export JSON-LD into Presentation 3 manifests with web annotations (`#xywh=` regions); a Troparcel entry with "Publish as IIIF to" set writes them on **File > Export**. Checked by `test/iiif.test.js` and the IIIF community parser (`@iiif/parser`). Not yet checked: opening a published folder in a viewer, and the export from inside real Tropy (the e2e harness cannot open Tropy's File menu).
+Built: `src/iiif.js` turns Tropy's own export JSON-LD into Presentation 3 manifests with web annotations (`#xywh=` regions); a Troparcel entry with "Publish as IIIF to" set writes them on **File > Export**. Checked by `test/iiif.test.js` and the IIIF community parser (`@iiif/parser`), and in real Tropy: `test/e2e/iiif.e2e.js` runs **File > Export** through the driver plugin, and the manifest from Tropy's real export has the note on its canvas and the image copied. Not yet checked: opening a published folder in a IIIF viewer.
 
 Not built: the `/monitor` web view of a room. A server cannot read an encrypted room, and for an open room a static IIIF export does the same job with less to maintain; it is dropped unless a group asks for it.

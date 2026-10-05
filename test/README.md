@@ -24,3 +24,19 @@ If Tropy surprises you, encode the surprise in `fake-tropy.js` and add the e2e c
 `npm run e2e` builds the plugin, starts a Troparcel server, and starts two Flatpak Tropy instances (alice and bob) on Xvfb, each with its own `--data` folder and a fresh project with the same generated photos. A third peer, carol, writes to the room directly, for what Tropy's HTTP API cannot create. The test drives Tropy through its HTTP API and checks every kind of data arrives once, is saved, and that Tropy logs no errors.
 
 Nothing touches your own Tropy: everything lives in `.e2e/<run>/`, which keeps the logs (`<name>/logs/`) and projects for inspection. Each run takes about a minute.
+
+### The timeline: what happened inside Tropy
+
+The HTTP API shows Tropy's state, not how it got there. So every e2e Tropy also loads `e2e/observer/`, a test-only plugin (entry #2; the driver is #1, extra entries start at #3). In the project window it writes `.e2e/<run>/<name>/timeline.jsonl` (`tropy.timelineFile`), one JSON object per line, each with `t` (ms since the plugin started) and `at` (epoch ms):
+
+- `action`: every action that reached the store — `type`, `seq`, and `cmd`, `rel`, `done`, `history`, `plugin` when set; the payload only as its JSON `size`; `error` and `message` for a failed action.
+- `activity`: a command (`state.activities`) starting, and ending with its `ms`.
+- `counts`: items, photos, selections, notes, transcriptions, tags, lists, whether `project.path` is set, `nav.mode`, `nav.query`, and the undo history (`history.past` / `future` lengths). At most one line per 100 ms, written only when something changed; when Tropy is killed inside that period the last change is missing.
+
+Read it with:
+
+```
+node test/e2e/timeline.js .e2e/<run>/alice/timeline.jsonl
+```
+
+which prints when the project opened, when loads ran, each command type with count, total and max duration, errored actions, and undo and nav changes. The observer reads actions with a saga that takes `'*'`, because sagas `put` past `store.dispatch`; it attaches when the window assigns its store, so the first few actions (`intl.load`, `keymap.load`) come before it.

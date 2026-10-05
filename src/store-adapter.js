@@ -41,29 +41,6 @@ class StoreAdapter {
     this.store = store
     this.logger = logger
     this._suppressChangeDetection = false
-    this._watchLoads()
-  }
-
-  /**
-   * From the moment the adapter exists (the project is open, before any
-   * load starts), note whether Tropy's project loads have been seen and
-   * whether they have finished. whenLoaded() reads this, so a slow
-   * connection cannot make it miss loads that ended while it connected.
-   */
-  _watchLoads() {
-    this._loadsSeen = false
-    this._loadsDone = false
-    if (!this.store || typeof this.store.subscribe !== 'function') return
-    let check = () => {
-      let loading = isLoading(this.store.getState())
-      if (loading) this._loadsSeen = true
-      else if (this._loadsSeen) {
-        this._loadsDone = true
-        this._unwatchLoads()
-      }
-    }
-    this._unwatchLoads = this.store.subscribe(check)
-    check()
   }
 
   /**
@@ -281,18 +258,20 @@ class StoreAdapter {
   }
 
   /**
-   * Resolves once Tropy has loaded the project into its state. Measured in
-   * Tropy 1.17 on a 10,000-item project: the project is open ~2 s before
-   * any load starts; then item.load, photo.load, note.load and the rest
-   * run as commands, all dispatched at once, and items appear before notes.
-   * A cycle in between reads half-loaded items and pushes them as changed.
+   * Resolves once Tropy has loaded the project into its state.
    *
-   * Done once a load has been seen and none is running. The subscription
-   * sees every load start, however short. After `fallback` ms with no load
-   * seen, it resolves anyway and warns: a Tropy that loads differently.
+   * On opening a project Tropy runs item.load, photo.load, note.load and
+   * the rest, then searches, and puts the result in `state.qr` (sagas/
+   * project.js, sagas/search.js). The search result's `items` is a frozen
+   * array; the initial `qr.items` is a plain []. So "qr.items is frozen and
+   * no load is running" means loaded, whenever we first look. Timing
+   * cannot: in a small project the loads end ~50 ms after it opens, before
+   * Troparcel has started, and in a 10,000-item one they start ~2 s after.
+   * test/scenarios/tropy-drift.test.js checks Tropy still works this way.
    */
   whenLoaded({ fallback = 15000 } = {}) {
-    if (this._loadsDone) return Promise.resolve()
+    let loaded = () => isLoaded(this._getState())
+    if (loaded()) return Promise.resolve()
     return new Promise(resolve => {
       let unsub = () => {}
       let finish = () => {
@@ -301,11 +280,10 @@ class StoreAdapter {
         resolve()
       }
       let timer = setTimeout(() => {
-        this.logger.warn(`[troparcel] saw Tropy load no project data in ${fallback / 1000} s; starting anyway`)
+        this.logger.warn(`[troparcel] Tropy did not finish loading the project in ${fallback / 1000} s; starting anyway`)
         finish()
       }, fallback)
-      unsub = this.store.subscribe(() => { if (this._loadsDone) finish() })
-      if (this._loadsDone) finish()
+      unsub = this.store.subscribe(() => { if (loaded()) finish() })
     })
   }
 
@@ -751,6 +729,11 @@ function childrenOf(node) {
   if (!c) return []
   if (Array.isArray(c)) return c
   return Array.isArray(c.content) ? c.content : []
+}
+
+function isLoaded(state) {
+  let items = state && state.qr && state.qr.items
+  return Array.isArray(items) && Object.isFrozen(items) && !isLoading(state)
 }
 
 function isLoading(state) {

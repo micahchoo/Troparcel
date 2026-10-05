@@ -12,9 +12,9 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const { Run, build, until } = require('./harness')
 
-test('a new member gets the whole project from one connection string', { timeout: 600000 }, async (t) => {
+for (let encrypted of [false, true]) test(`a new member gets the whole project from one connection string${encrypted ? ' (end-to-end encrypted)' : ''}`, { timeout: 600000 }, async (t) => {
   build()
-  let run = new Run('project')
+  let run = new Run(encrypted ? 'project-e2ee' : 'project')
   run.room = `project-${Date.now()}`
   t.after(async () => {
     for (let tropy of run.instances) {
@@ -25,7 +25,8 @@ test('a new member gets the whole project from one connection string', { timeout
   })
 
   await run.startServer()
-  let connection = `troparcel://ws/${run.serverUrl.replace('ws://', '')}/${run.room}?photos=1`
+  let key = encrypted ? `&key=${require('../../src/room-key').RoomKey.generate()}` : ''
+  let connection = `troparcel://ws/${run.serverUrl.replace('ws://', '')}/${run.room}?photos=1${key}`
   let options = userId => ({
     connection, userId, localDebounce: 300, remoteDebounce: 200,
     safetyNetInterval: 5, debug: true, dataDir: run.dir
@@ -59,6 +60,19 @@ test('a new member gets the whole project from one connection string', { timeout
     }
     return false
   }, { timeout: 60000, every: 1000 })
+
+  if (encrypted) {
+    await t.test('the server stored no note text and no photo in the clear', () => {
+      let walk = d => fs.readdirSync(d, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walk(require('node:path').join(d, e.name)) : [require('node:path').join(d, e.name)])
+      let photoBytes = fs.readFileSync(files[0])
+      for (let f of walk(require('node:path').join(run.dir, 'server-data'))) {
+        let bytes = fs.readFileSync(f)
+        assert.ok(!bytes.toString('latin1').includes('Read the postmark'), f)
+        assert.ok(bytes.indexOf(photoBytes) === -1, f)
+      }
+    })
+  }
 
   await t.test('Tropy logged no warnings or errors', () => {
     for (let tropy of [alice, dave]) assert.deepEqual(tropy.problems(), [], tropy.name)

@@ -1,0 +1,11 @@
+{
+  "name": "troparcel-test-observer",
+  "productName": "Troparcel test observer",
+  "version": "1.0.0",
+  "description": "Test only: writes a timeline of a Tropy project window (actions, commands, state counts) as JSON lines. Never ships.",
+  "main": "index.js",
+  "hooks": {},
+  "options": [
+    { "field": "file", "label": "Timeline file", "type": "text" }
+  ]
+}

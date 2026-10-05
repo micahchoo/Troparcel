@@ -3159,33 +3159,45 @@ describe('vault: what survives a restart', () => {
 describe('store-adapter: whenLoaded', () => {
   const { StoreAdapter } = require('../src/store-adapter')
   const { fakeTropy } = require('./harness/fake-tropy')
+  const opening = tropy => tropy.replace({ ...tropy.state(), qr: { items: [] } })
+  const searched = (tropy, ids = []) => tropy.replace({ ...tropy.state(), qr: { items: Object.freeze(ids) } })
 
   it('waits through the pause before Tropy starts loading (seen in real Tropy: about 2 s)', async () => {
     let tropy = fakeTropy()
+    opening(tropy)
     let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
     let done = false
     let wait = adapter.whenLoaded().then(() => { done = true })
-    await new Promise(r => setTimeout(r, 3500)) // longer than the old 3 s grace
+    await new Promise(r => setTimeout(r, 3500))
     assert.equal(done, false, 'an open project with nothing loaded yet is not loaded')
-    tropy.replace({ ...tropy.state(), activities: { 1: { id: 1, type: 'item.load' }, 2: { id: 2, type: 'note.load' } } })
     tropy.replace({ ...tropy.state(), activities: { 2: { id: 2, type: 'note.load' } }, items: { 1: { id: 1, photos: [] } } })
     await new Promise(r => setTimeout(r, 20))
     assert.equal(done, false, 'items are in, notes are not')
     tropy.replace({ ...tropy.state(), activities: {} })
+    searched(tropy, [1])
     await wait
   })
 
-  it('waits while Tropy is still loading the project', async () => {
+  it('resolves at once when the loads ended before Troparcel started (a small project: ~50 ms)', async () => {
     let tropy = fakeTropy()
-    tropy.replace({ ...tropy.state(), activities: { 7: { id: 7, type: 'item.load' } } })
+    searched(tropy) // an empty project, already loaded and searched
+    let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
+    let t0 = Date.now()
+    await adapter.whenLoaded()
+    assert.ok(Date.now() - t0 < 50)
+  })
+
+  it('does not take a search during a load for the end of loading', async () => {
+    let tropy = fakeTropy()
+    searched(tropy)
+    tropy.replace({ ...tropy.state(), activities: { 3: { id: 3, type: 'metadata.load' } } })
     let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
     let done = false
     let wait = adapter.whenLoaded().then(() => { done = true })
-    await new Promise(r => setTimeout(r, 50))
+    await new Promise(r => setTimeout(r, 20))
     assert.equal(done, false)
-    tropy.replace({ ...tropy.state(), activities: {}, items: { 1: { id: 1, photos: [] } } })
+    tropy.replace({ ...tropy.state(), activities: {} })
     await wait
-    assert.equal(done, true)
   })
 })
 
@@ -3272,16 +3284,3 @@ describe('plugin: File > Export as IIIF', () => {
   })
 })
 
-describe('store-adapter: loads that end before whenLoaded is asked', () => {
-  const { StoreAdapter } = require('../src/store-adapter')
-  const { fakeTropy } = require('./harness/fake-tropy')
-  it('are still seen (a slow connection must not cost the 15 s fallback)', async () => {
-    let tropy = fakeTropy()
-    let adapter = new StoreAdapter(tropy.store, { warn() {}, debug() {} })
-    tropy.replace({ ...tropy.state(), activities: { 1: { id: 1, type: 'item.load' } } })
-    tropy.replace({ ...tropy.state(), activities: {} })
-    let t0 = Date.now()
-    await adapter.whenLoaded()
-    assert.ok(Date.now() - t0 < 100)
-  })
-})

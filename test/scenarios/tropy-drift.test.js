@@ -58,6 +58,12 @@ test('the transcriptions slice still creates with "transcriptions/create"', () =
   assert.equal(MIRROR.TRANSCRIPTION.REMOVE, 'transcriptions/remove')
 })
 
+test('Tropy still marks a loaded project with a frozen search result (whenLoaded)', () => {
+  assert.match(fs.readFileSync(path.join(SRC, 'reducers', 'qr.js'), 'utf8'), /const init = \{ items: \[\] \}/)
+  assert.match(fs.readFileSync(path.join(SRC, 'models', 'item.js'), 'utf8'), /return \{ items: Object\.freeze\(items\) \}/)
+  assert.match(fs.readFileSync(path.join(SRC, 'sagas', 'search.js'), 'utf8'), /put\(act\.qr\.update\(result\)\)/)
+})
+
 test('Tropy still runs a command only without meta.done', () => {
   let src = fs.readFileSync(path.join(SRC, 'sagas', 'cmd.js'), 'utf8')
   assert.match(src, /!meta\.done && meta\.cmd === scope/,

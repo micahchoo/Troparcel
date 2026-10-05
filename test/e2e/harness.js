@@ -143,31 +143,53 @@ class Api {
 }
 
 class TropyInstance {
-  constructor(run, name, options) {
+  constructor(run, name, options, extraEntries = []) {
+    this.extraEntries = extraEntries
     this.run = run
     this.name = name
     this.dir = path.join(run.dir, name)
     this.dataDir = path.join(this.dir, 'data')
     this.logDir = path.join(this.dir, 'logs')
     this.project = path.join(this.dir, `${name}.tropy`)
+    // What happened inside the project window, one JSON object per line
+    // (test/e2e/observer); read it with `node test/e2e/timeline.js <file>`.
+    this.timelineFile = path.join(this.dir, 'timeline.jsonl')
     this.options = options
     this.proc = null
   }
 
+  /**
+   * Plugin entries, in order: Troparcel (#0), the test driver (#1), the
+   * test observer (#2, writes `timelineFile`), then any `extraEntries` given
+   * to run.tropy() — e.g. a second Troparcel entry that publishes IIIF (#3).
+   * File > Export names an entry by that number.
+   */
   installPlugin() {
     let dest = path.join(this.dataDir, 'plugins', 'troparcel')
     fs.mkdirSync(dest, { recursive: true })
     for (let f of ['index.js', 'package.json', 'icon.svg']) {
       fs.copyFileSync(path.join(ROOT, f), path.join(dest, f))
     }
+    for (let [from, name] of [['driver', 'troparcel-test-driver'], ['observer', 'troparcel-test-observer']]) {
+      let dir = path.join(this.dataDir, 'plugins', name)
+      fs.mkdirSync(dir, { recursive: true })
+      for (let f of ['index.js', 'package.json']) {
+        fs.copyFileSync(path.join(__dirname, from, f), path.join(dir, f))
+      }
+    }
     fs.writeFileSync(path.join(this.dataDir, 'plugins', 'config.json'), JSON.stringify([
-      { plugin: 'troparcel', name: 'Troparcel', options: this.options }
+      { plugin: 'troparcel', name: 'Troparcel', options: this.options },
+      { plugin: 'troparcel-test-driver', name: 'Test driver', options: { port: this.driverPort } },
+      { plugin: 'troparcel-test-observer', name: 'Test observer', options: { file: this.timelineFile } },
+      ...this.extraEntries
     ], null, 2))
   }
 
   async start() {
     fs.mkdirSync(this.logDir, { recursive: true })
     if (!fs.existsSync(this.project)) createProject(this.project, `Project ${this.name}`)
+    this.driverPort = await freePort()
+    this.driver = new Driver(this.driverPort)
     this.installPlugin()
     this.port = await freePort()
     this.api = new Api(this.port)
@@ -276,6 +298,32 @@ class TropyInstance {
  * Tropy's HTTP API cannot create (selections, transcriptions on 1.17,
  * templates, lists), so every kind of entity is exercised end to end.
  */
+/** The test driver plugin in one Tropy (test/e2e/driver): its state, its commands. */
+class Driver {
+  constructor(port) {
+    this.base = `http://127.0.0.1:${port}`
+  }
+
+  async state(p = '') {
+    let res = await fetch(`${this.base}/state?path=${encodeURIComponent(p)}`)
+    if (!res.ok) throw new Error(`driver: ${res.status} ${await res.text()}`)
+    return res.json()
+  }
+
+  async post(route, body) {
+    let res = await fetch(this.base + route, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+    if (!res.ok) throw new Error(`driver ${route}: ${res.status} ${await res.text()}`)
+    return res.json()
+  }
+
+  dispatch(action) { return this.post('/dispatch', { action }) }
+
+  /** File > Export with plugin entry #plugin (see installPlugin). */
+  exportItems(items, plugin) { return this.post('/export', { items, plugin }) }
+}
+
 class SyntheticPeer {
   constructor(serverUrl, room, userId) {
     let Y = require('yjs')
@@ -345,8 +393,8 @@ class Run {
     return p
   }
 
-  tropy(name, options) {
-    let t = new TropyInstance(this, name, options)
+  tropy(name, options, extraEntries) {
+    let t = new TropyInstance(this, name, options, extraEntries)
     this.instances.push(t)
     return t
   }

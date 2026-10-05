@@ -41,6 +41,9 @@ function defaultState() {
     // Tropy always has its preset templates once the ontology has loaded.
     ontology: { template: { [GENERIC]: { id: GENERIC, name: 'Tropy Generic', fields: [] } } },
     activities: {},
+    // Tropy's search result: a frozen array. The initial qr.items is a
+    // plain [], and frozen means the project has loaded (whenLoaded).
+    qr: { items: Object.freeze([]) },
     nav: { items: [], photo: null, selection: null, note: null }
   }
 }
