@@ -1141,6 +1141,8 @@ describe('crdt-schema', () => {
       assert.equal(notes['note-key-1'].html, '<p>Hello</p>')
 
       schema.removeNote(doc, 'item1', 'note-key-1', 'bob')
+      assert.ok(!schema.getNotes(doc, 'item1')['note-key-1'].deleted, 'only the author may retract')
+      schema.removeNote(doc, 'item1', 'note-key-1', 'alice')
       notes = schema.getNotes(doc, 'item1')
       assert.ok(notes['note-key-1'].deleted)
     })
@@ -1158,6 +1160,8 @@ describe('crdt-schema', () => {
       assert.equal(sels['sel-key-1'].x, 10)
 
       schema.removeSelection(doc, 'item1', 'sel-key-1', 'bob')
+      assert.ok(!schema.getSelections(doc, 'item1')['sel-key-1'].deleted, 'only the author may delete')
+      schema.removeSelection(doc, 'item1', 'sel-key-1', 'alice')
       sels = schema.getSelections(doc, 'item1')
       assert.ok(sels['sel-key-1'].deleted)
     })
@@ -2245,13 +2249,13 @@ describe('Team 4: Multi-Peer CRDT Convergence (BLUE)', () => {
     assert.equal(activeNotes[noteUuid].deleted, undefined)
 
     // Remove the note (creates tombstone)
-    schema.removeNote(doc, identity, noteUuid, 'bob', 2)
+    schema.removeNote(doc, identity, noteUuid, 'alice', 2)
 
     // Verify note is now tombstoned
     let allNotes = schema.getNotes(doc, identity)
     assert.ok(allNotes[noteUuid].deleted, 'note should have deleted flag after removal')
     assert.ok(allNotes[noteUuid].deletedAt, 'note should have deletedAt timestamp')
-    assert.equal(allNotes[noteUuid].author, 'bob')
+    assert.equal(allNotes[noteUuid].author, 'alice')
 
     // Active notes should not include the tombstoned note
     let activeAfter = schema.getActiveNotes(doc, identity)
@@ -2749,7 +2753,7 @@ describe('Team 1: CRDT Poisoning (RED)', () => {
   })
 
   // 1.7: Tombstone with absurd deletedAt
-  it('handles tombstone with future deletedAt', () => {
+  it('a peer cannot tombstone another author\'s note', () => {
     let doc = new Y.Doc()
     schema.setSchemaVersion(doc)
     schema.setNote(doc, 'future-item', 'n_future', {
@@ -2757,7 +2761,8 @@ describe('Team 1: CRDT Poisoning (RED)', () => {
     }, 'alice', 1)
     schema.removeNote(doc, 'future-item', 'n_future', 'attacker', 2)
     let notes = schema.getNotes(doc, 'future-item')
-    assert.ok(notes['n_future'].deleted)
+    assert.ok(!notes['n_future'].deleted)
+    assert.equal(notes['n_future'].author, 'alice')
   })
 
   // 1.8: Missing/empty author

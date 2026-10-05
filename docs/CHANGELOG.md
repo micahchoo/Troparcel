@@ -23,6 +23,14 @@ cannot read the new layout.
   shortcut). Applied notes are now tracked by the exact remote content.
 - **Shared-folder sync lost writes.** Every peer wrote one shared file. Each
   peer now writes only its own file and reads the others'.
+- **Deleting a collaborator's entry erased it from the room.** With Share
+  deletions on, deleting someone else's note, selection or transcription on
+  your own computer wrote a tombstone over their entry, so anyone who joined
+  later never received it. Now only an entry's author can tombstone it.
+- **One oversized entry stopped its whole item.** Now that entry alone is
+  skipped.
+- **Deleted selections and transcriptions now reach the others.** A
+  selection the owner has written on is kept.
 - **Templates received from a room were never saved** (dispatched with
   `meta.done`, which skips Tropy's database command); gone after a restart.
 

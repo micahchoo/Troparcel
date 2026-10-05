@@ -112,6 +112,34 @@ function fakeTropy(initial = {}) {
       }
     },
 
+    'selection.delete'({ photo, selections }) {
+      need(state.photos[photo], `selection.delete: photo ${photo} not found`)
+      need(Array.isArray(selections), 'selection.delete: payload.selections must be an array')
+      // Tropy's selections reducer has no DELETE case: the selection stays
+      // in state.selections, and only its photo's list loses it.
+      let p = state.photos[photo]
+      return {
+        ...state,
+        photos: { ...state.photos, [photo]: { ...p, selections: (p.selections || []).filter(id => !selections.includes(id)) } }
+      }
+    },
+
+    'transcriptions/remove'(ids) {
+      need(Array.isArray(ids), 'transcriptions/remove: payload must be an array of ids')
+      let transcriptions = { ...state.transcriptions }
+      let s = { ...state, photos: { ...state.photos }, selections: { ...state.selections } }
+      for (let id of ids) {
+        let tr = transcriptions[id]
+        if (!tr) continue
+        delete transcriptions[id]
+        for (let owner of ['photos', 'selections']) {
+          let o = s[owner][tr.parent]
+          if (o) s[owner][tr.parent] = { ...o, transcriptions: (o.transcriptions || []).filter(x => x !== id) }
+        }
+      }
+      return { ...s, transcriptions }
+    },
+
     'metadata.save'({ ids, data }) {
       need(Array.isArray(ids), 'metadata.save: payload.ids must be an array')
       let metadata = { ...state.metadata }

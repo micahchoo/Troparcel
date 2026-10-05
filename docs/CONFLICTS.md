@@ -53,8 +53,8 @@ What it does not rule out: two people who change the same field before either sy
 | Tags | item\|lowercase name | Add wins over a concurrent remove | Removed for everyone, unless re-added |
 | Notes | item\|n_uuid | Each note is its author's; nobody else's edit reaches the room | Struck through for others; only the author can retract |
 | Selection notes | item\|s_uuid:n_uuid | As notes | As notes |
-| Selections | item\|s_uuid | Each is its author's; a region that matches a local one exactly is linked, not duplicated | Not applied yet |
-| Transcriptions | item\|t_uuid | A changed transcription arrives as a new version; nothing is deleted | Not applied yet |
+| Selections | item\|s_uuid | Each is its author's; a region that matches a local one exactly is linked, not duplicated | Deleted for others, unless they have written on it; only the author can delete |
+| Transcriptions | item\|t_uuid | A changed transcription arrives as a new version | Removed for others; only the author can remove |
 | List membership | item\|l_uuid, matched by list name | Add wins | Removed for everyone |
 | List tree | l_uuid | Matched by name; a same-name list is reused | Not applied |
 | Templates | template URI | Created if absent; an existing local template is never overwritten | Not applied |
@@ -67,7 +67,7 @@ If you edit a collaborator's note, Troparcel sees that (it remembers a hash of t
 
 ### Retraction
 
-With Share deletions on, deleting your own note writes a tombstone: `{ deleted: true, author, deletedAt }`. Others see the note struck through, with `retracted by <author>`. A tombstone written by anyone but the note's original author is ignored.
+With Share deletions on, deleting your own note writes a tombstone: `{ deleted: true, author, deletedAt }`. Others see the note struck through, with `retracted by <author>`. Deleting your own selection or transcription deletes it for the others too, but a selection someone has written on stays on their computer. Only an entry's author can tombstone it: the room refuses a tombstone from anyone else (`crdt-schema.js#_mayRetract`), so deleting a collaborator's entry on your own computer never erases it from the room.
 
 Tombstones are kept for `TOMBSTONE_MAX_DAYS` (default 30), then the server purges them. A peer offline longer than that can bring a retracted entry back.
 
@@ -77,7 +77,7 @@ Tombstones are kept for `TOMBSTONE_MAX_DAYS` (default 30), then the server purge
 
 ## Before anything is applied
 
-1. **Validation** (`backup.js`). If any note or transcription on an item is over 1 MB, or any metadata value over 64 KB, nothing on that item is applied and a warning is logged. (A high share of tombstones on an item is logged, not blocked.)
+1. **Validation** (`backup.js`). A note or transcription over 1 MB, or a metadata value over 64 KB, is not applied, and a warning is logged. The rest of its item is applied. (A high share of tombstones on an item is logged, not blocked.)
 2. **Sanitising** (`sanitize.js`). Note HTML keeps only the tags Tropy's editor has: paragraphs, blockquote, lists, bold, italic, links (http, https, mailto), sub- and superscript, underline and strikethrough as styled spans, line breaks, rules. Everything else is removed; its text stays.
 3. **Backup**. The items about to change are written to `~/.troparcel/backups/<room>/` as JSON.
 4. **No undo entries**. Tropy commands are sent without a history flag, so a collaborator's change is never in your undo history.
@@ -87,5 +87,3 @@ Tombstones are kept for `TOMBSTONE_MAX_DAYS` (default 30), then the server purge
 - **Authorship is claimed, not proven.** Anyone with the room token can write as any name. The room token is the trust boundary.
 - **Same-name lists merge.** Two different lists called "Letters" in two projects become one.
 - **Selections match by exact region.** Two people drawing the same box are linked; nearly the same box gives two selections.
-- **Retracted selections and transcriptions** are not applied yet.
-- **One oversized entry blocks its whole item.** Validation rejects the item, not the entry, so one member can stop an item syncing for everyone.

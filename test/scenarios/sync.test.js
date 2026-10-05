@@ -218,3 +218,65 @@ test('a project that does not look like Tropy is refused before anything is writ
   await assert.rejects(makeEngine({ userId: 'x', hub: new Hub(), tropy }), /does not look like/)
   assert.deepEqual(tropy.commands, [])
 })
+
+test('an oversized entry is skipped alone; the rest of its item still arrives', async (t) => {
+  let { alice, bob } = await pair(t, { maxNoteSize: 200 })
+  await alice.engine.adapter.createNote({ photo: 101, html: `<p>${'x'.repeat(500)}</p>` })
+  await alice.engine.adapter.createNote({ photo: 101, html: '<p>small</p>' })
+  await alice.engine.adapter.createTag({ name: 'evidence', items: [1] })
+  await cycle(alice, bob)
+  let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
+  assert.ok(texts.some(tx => tx.startsWith('small')), texts.join(' | '))
+  assert.ok(!texts.some(tx => tx.includes('xxxx')), 'the oversized note is not applied')
+  assert.ok(tagsOf(bob, 1).includes('evidence'))
+})
+
+/** Selections on photo 101 as Tropy shows them: the photo's own list. */
+const onlySelection = peer => [...(peer.tropy.state().photos[101].selections || [])]
+const onlyTranscriptions = peer => Object.keys(peer.tropy.state().transcriptions).map(Number)
+
+test('a selection its author deletes is deleted for the others', async (t) => {
+  let { alice, bob } = await pair(t)
+  let { id } = await alice.engine.adapter.createSelection({ photo: 101, x: 1, y: 2, width: 10, height: 10 })
+  await cycle(alice, bob)
+  assert.equal(onlySelection(bob).length, 1)
+  await alice.engine.adapter.deleteSelections(101, [id])
+  await cycle(alice, bob)
+  assert.deepEqual(onlySelection(bob), [])
+  assert.deepEqual(bob.tropy.rejected, [])
+})
+
+test('a deleted selection stays where the owner has written on it', async (t) => {
+  let { alice, bob } = await pair(t)
+  let { id } = await alice.engine.adapter.createSelection({ photo: 101, x: 1, y: 2, width: 10, height: 10 })
+  await cycle(alice, bob)
+  let [mine] = onlySelection(bob)
+  await bob.engine.adapter.createNote({ selection: mine, html: '<p>bob was here</p>' })
+  await alice.engine.adapter.deleteSelections(101, [id])
+  await cycle(alice, bob)
+  assert.deepEqual(onlySelection(bob), [mine])
+})
+
+test('a transcription its author deletes is removed for the others', async (t) => {
+  let { alice, bob } = await pair(t)
+  let { id } = await alice.engine.adapter.createTranscription({ photo: 101, text: 'Dear Sir' })
+  await cycle(alice, bob)
+  assert.equal(onlyTranscriptions(bob).length, 1)
+  await alice.engine.adapter.removeTranscriptions([id])
+  await cycle(alice, bob)
+  assert.deepEqual(onlyTranscriptions(bob), [])
+})
+
+test('deleting a collaborator\'s selection never erases it from the room', async (t) => {
+  let { alice, bob } = await pair(t)
+  await alice.engine.adapter.createSelection({ photo: 101, x: 1, y: 2, width: 10, height: 10 })
+  await cycle(alice, bob)
+  let [mine] = onlySelection(bob)
+  await bob.engine.adapter.deleteSelections(101, [mine])
+  await cycle(bob, alice)
+  let room = Object.values(schema.getSelections(alice.engine.doc,
+    identity.computeIdentity({ photo: [{ checksum: 'c1' }] })))
+  assert.equal(room.length, 1)
+  assert.ok(!room[0].deleted, 'alice\'s selection is still live in the room')
+  assert.equal(onlySelection(alice).length, 1)
+})

@@ -144,8 +144,14 @@ class BackupManager {
    * Validate inbound CRDT data before applying it locally.
    * Returns { valid: boolean, warnings: string[] }
    */
+  /**
+   * Check one item's room entries before apply. Returns `rejected`, the
+   * `section|key` of each entry over a size limit: apply skips those
+   * entries alone, so one oversized note cannot stop the rest of its item.
+   */
   validateInbound(itemIdentity, crdtItem, userId) {
     let warnings = []
+    let rejected = new Set()
 
     // Size guard: notes
     if (crdtItem.notes) {
@@ -153,6 +159,7 @@ class BackupManager {
         if (note.deleted) continue
         let size = (note.html || '').length + (note.text || '').length
         if (size > this.options.maxNoteSize) {
+          rejected.add(`notes|${key}`)
           warnings.push(`Note ${key} exceeds max size (${size} > ${this.options.maxNoteSize})`)
         }
       }
@@ -164,6 +171,7 @@ class BackupManager {
         if (note.deleted) continue
         let size = (note.html || '').length + (note.text || '').length
         if (size > this.options.maxNoteSize) {
+          rejected.add(`selectionNotes|${key}`)
           warnings.push(`Selection note ${key} exceeds max size (${size} > ${this.options.maxNoteSize})`)
         }
       }
@@ -175,6 +183,7 @@ class BackupManager {
         if (tx.deleted) continue
         let size = (tx.text || '').length + JSON.stringify(tx.data || '').length
         if (size > this.options.maxNoteSize) {
+          rejected.add(`transcriptions|${key}`)
           warnings.push(`Transcription ${key} exceeds max size (${size} > ${this.options.maxNoteSize})`)
         }
       }
@@ -185,6 +194,7 @@ class BackupManager {
       for (let [key, val] of Object.entries(crdtItem.metadata)) {
         let size = (val.text || '').length
         if (size > this.options.maxMetadataSize) {
+          rejected.add(`metadata|${key}`)
           warnings.push(`Metadata ${key} exceeds max size (${size} > ${this.options.maxMetadataSize})`)
         }
       }
@@ -217,7 +227,8 @@ class BackupManager {
 
     return {
       valid: warnings.length === 0,
-      warnings
+      warnings,
+      rejected
     }
   }
 

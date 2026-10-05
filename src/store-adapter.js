@@ -258,6 +258,26 @@ class StoreAdapter {
   }
 
   /** An item as Tropy holds it: { id, photos, tags, lists, template }. */
+  /** A transcription, or null once removed from its photo or selection. */
+  getTranscription(id) {
+    let s = this._getState()
+    let tr = s.transcriptions[id]
+    if (!tr) return null
+    let parent = s.photos[tr.parent] || s.selections[tr.parent]
+    return parent && (parent.transcriptions || []).includes(Number(id)) ? tr : null
+  }
+
+  /**
+   * A selection, or null once deleted. Tropy keeps a deleted selection in
+   * `state.selections`; only its photo's `selections` list loses it.
+   */
+  getSelection(id) {
+    let s = this._getState()
+    let sel = s.selections[id]
+    let photo = sel && s.photos[sel.photo]
+    return sel && photo && (photo.selections || []).includes(Number(id)) ? sel : null
+  }
+
   getItem(id) {
     return this._getState().items[id] || null
   }
@@ -460,6 +480,28 @@ class StoreAdapter {
    * Add a transcription. Tropy keeps a photo's transcriptions as versions,
    * newest active; a changed remote transcription arrives as a new version.
    */
+  /**
+   * Delete selections of one photo. Done when the photo's list no longer
+   * holds them: Tropy leaves a deleted selection in `state.selections`.
+   */
+  deleteSelections(photo, ids) {
+    let selections = ids.map(Number)
+    return this._command(this._cmd(SELECTION.DELETE, { photo, selections }), s =>
+      !selections.some(id => (s.photos[photo]?.selections || []).includes(id)))
+  }
+
+  /** Remove transcriptions. Done when no parent's list holds them. */
+  removeTranscriptions(ids) {
+    let list = ids.map(Number)
+    let before = this._getState()
+    let parents = list.map(id => before.transcriptions[id]?.parent)
+    let holds = (s, id, parent) =>
+      (s.photos[parent]?.transcriptions || []).includes(id) ||
+      (s.selections[parent]?.transcriptions || []).includes(id)
+    return this._command(this._cmd(TRANSCRIPTION.REMOVE, list), s =>
+      !list.some((id, i) => parents[i] != null && holds(s, id, parents[i])))
+  }
+
   async createTranscription({ photo, selection, text, data }) {
     let payload = { photo, text: text || '' }
     if (selection) payload.selection = selection

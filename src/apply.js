@@ -4,7 +4,7 @@ const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { sanitizeHtml, escapeHtml } = require('./sanitize')
 const {
-  ATTRIBUTION_PREFIX, CONTRIB_URI, SYNC_URI, isLocalOnlyTag, isTropyPresetTemplate, noteFooter
+  ATTRIBUTION_PREFIX, CONTRIB_URI, SYNC_URI, isLocalOnlyTag, isTropyPresetTemplate, noteFooter, footerKey
 } = require('./local-only')
 
 // Tropy's tag colours are preset names (src/constants/sass.js#TAG.COLORS).
@@ -84,7 +84,7 @@ module.exports = {
     let s = this._applyStats
     let before = s ? (s.notesCreated + s.notesUpdated + s.tagsAdded +
       s.selectionsCreated + s.metadataUpdated + s.transcriptionsCreated +
-      s.listsAdded + s.notesRetracted) : 0
+      s.listsAdded + s.notesRetracted + s.selectionsDeleted + s.transcriptionsRemoved) : 0
 
     // Apply metadata (batched — no per-field delay)
     await this.applyMetadata(itemIdentity, localId, userId, local.item)
@@ -107,6 +107,8 @@ module.exports = {
 
     await this.applyTranscriptions(itemIdentity, local, userId)
 
+    await this.applyRetractions(itemIdentity, userId)
+
     if (this.options.syncLists) {
       await this.applyLists(itemIdentity, local, userId, listMap)
     }
@@ -117,7 +119,7 @@ module.exports = {
       s.itemsProcessed++
       let after = s.notesCreated + s.notesUpdated + s.tagsAdded +
         s.selectionsCreated + s.metadataUpdated + s.transcriptionsCreated +
-        s.listsAdded + s.notesRetracted
+        s.listsAdded + s.notesRetracted + s.selectionsDeleted + s.transcriptionsRemoved
       if (after > before) {
         s.itemsChanged++
         s.receivedItemIds.add(localId)
@@ -219,10 +221,20 @@ module.exports = {
     }
   },
 
+  /**
+   * The entries of one section that inbound validation did not reject
+   * (`this._rejected`, set by the engine as it matches items).
+   */
+  _admitted(itemIdentity, section, entries) {
+    let rejected = this._rejected && this._rejected.get(itemIdentity)
+    if (!rejected) return entries
+    return Object.fromEntries(Object.entries(entries).filter(([k]) => !rejected.has(`${section}|${k}`)))
+  },
+
   async applyMetadata(itemIdentity, localId, userId, localItem) {
     if (!this.options.syncMetadata) return
     await this._applyFields(itemIdentity, localId, prop => prop,
-      schema.getMetadata(this.doc, itemIdentity), localItem, userId)
+      this._admitted(itemIdentity, 'metadata', schema.getMetadata(this.doc, itemIdentity)), localItem, userId)
   },
 
   async applyTags(itemIdentity, localId, userId, tagMap, localItem) {
@@ -435,7 +447,8 @@ module.exports = {
     let photos = arrayOf(local.item.photo)
     let existingNoteTexts = this._buildExistingNoteTexts(photos.flatMap(p => p.note || []))
 
-    for (let [noteKey, note] of Object.entries(schema.getNotes(this.doc, itemIdentity))) {
+    for (let [noteKey, note] of Object.entries(
+      this._admitted(itemIdentity, 'notes', schema.getNotes(this.doc, itemIdentity)))) {
       if (note.deleted) {
         await this._retractNote(noteKey, note, userId, 'note')
         continue
@@ -560,7 +573,7 @@ module.exports = {
 
   async applySelectionNotes(itemIdentity, local, userId) {
     if (!this.options.syncNotes) return
-    let all = schema.getAllSelectionNotes(this.doc, itemIdentity)
+    let all = this._admitted(itemIdentity, 'selectionNotes', schema.getAllSelectionNotes(this.doc, itemIdentity))
 
     for (let photo of arrayOf(local.item.photo)) {
       if (!photo.checksum) continue
@@ -618,7 +631,8 @@ module.exports = {
       }
     }
 
-    for (let [txKey, tx] of Object.entries(schema.getActiveTranscriptions(this.doc, itemIdentity))) {
+    for (let [txKey, tx] of Object.entries(
+      this._admitted(itemIdentity, 'transcriptions', schema.getActiveTranscriptions(this.doc, itemIdentity)))) {
       if (tx.author) this.vault.trackOriginalAuthor(txKey, tx.author)
       if (tx.author === userId) continue
       if (!tx.text && !tx.data) continue
@@ -646,6 +660,75 @@ module.exports = {
         this.logger.warn(`Failed to add transcription ${txKey.slice(0, 8)}: ${err.message}`)
       }
     }
+  },
+
+  /**
+   * Selections and transcriptions their author deleted are deleted here
+   * too, if this Tropy got them from the room. A selection the owner has
+   * written on (a note or transcription of their own) is kept: Tropy would
+   * delete the owner's work with it. Notes are retracted, not deleted; see
+   * `_retractNote`.
+   */
+  async applyRetractions(itemIdentity, userId) {
+    let s = this._applyStats
+    let gone = (key, entry) => {
+      if (!entry.deleted || entry.author === userId) return false
+      let original = this.vault.getOriginalAuthor(key)
+      if (original && original !== entry.author) return false
+      return !this.vault.retractedNoteKeys.has(key)
+    }
+    let handled = key => {
+      this.vault.retractedNoteKeys.add(key)
+      this.vault.markDirty()
+    }
+
+    if (this.options.syncSelections) {
+      for (let [key, sel] of Object.entries(schema.getSelections(this.doc, itemIdentity))) {
+        if (!gone(key, sel)) continue
+        let id = this.vault.getLocalSelId(key)
+        let local = id && this.adapter.getSelection(id)
+        if (!local) { if (id) handled(key); continue }
+        if (this._ownWorkOn(local)) {
+          this._log(`kept selection ${key.slice(0, 8)}: ${sel.author} deleted it, but you have written on it`)
+          handled(key)
+          continue
+        }
+        try {
+          await this.adapter.deleteSelections(local.photo, [id])
+          handled(key)
+          if (s) s.selectionsDeleted++
+        } catch (err) {
+          this.logger.warn(`Failed to delete selection ${key.slice(0, 8)}: ${err.message}`)
+        }
+      }
+    }
+
+    if (this.options.syncTranscriptions) {
+      for (let [key, tx] of Object.entries(schema.getTranscriptions(this.doc, itemIdentity))) {
+        if (!gone(key, tx)) continue
+        let id = this.vault.getLocalTxId(key)
+        if (!id || !this.adapter.getTranscription(id)) { if (id) handled(key); continue }
+        try {
+          await this.adapter.removeTranscriptions([id])
+          handled(key)
+          if (s) s.transcriptionsRemoved++
+        } catch (err) {
+          this.logger.warn(`Failed to remove transcription ${key.slice(0, 8)}: ${err.message}`)
+        }
+      }
+    }
+  },
+
+  /** Whether the owner has a note or transcription of their own on a selection. */
+  _ownWorkOn(selection) {
+    for (let n of selection.notes || []) {
+      let note = this.adapter.getNote(n)
+      if (note && !footerKey(note.text)) return true
+    }
+    for (let t of selection.transcriptions || []) {
+      if (!this.vault.txIdToCrdtKey.has(String(t))) return true
+    }
+    return false
   },
 
   // List memberships match lists by name.

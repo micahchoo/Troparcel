@@ -44,12 +44,14 @@ module.exports = {
 
   // src/constants/selection.js
   SELECTION: {
-    CREATE: 'selection.create'
+    CREATE: 'selection.create',
+    DELETE: 'selection.delete'
   },
 
   // src/slices/transcriptions.js (Redux Toolkit slice "transcriptions")
   TRANSCRIPTION: {
-    CREATE: 'transcriptions/create'
+    CREATE: 'transcriptions/create',
+    REMOVE: 'transcriptions/remove'
   },
 
   // src/constants/list.js

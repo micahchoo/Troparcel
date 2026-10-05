@@ -179,6 +179,15 @@ function _ensureItem(doc, identity) {
 
 const active = obj => Object.fromEntries(Object.entries(obj).filter(([, v]) => !v.deleted))
 
+/**
+ * Only an entry's author may tombstone a note, selection or transcription.
+ * Anyone may delete their own copy; writing that over someone else's entry
+ * would erase it from the room for everyone who joins later.
+ */
+function _mayRetract(existing, author) {
+  return existing && !existing.deleted && (!existing.author || existing.author === author)
+}
+
 function _tombstone(existing, author, pushSeq) {
   return { ...existing, deleted: true, author, pushSeq: pushSeq || 0, deletedAt: Date.now() }
 }
@@ -251,7 +260,7 @@ function setNote(doc, identity, uuid, note, author, pushSeq) {
 
 function removeNote(doc, identity, uuid, author, pushSeq) {
   let existing = _get(doc, 'notes', identity, uuid)
-  if (existing && !existing.deleted) _set(doc, 'notes', identity, uuid, _tombstone(existing, author, pushSeq))
+  if (_mayRetract(existing, author)) _set(doc, 'notes', identity, uuid, _tombstone(existing, author, pushSeq))
 }
 
 function getNotes(doc, identity) {
@@ -313,7 +322,7 @@ function setSelection(doc, identity, uuid, selection, author, pushSeq) {
 
 function removeSelection(doc, identity, uuid, author, pushSeq) {
   let existing = _get(doc, 'selections', identity, uuid)
-  if (existing && !existing.deleted) _set(doc, 'selections', identity, uuid, _tombstone(existing, author, pushSeq))
+  if (_mayRetract(existing, author)) _set(doc, 'selections', identity, uuid, _tombstone(existing, author, pushSeq))
 }
 
 function getSelections(doc, identity) {
@@ -357,7 +366,7 @@ function setSelectionNote(doc, identity, selUUID, noteUUID, note, author, pushSe
 function removeSelectionNote(doc, identity, selUUID, noteUUID, author, pushSeq) {
   let rest = `${selUUID}:${noteUUID}`
   let existing = _get(doc, 'selectionNotes', identity, rest)
-  if (existing && !existing.deleted) _set(doc, 'selectionNotes', identity, rest, _tombstone(existing, author, pushSeq))
+  if (_mayRetract(existing, author)) _set(doc, 'selectionNotes', identity, rest, _tombstone(existing, author, pushSeq))
 }
 
 /** Active notes on one selection, keyed selUUID:noteUUID. */
@@ -395,7 +404,7 @@ function setTranscription(doc, identity, uuid, transcription, author, pushSeq) {
 
 function removeTranscription(doc, identity, uuid, author, pushSeq) {
   let existing = _get(doc, 'transcriptions', identity, uuid)
-  if (existing && !existing.deleted) _set(doc, 'transcriptions', identity, uuid, _tombstone(existing, author, pushSeq))
+  if (_mayRetract(existing, author)) _set(doc, 'transcriptions', identity, uuid, _tombstone(existing, author, pushSeq))
 }
 
 function getTranscriptions(doc, identity) {

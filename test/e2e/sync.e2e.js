@@ -156,6 +156,19 @@ test('collaborators see each other\'s work', { timeout: 600000 }, async (t) => {
     assert.equal(now.author, 'carol')
   })
 
+  await t.test('a selection and a transcription their author deletes are deleted', async () => {
+    carol.write((s, me, seq) => {
+      s.removeSelection(carol.doc, item, 's_carol-1', me, seq)
+      s.removeTranscription(carol.doc, item, 't_carol-1', me, seq)
+    })
+    for (let [tropy, id, photo] of [[alice, a1, aPhoto], [bob, b1, bPhoto]]) {
+      await until(`${tropy.name} to delete the selection`, async () =>
+        ((await tropy.api.photo(photo)).selections || []).length === 0)
+      await until(`${tropy.name} to remove the transcription`, async () =>
+        !(await tropy.api.transcriptions(id)).some(tr => tr.text?.includes('Dear Sir')))
+    }
+  })
+
   await t.test('items that received changes are in the received list', async () => {
     let lists = JSON.stringify(await bob.api.lists())
     assert.ok(lists.includes('Troparcel: received'), lists)

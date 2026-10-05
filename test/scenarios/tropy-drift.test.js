@@ -39,6 +39,7 @@ test('every mirrored constant matches Tropy', async () => {
     [MIRROR.NOTE.DELETE, (await upstream('note.js')).DELETE],
     [MIRROR.NAV.UPDATE, (await upstream('nav.js')).UPDATE],
     [MIRROR.SELECTION.CREATE, (await upstream('selection.js')).CREATE],
+    [MIRROR.SELECTION.DELETE, (await upstream('selection.js')).DELETE],
     [MIRROR.LIST.CREATE, (await upstream('list.js')).CREATE],
     [MIRROR.LIST.ITEM.ADD, (await upstream('list.js')).ITEM.ADD],
     [MIRROR.LIST.ITEM.REMOVE, (await upstream('list.js')).ITEM.REMOVE],
@@ -51,7 +52,9 @@ test('the transcriptions slice still creates with "transcriptions/create"', () =
   let src = fs.readFileSync(path.join(SRC, 'slices', 'transcriptions.js'), 'utf8')
   assert.match(src, /name: 'transcriptions'/)
   assert.match(src, /^\s+create: cmdReducer\(/m)
+  assert.match(src, /^\s+remove: cmdReducer\(/m)
   assert.equal(MIRROR.TRANSCRIPTION.CREATE, 'transcriptions/create')
+  assert.equal(MIRROR.TRANSCRIPTION.REMOVE, 'transcriptions/remove')
 })
 
 test('Tropy still runs a command only without meta.done', () => {

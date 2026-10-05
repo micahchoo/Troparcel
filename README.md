@@ -89,7 +89,7 @@ Before applying anything, Troparcel saves a JSON copy of each item it is about t
 | Connection | | Server connection string, `ws://` address, or shared folder path |
 | Your name | | Shown to others as `@name` on what you contribute |
 | Mode | `auto` | `auto`: share and receive. `review`: share; receive on **File > Import > Troparcel**. `push`: share only. `pull`: receive only, on import |
-| Share deletions | off | A note you delete is struck through for others (only its author can retract it); a tag or list membership you remove is removed for others. Deleted selections and transcriptions are not shared yet |
+| Share deletions | off | A note you delete is struck through for others (only its author can retract it); a tag or list membership you remove is removed for others. A selection or transcription you delete is deleted for others |
 | Share lists | off | Share your list tree and list membership |
 | Share photo and selection metadata | off | Share metadata on photos and selections, not only on items |
 | Debug logging | off | Detailed messages in Tropy's log (**Help > Show Log Files**) |

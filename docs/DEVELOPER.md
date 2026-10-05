@@ -69,6 +69,7 @@ Every one of these was a shipped defect. Each was checked against Tropy's source
 - **`note.create` selects the new note**, which moves the owner's view. `createNote` puts `nav` back afterwards.
 - **`history.tick` with an empty payload crashes Tropy's history reducer** (`canMerge` reads `undo.type`). There is no way to group a cycle into one undo entry; send no history instead.
 - **`dialog.notify` is a modal** that looks up `dialog.notify.<key>` in Tropy's strings. A plugin cannot add strings, so it shows an empty dialog. `dialog.info` and `dialog.warning` do not exist.
+- **A deleted selection stays in `state.selections`.** Tropy's selections reducer has no delete case; only the photo's `selections` list loses it. Ask the parent list, as `getSelection` and `getTranscription` do.
 - **Tag colours are preset names** (`red`, `green`, …), not hex values.
 - **The photo checksum is the MD5 of the stored file**, computed after any conversion at import.
 - **Templates are read raw** from `state.ontology.template`, not through `getAllTemplates`, which resolves and flattens them.

@@ -67,6 +67,7 @@ class SyncEngine {
 
     this.dataDir = options.dataDir || defaultRoot()
     this.vault = new SyncVault()
+    this._rejected = new Map() // identity → Set of section|key validation rejected
     this.vault.loadFromFile(this.options.room, this._stableUserId, this.dataDir)
 
     this._failedNoteKeys = new Set()
@@ -108,6 +109,7 @@ class SyncEngine {
   _resetApplyStats() {
     this._applyStats = {
       notesCreated: 0, notesDeduped: 0, notesUpdated: 0, notesRetracted: 0,
+      selectionsDeleted: 0, transcriptionsRemoved: 0,
       notesFailed: 0,
       tagsAdded: 0,
       selectionsCreated: 0,
@@ -126,6 +128,8 @@ class SyncEngine {
     if (s.notesCreated) parts.push(`${s.notesCreated} notes created`)
     if (s.notesUpdated) parts.push(`${s.notesUpdated} notes updated`)
     if (s.notesRetracted) parts.push(`${s.notesRetracted} notes retracted`)
+    if (s.selectionsDeleted) parts.push(`${s.selectionsDeleted} selections deleted`)
+    if (s.transcriptionsRemoved) parts.push(`${s.transcriptionsRemoved} transcriptions removed`)
     if (s.tagsAdded) parts.push(`${s.tagsAdded} tags added`)
     if (s.selectionsCreated) parts.push(`${s.selectionsCreated} selections created`)
     if (s.metadataUpdated) parts.push(`${s.metadataUpdated} metadata fields`)
@@ -552,10 +556,9 @@ class SyncEngine {
       let crdtItem = schema.getItemSnapshot(this.doc, itemIdentity)
       if (!crdtItem) return
       let validation = this.backup.validateInbound(itemIdentity, crdtItem, this._stableUserId)
-      if (!validation.valid) {
-        for (let w of validation.warnings) this.logger.warn(`validation: ${w}`)
-        return
-      }
+      for (let w of validation.warnings) this.logger.warn(`validation: ${w} — skipped`)
+      if (validation.rejected.size > 0) this._rejected.set(itemIdentity, validation.rejected)
+      else this._rejected.delete(itemIdentity)
       matched.push({ itemIdentity, local })
       claimed.add(local.localId)
       done.add(itemIdentity)

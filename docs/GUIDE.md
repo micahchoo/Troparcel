@@ -169,7 +169,7 @@ With **Share deletions** on:
 
 - a note you wrote and then delete is **struck through** for everyone, not removed. Only its author can retract a note.
 - a tag or list membership you remove is removed for everyone, unless someone adds it again.
-- deleted selections and transcriptions are not shared yet.
+- a selection or transcription you made and then delete is deleted for everyone. A selection someone has written a note on stays on their computer.
 
 ### Undo
 
