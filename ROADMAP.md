@@ -9,14 +9,14 @@ Each phase ends with an exit test you can run, not a list of features. Status as
 | Phase | Status | Exit test | Next step |
 |---|---|---|---|
 | 0 · Ground truth | Done | Passed | — |
-| 1 · Trustworthy overlay | Released as 6.0.0 | Soak test, to build | Build and run the soak test |
+| 1 · Trustworthy overlay | Released as 6.0.0 | Soak test built; first 60-minute run in progress | Read the run; fix what it finds |
 | 2 · Stay compatible with Tropy | Done | Passed: CI against Tropy `main` | — |
 | 3 · Scale | Done, one follow-up | Start: passed (1.5 s for 10,000 items). Memory: no baseline | Keep Troparcel's own markings out of an item's hash |
-| 4 · Shared project | Done (6.1) | Passed in real Tropy | — |
+| 4 · Shared project | Done (6.1), one follow-up | Passed in real Tropy | A received photo has no name in the photo list |
 | 5 · Authorship, private rooms | Done (6.1) | Passed in real Tropy | — |
 | 6 · Publishable rooms | IIIF export done (6.1) | Half: export passes; no viewer opened yet | Open a published folder in a IIIF viewer |
 
-6.1 is everything on `main` since 6.0.0; it is not released yet. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
+6.1 is everything on `main` since 6.0.0; it is not released yet. A 68-second film of real Tropy (`npm run film`, `docs/media/troparcel.mp4`) shows what 6.1 does; filming it found a real bug (attribution credited people for entries that changed nothing locally), now fixed. Testing grew with it: a test-only **driver** plugin lets e2e tests read Tropy's state and use its menus, and an **observer** plugin records a timeline of every action inside each test Tropy (`test/README.md`).
 
 ## Phase 0 · Ground truth — done
 
@@ -41,7 +41,7 @@ Also done: an oversized entry is skipped alone; a deleted selection or transcrip
 
 Released as [6.0.0](https://github.com/micahchoo/Troparcel/releases/tag/v6.0.0) on 2026-10-05.
 
-**Exit test:** ~~two researchers on two machines use it for a week~~ — there are no testers. Instead, a **soak test**: three real Tropy instances and synthetic members make random edits for hours, with restarts and dropped connections; at the end every project holds the same data, nothing is duplicated, and Tropy logs no warnings. It finds sync bugs; it cannot find what only people find (confusing setup, awkward workflows). **Open:** to build.
+**Exit test:** ~~two researchers on two machines use it for a week~~ — there are no testers. Instead, a **soak test**: three real Tropy instances and synthetic members make random edits for hours, with restarts and dropped connections; at the end every project holds the same data, nothing is duplicated, and Tropy logs no warnings. It finds sync bugs; it cannot find what only people find (confusing setup, awkward workflows). **Built** (`npm run soak`, `test/e2e/soak.js`); the first 60-minute run is in progress.
 
 ## Phase 2 · Stay compatible with Tropy — done
 
