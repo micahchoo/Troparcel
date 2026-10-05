@@ -40,6 +40,10 @@ const FOOTER = /\s*(?:— (?:withdrawn by )?[^\n]*|\[troparcel:[^\]]*\])\s*$/
 const rand = n => Math.floor(Math.random() * n)
 const pick = list => list[rand(list.length)]
 const word = () => crypto.randomBytes(3).toString('hex')
+// Unique per run: Tropy's POST /project/tags with a name that exists tags
+// nothing, which a person adding the existing tag never meets.
+let tagSeq = 0
+const tagName = () => `tag-${(++tagSeq).toString(36)}`
 
 async function main() {
   build()
@@ -102,7 +106,7 @@ async function main() {
           await tropy.api.saveData(at.item, { [FIELD[member]]: text })
           ledger.fields.set(`${c}|${FIELD[member]}`, text)
         } else if (kind === 'tag') {
-          await tropy.api.createTag(`tag-${word()}`.slice(0, 7), [at.item])
+          await tropy.api.createTag(tagName(), [at.item])
             .then(tag => ledger.tags.set(`${c}|${tag.name}`, true))
         } else if (kind === 'transcription') {
           await tropy.driver.createTranscription(at.photo, text)
@@ -124,7 +128,7 @@ async function main() {
           peer.write((s, me, seq) => s.setMetadata(peer.doc, identity, FIELD[member], { text }, me, seq))
           ledger.fields.set(`${c}|${FIELD[member]}`, text)
         } else if (kind === 'tag') {
-          let name = `tag-${word()}`.slice(0, 7)
+          let name = tagName()
           peer.write((s, me, seq) => s.setTag(peer.doc, identity, { name }, me, seq))
           ledger.tags.set(`${c}|${name}`, true)
         } else if (kind === 'transcription') {
@@ -240,7 +244,9 @@ async function main() {
     } catch { /* report below */ }
 
     for (let t of tropys) {
-      for (let p of t.problems()) problems.push(`${t.name} logged: ${p}`)
+      // The outages are the soak's own; a Tropy saying it lost the server is right.
+      let outage = /lost connection, will retry|connection error: connect ECONNREFUSED/
+      for (let p of t.problems()) if (!outage.test(p)) problems.push(`${t.name} logged: ${p}`)
       let s = summarize(read(t.timelineFile))
       if (/errored actions: (?!none)/.test(s)) problems.push(`${t.name}: the observer recorded failed commands (see ${t.timelineFile})`)
     }
