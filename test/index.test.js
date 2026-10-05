@@ -3340,3 +3340,46 @@ describe('reading a pasted invite', () => {
     assert.throws(() => readInvite('troparcel://folder/tropy-ledgers', roots), /no folder named “tropy-ledgers” in Nextcloud/)
   })
 })
+
+describe('starting a room from the setup page', () => {
+  const fs = require('fs'), os = require('os'), path = require('path')
+  const { newRoom } = require('../src/control')
+  const { parseConnectionString } = require('../src/connection-string')
+  const { syncRoots } = require('../src/sync-folders')
+  let home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'))
+  fs.mkdirSync(path.join(home, 'Nextcloud'), { recursive: true })
+  let roots = syncRoots(home)
+  let nextcloud = path.join(home, 'Nextcloud')
+
+  it('makes the folder in the chosen sync folder; the invite names it', () => {
+    let r = newRoom({ root: nextcloud, room: 'tropy-letters' }, roots)
+    assert.ok(fs.statSync(path.join(nextcloud, 'tropy-letters')).isDirectory())
+    assert.equal(r.connection, 'troparcel://folder/tropy-letters')
+  })
+
+  it('a project room carries photos=1; a private room a new key', () => {
+    let r = newRoom({ root: nextcloud, room: 'tropy-ledgers', photos: true, encrypt: true }, roots)
+    let c = parseConnectionString(r.connection)
+    assert.equal(c.sharePhotos, true)
+    assert.match(c.roomKey, /^[A-Za-z0-9_-]{43}$/)
+    let again = newRoom({ root: nextcloud, room: 'tropy-maps', encrypt: true }, roots)
+    assert.notEqual(parseConnectionString(again.connection).roomKey, c.roomKey, 'every private room its own key')
+  })
+
+  it('another folder: any folder on this computer, named by its path', () => {
+    let share = fs.mkdtempSync(path.join(os.tmpdir(), 'share-'))
+    let r = newRoom({ path: share, room: 'tropy-letters', photos: true }, roots)
+    assert.ok(fs.statSync(path.join(share, 'tropy-letters')).isDirectory())
+    let c = parseConnectionString(r.connection)
+    assert.equal(c.syncDir, path.join(share, 'tropy-letters'))
+    assert.equal(c.sharePhotos, true)
+  })
+
+  it('says what is wrong with the folder', () => {
+    assert.throws(() => newRoom({ path: '/no/such/folder', room: 'x' }, roots), /There is no folder at “\/no\/such\/folder”/)
+    assert.throws(() => newRoom({ path: 'Documents/share', room: 'x' }, roots), /full path, starting with \//)
+    assert.throws(() => newRoom({ root: '/somewhere/else', room: 'x' }, roots), /Choose one of the folders listed/)
+    assert.throws(() => newRoom({ root: nextcloud, room: '' }, roots), /Give the room a name/)
+    assert.throws(() => newRoom({ root: nextcloud, room: 'a/b' }, roots), /cannot contain/)
+  })
+})

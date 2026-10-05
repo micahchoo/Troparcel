@@ -80,6 +80,25 @@ test('the dashboard: setup, status, conflicts, and only for this computer', { ti
     await dave.stop()
   })
 
+  await t.test('a newcomer starts a private project room in a folder of their choosing', async () => {
+    let dir = path.join(run.dir, 'erin-data')
+    let share = path.join(run.dir, 'share')
+    fs.mkdirSync(share, { recursive: true })
+    let erin = run.tropy('erin', { dataDir: dir })
+    await erin.start()
+    let dash = await dashboardOf(dir)
+    let res = await dash.act('create-room', { path: share, room: 'tropy-ledgers', userId: 'erin', photos: true, encrypt: true })
+    assert.equal(res.ok, true, JSON.stringify(res))
+    assert.ok(fs.statSync(path.join(share, 'tropy-ledgers')).isDirectory())
+    let s = await until('the page to offer the invite', async () => {
+      try { let st = await (await dashboardOf(dir)).status(); return st.invite ? st : null } catch { return null }
+    }, { timeout: 30000 })
+    assert.match(s.invite.text, /^troparcel:\/\/folder\/tropy-ledgers\?photos=1&key=[A-Za-z0-9_-]{43}$/)
+    assert.equal(s.invite.encrypted, true)
+    assert.match(s.invite.how, /troparcel:\/\/file\//, 'says how a member whose copy is elsewhere names it')
+    await erin.stop()
+  })
+
   let dir = path.join(run.dir, 'alice-data')
   // alice shares her changes only every 8 s, so carol's can cross hers: a real conflict
   let alice = run.tropy('alice', { connection, userId: 'alice', dataDir: dir, localDebounce: 8000, remoteDebounce: 200, safetyNetInterval: 600 })

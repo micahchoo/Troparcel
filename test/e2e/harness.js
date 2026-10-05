@@ -145,8 +145,9 @@ class Api {
 }
 
 class TropyInstance {
-  constructor(run, name, options, extraEntries = []) {
+  constructor(run, name, options, extraEntries = [], { bundle = null } = {}) {
     this.extraEntries = extraEntries
+    this.bundle = bundle // a plugin folder to install instead of this checkout's build
     this.run = run
     this.name = name
     this.dir = path.join(run.dir, name)
@@ -170,8 +171,10 @@ class TropyInstance {
     let dest = path.join(this.dataDir, 'plugins', 'troparcel')
     fs.mkdirSync(dest, { recursive: true })
     for (let f of ['index.js', 'package.json', 'icon.svg']) {
+      // `bundle`: another release's plugin folder, whole.
       // TROPARCEL_BUNDLE: install that bundle instead of ./index.js
-      let src = f === 'index.js' && process.env.TROPARCEL_BUNDLE ? process.env.TROPARCEL_BUNDLE : path.join(ROOT, f)
+      let src = this.bundle ? path.join(this.bundle, f)
+        : f === 'index.js' && process.env.TROPARCEL_BUNDLE ? process.env.TROPARCEL_BUNDLE : path.join(ROOT, f)
       fs.copyFileSync(src, path.join(dest, f))
     }
     for (let [from, name] of [['driver', 'troparcel-test-driver'], ['observer', 'troparcel-test-observer']]) {
@@ -454,8 +457,8 @@ class Run {
     return p
   }
 
-  tropy(name, options, extraEntries) {
-    let t = new TropyInstance(this, name, options, extraEntries)
+  tropy(name, options, extraEntries, more) {
+    let t = new TropyInstance(this, name, options, extraEntries, more)
     this.instances.push(t)
     return t
   }

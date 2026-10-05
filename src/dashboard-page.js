@@ -24,6 +24,7 @@ function page() {
       --accent: #86acd6; --ok: #6fc28f; --warn: #e3a54f; --bad: #f08c84; --code: #20242a; color-scheme: dark; }
   }
   * { box-sizing: border-box }
+  [hidden] { display: none !important }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 var(--body); padding: 32px 16px 64px; }
   main { max-width: 46rem; margin: 0 auto; display: grid; gap: 18px; }
   header h1 { font-size: 1.6rem; margin: 0 0 4px; }
@@ -56,6 +57,11 @@ function page() {
   input, select { font: 0.95rem var(--body); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--rule);
     background: var(--bg); color: var(--fg); width: 100% }
   form { display: grid; gap: 12px }
+  fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 8px; min-width: 0 }
+  legend { font-weight: 600; padding: 0; margin-bottom: 4px }
+  label.choice { display: flex; gap: 10px; align-items: flex-start }
+  label.choice input { width: auto; margin: 4px 0 0; flex: none }
+  label.choice span { display: block }
   .or { color: var(--muted); text-align: center; margin: 4px 0 }
   .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
     padding: 9px 14px; border-radius: 6px; font-weight: 600 }
@@ -131,15 +137,39 @@ function setup(s) {
       $('label', {}, $('span', {}, 'Paste the invite someone in your group sent you.'), conn),
       $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Join')))
   ]
-  if (s.syncRoots && s.syncRoots.length) {
-    const root = $('select', { id: 'root' }, s.syncRoots.map(([label, p]) => $('option', { value: p }, label + ' (' + p + ')')))
-    const room = $('input', { id: 'room', placeholder: 'e.g. tropy-letters', oninput: () => { typing = true } })
-    kids.push($('p', { class: 'or' }, 'or'), $('h2', {}, 'Start a new room'),
-      $('form', { onsubmit: e => { e.preventDefault(); typing = false; act('create-room', { root: root.value, room: room.value.trim(), userId: name.value.trim() }) } },
-        $('label', {}, 'In', $('span', {}, 'A folder your sync app keeps the same on every computer.'), root),
-        $('label', {}, 'Room name', $('span', {}, 'Troparcel makes a folder of this name there. Then share it with your group in that app.'), room),
-        $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Start the room'))))
-  }
+  const roots = s.syncRoots || []
+  const OTHER = 'other'
+  const touch = () => { typing = true }
+  const root = $('select', { id: 'root', onchange: () => { touch(); elsewhere.hidden = root.value !== OTHER } },
+    roots.map(([label, p]) => $('option', { value: p }, label + ' (' + p + ')')),
+    $('option', { value: OTHER }, 'Another folder…'))
+  const where = $('input', { id: 'where', placeholder: 'e.g. /mnt/share/research', oninput: touch })
+  const elsewhere = $('label', { hidden: roots.length > 0 }, 'Folder', $('span', {}, 'Its full path on this computer: a network share, or a sync folder Troparcel did not find.'), where)
+  const room = $('input', { id: 'room', placeholder: 'e.g. tropy-letters', oninput: touch })
+  const kind = (value, title, hint, checked) => $('label', { class: 'choice' },
+    $('input', { type: 'radio', name: 'kind', value, checked, onchange: touch }),
+    $('div', {}, title, $('span', {}, hint)))
+  const encrypt = $('input', { type: 'checkbox', id: 'encrypt', onchange: touch })
+  kids.push($('p', { class: 'or' }, 'or'), $('h2', {}, 'Start a new room'),
+    $('form', { onsubmit: e => {
+      e.preventDefault(); typing = false
+      const other = root.value === OTHER
+      const picked = document.querySelector('input[name=kind]:checked')
+      act('create-room', {
+        root: other ? null : root.value, path: other ? where.value.trim() : null,
+        room: room.value.trim(), userId: name.value.trim(),
+        photos: !!picked && picked.value === 'project', encrypt: encrypt.checked
+      })
+    } },
+      $('label', {}, 'In', $('span', {}, 'A folder your sync app keeps the same on every computer.'), root),
+      elsewhere,
+      $('label', {}, 'Room name', $('span', {}, 'Troparcel makes a folder of this name there. Then share it with your group in that app.'), room),
+      $('fieldset', {}, $('legend', {}, 'Photos'),
+        kind('notes', 'Shared notes', 'Photos stay on each computer, and everyone imports the same files. Choose this when your photos may not be copied.', true),
+        kind('project', 'Project room', 'Photos travel with the room, so a newcomer can start from an empty project.', false)),
+      $('label', { class: 'choice' }, encrypt,
+        $('div', {}, 'Private', $('span', {}, 'Encrypt everything, photos too, on this computer before it reaches the folder. Only people with the invite can read it.'))),
+      $('div', { class: 'row' }, $('button', { class: 'primary', type: 'submit' }, 'Start the room'))))
   return $('section', {}, kids)
 }
 function attention(e) {

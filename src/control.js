@@ -4,6 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const { parseConnectionString, generateConnectionString } = require('./connection-string')
 const { syncRoots, findRoomFolder, createRoomFolder } = require('./sync-folders')
+const { RoomKey } = require('./room-key')
 
 /**
  * What the dashboard shows and does, for one Troparcel plugin instance.
@@ -29,9 +30,14 @@ function invite(options) {
       transport: 'file', syncFolder: name, sharePhotos: options.sharePhotos, roomKey: options.roomKey
     })
     let client = options.syncDir ? (syncRoots().find(([, root]) => options.syncDir.startsWith(root)) || [])[0] : null
+    // Outside every sync folder Troparcel knows, a member's copy may sit
+    // anywhere: tell them how to name theirs (readInvite accepts it).
+    let elsewhere = options.syncDir && !client
+      ? ` Troparcel looks for it in their Nextcloud, Dropbox or other sync folder; if their copy is somewhere else, they write file and its path in place of folder/${name}, for example ${text.replace(/folder\/[^?]*/, `file${options.syncDir}`)}`
+      : ''
     return {
       text,
-      how: `First share the folder “${name}” with them${client ? ` in ${client}` : ''}. Then send them this invite, to paste into Troparcel’s setup page:`,
+      how: `First share the folder “${name}” with them${client ? ` in ${client}` : ''}. Then send them this invite, to paste into Troparcel’s setup page.${elsewhere}`,
       secret: !!options.roomKey,
       encrypted: !!options.roomKey
     }
@@ -87,9 +93,39 @@ function readInvite(pasted, roots = syncRoots()) {
 
   if (options.syncFolder && !findRoomFolder(options.syncFolder, roots)) {
     let where = roots.length ? `in ${[...new Set(roots.map(r => r[0]))].join(' or ')}` : 'on this computer, and no Nextcloud, Dropbox or other sync folder either'
-    throw new Error(`There is no folder named “${options.syncFolder}” ${where}. Accept the share in your sync app and wait until the folder appears, then paste the invite again.`)
+    throw new Error(`There is no folder named “${options.syncFolder}” ${where}. Accept the share in your sync app and wait until the folder appears, then paste the invite again. If your copy of the folder is somewhere else, write file and its path in place of folder/${options.syncFolder}, for example troparcel://file/mnt/share/${options.syncFolder}.`)
   }
   return text
+}
+
+/**
+ * Make a new room's folder and the connection that names it.
+ *
+ *   newRoom({ root, room, photos, encrypt })  // in a sync folder listed on the page
+ *   newRoom({ path, room, photos, encrypt })  // in any folder on this computer
+ *
+ * `photos` makes a project room, `encrypt` a private one with a new key.
+ * A room in a sync folder is named by its folder's name, which finds it on
+ * every member's computer; one elsewhere, by its path on this computer.
+ */
+function newRoom({ root, path: where, room, photos = false, encrypt = false }, roots = syncRoots()) {
+  let name = String(room || '').trim()
+  if (!name) throw new Error('Give the room a name, such as tropy-letters.')
+  if (/[\\/]/.test(name)) throw new Error('A room name cannot contain / or \\.')
+  let roomKey = encrypt ? RoomKey.generate() : null
+  let dir
+  if (where) {
+    where = String(where).trim()
+    if (!path.isAbsolute(where)) throw new Error('Give the folder’s full path, starting with / (or a drive letter, such as C:\\, on Windows).')
+    let stat = null
+    try { stat = fs.statSync(where) } catch { /* below */ }
+    if (!stat || !stat.isDirectory()) throw new Error(`There is no folder at “${where}” on this computer.`)
+    dir = createRoomFolder(where, name)
+    return { name, dir, connection: generateConnectionString({ transport: 'file', syncDir: dir, sharePhotos: photos, roomKey }) }
+  }
+  if (!roots.some(([, r]) => r === root)) throw new Error('Choose one of the folders listed, or Another folder.')
+  dir = createRoomFolder(root, name)
+  return { name, dir, connection: generateConnectionString({ transport: 'file', syncFolder: name, sharePhotos: photos, roomKey }) }
 }
 
 async function perform(plugin, action, input) {
@@ -103,15 +139,11 @@ async function perform(plugin, action, input) {
       return 'Saved. Troparcel is connecting…'
     }
     case 'create-room': {
-      let room = String(input.room || '').trim()
       let userId = String(input.userId || plugin.options.userId || '').trim()
-      if (!room) throw new Error('Give the room a name, such as tropy-letters.')
-      if (/[\\/]/.test(room)) throw new Error('A room name cannot contain / or \\.')
       if (!userId) throw new Error('Fill in “Your name” first: others see it on your work.')
-      if (!syncRoots().some(([, root]) => root === input.root)) throw new Error('Choose one of the shared folders listed.')
-      createRoomFolder(input.root, room)
-      writeSettings(plugin, { connection: `troparcel://folder/${room}`, userId })
-      return `Room “${room}” created. Share that folder with your group, then send them the invite below.`
+      let { connection, name } = newRoom(input)
+      writeSettings(plugin, { connection, userId })
+      return `Room “${name}” created. Share its folder with your group, then send them the invite below.`
     }
     case 'resolve':
       if (!engine) throw new Error('Troparcel is not connected yet.')
@@ -155,4 +187,4 @@ function writeSettings(plugin, changes) {
   fs.renameSync(tmp, file)
 }
 
-module.exports = { status, perform, invite, readInvite, writeSettings }
+module.exports = { status, perform, invite, readInvite, newRoom, writeSettings }
