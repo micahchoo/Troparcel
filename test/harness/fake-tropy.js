@@ -137,6 +137,9 @@ function fakeTropy(initial = {}) {
             mimetype: val('mimetype'), filename: val('filename'),
             notes: [], selections: [], transcriptions: []
           }
+          // Tropy's import keeps keys it does not know as photo metadata
+          let title = p['http://purl.org/dc/elements/1.1/title']
+          if (title) s.metadata = { ...s.metadata, [pid]: { id: pid, 'http://purl.org/dc/elements/1.1/title': { text: title[0]['@value'], type: 'http://www.w3.org/2001/XMLSchema#string' } } }
           photoIds.push(pid)
         }
         let template = node[`${TROPY}template`] && node[`${TROPY}template`][0]['@id']

@@ -54,6 +54,20 @@ for (let encrypted of [false, true]) test(`a new member gets the whole project f
   }
   assert.deepEqual(daves.sort(), checksums, 'the same photos, by checksum')
 
+  // each photo keeps its name (its title field), as in alice's project
+  let names = async (tropy) => {
+    let out = []
+    for (let item of await tropy.api.items()) {
+      for (let p of (await tropy.api.item(item.id)).photos) {
+        out.push(((await tropy.api.data(p))['http://purl.org/dc/elements/1.1/title'] || {}).text || null)
+      }
+    }
+    return out.sort()
+  }
+  let alices = await names(alice)
+  assert.ok(alices.every(Boolean), `alice's photos have names: ${alices}`)
+  assert.deepEqual(await names(dave), alices)
+
   await until('dave to have alice\'s note', async () => {
     for (let item of await dave.api.items()) {
       if ((await dave.api.notesOf(item.id)).some(n => n.includes('Read the postmark'))) return true

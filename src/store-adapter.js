@@ -292,6 +292,13 @@ class StoreAdapter {
     return this._getState().photos[id] || null
   }
 
+  /** A photo's name in Tropy: its title field, or null. */
+  getPhotoTitle(id) {
+    let meta = this._getState().metadata[id]
+    let title = meta && meta['http://purl.org/dc/elements/1.1/title']
+    return (title && title.text) || null
+  }
+
   /** The checksum of every photo in the project. */
   getAllChecksums() {
     return Object.values(this._getState().photos).map(p => p.checksum).filter(Boolean)

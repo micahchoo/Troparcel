@@ -30,6 +30,7 @@ const PHOTO_FIELDS = [
   'orientation', 'page', 'density', 'color'
 ]
 const IMPORT_BATCH = 50
+const DC_TITLE = 'http://purl.org/dc/elements/1.1/title'
 
 class ProjectRoom {
   constructor({ doc, transport, adapter, vault, dir, logger, origin, roomKey = null }) {
@@ -60,7 +61,8 @@ class ProjectRoom {
         if (photos.length === 0) continue
         schema.setItemRecord(this.doc, identity, {
           template: raw.template,
-          photos: photos.map(pickPhotoFields)
+          // A photo's name in Tropy is its title field; send it along
+          photos: photos.map(p => ({ ...pickPhotoFields(p), title: this.adapter.getPhotoTitle(p.id) }))
         })
         for (let p of photos) {
           if (!this.vault.sharedPhotos.has(p.checksum)) uploads.push(p)
@@ -193,6 +195,8 @@ function toJsonLd({ record, files }) {
           [`${TROPY}protocol`]: lit('file')
         }
         for (let f of PHOTO_FIELDS) if (p[f] != null) photo[`${TROPY}${f}`] = lit(p[f])
+        // Any other key is photo metadata to Tropy's import: the photo's name
+        if (p.title) photo[DC_TITLE] = lit(p.title)
         return photo
       })
     }]

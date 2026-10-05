@@ -302,7 +302,9 @@ function seedRealItem(t, peer, id, contents) {
     fs.writeFileSync(file, contents[i])
     next[pid] = { ...next[pid], path: file, protocol: 'file', mimetype: 'image/png', filename: `photo-${i}.png` }
   })
-  peer.tropy.replace({ ...s, photos: next })
+  let metadata = { ...s.metadata }
+  photos.forEach((pid, i) => { metadata[pid] = { id: pid, 'http://purl.org/dc/elements/1.1/title': { text: `photo-${i}`, type: 'text' } } })
+  peer.tropy.replace({ ...s, photos: next, metadata })
   return { photos, checksums }
 }
 
@@ -332,6 +334,10 @@ test('project room: a member with an empty project receives the item, its photos
   }
   let notes = Object.values(carol.tropy.state().notes).map(n => n.text)
   assert.ok(notes.some(n => n.startsWith('Read the postmark')), notes.join(' | '))
+  for (let id of items[0].photos) {
+    let title = (carol.tropy.state().metadata[id] || {})['http://purl.org/dc/elements/1.1/title']
+    assert.ok(title && /^photo-\d$/.test(title.text), 'each photo keeps its name')
+  }
   assert.equal(carol.tropy.state().nav.mode, 'trash', 'the owner\'s view is put back')
   assert.equal(carol.tropy.state().nav.query, 'ink')
   assert.deepEqual(carol.tropy.rejected, [])
