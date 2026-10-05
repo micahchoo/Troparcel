@@ -27,7 +27,11 @@ const crypto = require('crypto')
  */
 
 const PRESENTATION = 'http://iiif.io/api/presentation/3/context.json'
-const FOOTER = /<p><sub>\[troparcel:[^\]]*? (?:from|retracted by) ([^\]—]+?) — safe to delete, do not edit\]<\/sub><\/p>\s*$/
+// Troparcel's author line on a collaborator's note: 6.1+ (a link), and 6.0 (text).
+const FOOTERS = [
+  /<p>(?:<sub>)?<a href="troparcel:[^"]*">(?:<sub>)?— (?:withdrawn by )?([^<]+?)(?:<\/sub>)?<\/a>(?:<\/sub>)?<\/p>\s*$/,
+  /<p><sub>\[troparcel:[^\]]*? (?:from|retracted by) ([^\]—]+?) — safe to delete, do not edit\]<\/sub><\/p>\s*$/
+]
 
 function toIIIF(doc, { baseUrl }) {
   if (!baseUrl) throw new Error('IIIF needs the address the files will be published at (baseUrl)')
@@ -121,7 +125,7 @@ async function writeIIIF(doc, dir, opts) {
 function noteAnnotation(note, target, id) {
   let html = String(value(note.html) || '')
   let creator = null
-  let m = html.match(FOOTER)
+  let m = FOOTERS.map(f => html.match(f)).find(Boolean)
   if (m) {
     creator = m[1].trim()
     html = html.slice(0, m.index)

@@ -3,7 +3,7 @@
 const {
   TAG, ITEM, METADATA, NOTE, NAV, SELECTION, TRANSCRIPTION, LIST, ONTOLOGY
 } = require('./tropy-action-types')
-const { footerKey } = require('./local-only')
+const { footerKey, footerKeyOfNote } = require('./local-only')
 
 /**
  * StoreAdapter — the one module that knows how to talk to Tropy.
@@ -351,8 +351,7 @@ class StoreAdapter {
     if (!this._noteIndex) {
       this._noteIndex = new Map()
       for (let [id, note] of Object.entries(notes)) {
-        let k = footerKey(note.text) ||
-          (note.state && footerKey(JSON.stringify(note.state)))
+        let k = footerKeyOfNote(note)
         if (k) this._noteIndex.set(k, Number(id))
       }
     }

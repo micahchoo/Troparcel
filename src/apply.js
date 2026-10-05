@@ -4,7 +4,7 @@ const identity = require('./identity')
 const schema = require('./crdt-schema')
 const { sanitizeHtml, escapeHtml } = require('./sanitize')
 const {
-  ATTRIBUTION_PREFIX, CONTRIB_URI, SYNC_URI, isLocalOnlyTag, isTropyPresetTemplate, noteFooter, footerKey
+  ATTRIBUTION_PREFIX, CONTRIB_URI, SYNC_URI, isLocalOnlyTag, isTropyPresetTemplate, noteFooter, footerKey, footerKeyOfNote
 } = require('./local-only')
 
 // Tropy's tag colours are preset names (src/constants/sass.js#TAG.COLORS).
@@ -307,6 +307,8 @@ module.exports = {
           // v5.0+: bottom-of-note identifier (plain text form)
           .replace(/\n?\[troparcel:[^\]]*\]\s*$/, '')
           .trim()
+        // 6.1+: the author line is the note's last line
+        if (n.html && /href="troparcel:/.test(n.html)) stripped = stripped.replace(/\n?— (?:withdrawn by )?[^\n]*$/, '').trim()
         if (stripped) set.add(stripped)
       }
       if (n && n.html) {
@@ -315,8 +317,10 @@ module.exports = {
           // Legacy top-of-note identifiers
           .replace(/^<blockquote><p><em>troparcel:[^<]*<\/em><\/p><\/blockquote>/, '')
           .replace(/^<p><strong>\[[^\]]*\]<\/strong><\/p>/, '')
-          // v5.0+: bottom-of-note identifier
+          // 6.0: bottom-of-note identifier as text
           .replace(/<p><sub>\[troparcel:[^\]]*\]<\/sub><\/p>\s*$/, '')
+          // 6.1+: "— alice", a link holding the key
+          .replace(/<p>(?:<sub>)?<a href="troparcel:[^"]*">(?:<sub>)?[^<]*(?:<\/sub>)?<\/a>(?:<\/sub>)?<\/p>\s*$/, '')
           .trim()
         if (strippedHtml) set.add(strippedHtml)
       }
@@ -514,7 +518,7 @@ module.exports = {
     let contentHtml = note.html
       ? sanitizeHtml(note.html)
       : (note.text ? `<p>${escapeHtml(note.text)}</p>` : '')
-    let retractedHtml = `${this._applyStrikethrough(contentHtml)}${noteFooter(escapeHtml(noteKey), 'retracted by', authorLabel)}`
+    let retractedHtml = `${this._applyStrikethrough(contentHtml)}${noteFooter(escapeHtml(noteKey), 'withdrawn', authorLabel)}`
 
     try {
       let { id } = await this.adapter.updateNote(localId, { html: retractedHtml })
@@ -746,7 +750,7 @@ module.exports = {
   _ownWorkOn(selection) {
     for (let n of selection.notes || []) {
       let note = this.adapter.getNote(n)
-      if (note && !footerKey(note.text)) return true
+      if (note && !footerKeyOfNote(note)) return true
     }
     for (let t of selection.transcriptions || []) {
       if (!this.vault.txIdToCrdtKey.has(String(t))) return true

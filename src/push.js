@@ -947,6 +947,7 @@ module.exports = {
     if (!html && !text) return false
     // v5.0+: identifier at bottom of note
     if (html && html.includes('[troparcel:')) return true
+    if (html && /href=["']troparcel:/.test(html)) return true
     if (text && text.includes('[troparcel:')) return true
     // Legacy: identifier at top (v4.0-v4.12)
     if (html && html.includes('<blockquote><p><em>troparcel:')) return true

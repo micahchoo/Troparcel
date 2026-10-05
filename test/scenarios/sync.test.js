@@ -135,7 +135,7 @@ test('a note shortened in place is applied (the old "contains" check refused it)
   await cycle(alice, bob)
   let texts = Object.values(bob.tropy.state().notes).map(n => n.text)
   assert.equal(texts.length, 1, texts.join(' | '))
-  assert.match(texts[0], /^Hello\[troparcel:/)
+  assert.match(texts[0], /^Hello— alice$/)
 })
 
 test('templates: created as a COMMAND (saved), with every field', async (t) => {
@@ -492,5 +492,5 @@ test('a note deleted after a restart is retracted for the others, not silently d
   assert.ok(room, 'the room keeps an entry for the note')
   assert.equal(room.deleted, true, 'as a tombstone, so every member learns of the deletion')
   let bobs = Object.values(bob.tropy.state().notes).map(n => n.text).filter(t => t.startsWith('soon gone'))
-  assert.ok(bobs.every(t => t.includes('retracted by')), bobs.join(' | '))
+  assert.ok(bobs.every(t => t.includes('withdrawn by')), bobs.join(' | '))
 })

@@ -34,7 +34,8 @@ const MINUTES = Number(process.env.SOAK_MINUTES) || 20
 const PHOTOS = 12
 const DC = 'http://purl.org/dc/elements/1.1/'
 const FIELD = { alice: `${DC}title`, bob: `${DC}description`, carol: `${DC}subject`, dave: `${DC}creator`, erin: `${DC}publisher` }
-const FOOTER = /\s*\[troparcel:[^\]]*\]\s*$/
+// Troparcel's author line on a collaborator's note (6.1+, and 6.0's)
+const FOOTER = /\s*(?:— (?:withdrawn by )?[^\n]*|\[troparcel:[^\]]*\])\s*$/
 
 const rand = n => Math.floor(Math.random() * n)
 const pick = list => list[rand(list.length)]
@@ -180,7 +181,7 @@ async function main() {
         if (!photo) continue
         let notes = (photo.notes || []).map(id => s.notes[id]).filter(Boolean)
           .map(n => String(n.text || '').replace(FOOTER, '').trim())
-          .filter(tx => !tx.includes('retracted by'))
+          .filter(tx => !/withdrawn by|retracted by/.test(tx))
         let tags = (item.tags || []).map(id => s.tags[id] && s.tags[id].name).filter(n => n && !n.startsWith('@'))
         let meta = s.metadata[item.id] || {}
         let fields = Object.fromEntries(Object.values(FIELD).map(f => [f, meta[f] ? meta[f].text : null]))

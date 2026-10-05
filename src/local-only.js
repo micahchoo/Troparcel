@@ -31,20 +31,39 @@ function isTropyPresetTemplate(uri) {
   return !uri || TROPY_PRESET_TEMPLATES.has(uri)
 }
 
-// A collaborator's note, as applied here, ends with a footer naming the
-// room entry it came from. It is how a note is found again for an update,
-// and how push knows not to send a collaborator's note back. `author` must
-// already be HTML-escaped.
-const FOOTER_KEY = /\[troparcel:([\w:-]+)\s/
+// A collaborator's note, as applied here, ends with one small line naming
+// its author: "— alice", or "— withdrawn by alice" once retracted. The line
+// is a link whose address holds the room entry's key (troparcel:n_…): how
+// Troparcel finds the note again for an update, and how push knows not to
+// send a collaborator's note back. `author` must already be HTML-escaped.
+//
+// Troparcel 6.0 wrote the key as text, "[troparcel:n_… from alice — safe
+// to delete, do not edit]"; notes from then are still recognised.
+const KEY_PATTERNS = [
+  /\[troparcel:([\w:-]+)\s/,               // 6.0, in the text
+  /href=\\?["']troparcel:([\w:-]+)/,       // in HTML
+  /"href":"troparcel:([\w:-]+)"/            // in the editor's state
+]
 
-function noteFooter(key, verb, author) {
-  return `<p><sub>[troparcel:${key} ${verb} ${author} — safe to delete, do not edit]</sub></p>`
+function noteFooter(key, kind, author) {
+  let words = kind === 'withdrawn' ? `— withdrawn by ${author}` : `— ${author}`
+  return `<p><sub><a href="troparcel:${key}">${words}</a></sub></p>`
 }
 
-/** The room key in a note's footer, or null. */
+/** The room key in a footer, in text, HTML or JSON; or null. */
 function footerKey(text) {
-  let m = typeof text === 'string' && text.match(FOOTER_KEY)
-  return m ? m[1] : null
+  if (typeof text !== 'string') return null
+  for (let p of KEY_PATTERNS) {
+    let m = text.match(p)
+    if (m) return m[1]
+  }
+  return null
+}
+
+/** The room key of a note as Tropy holds it ({ text, html?, state? }). */
+function footerKeyOfNote(note) {
+  if (!note) return null
+  return footerKey(note.text) || footerKey(note.html) || (note.state ? footerKey(JSON.stringify(note.state)) : null)
 }
 
 function isLocalOnlyTag(name) {
@@ -69,5 +88,6 @@ module.exports = {
   isLocalOnlyList,
   isTropyPresetTemplate,
   noteFooter,
-  footerKey
+  footerKey,
+  footerKeyOfNote
 }
