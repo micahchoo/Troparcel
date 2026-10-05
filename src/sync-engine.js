@@ -42,8 +42,9 @@ class SyncEngine {
 
     this.options = options
     // What happened recently, for the dashboard; warnings are recorded too.
-    this.journal = new Journal()
-    this.logger = this.journal.watch(logger)
+    // The plugin passes its own journal, already watching its logger.
+    this.journal = options.journal || new Journal()
+    this.logger = options.journal ? logger : this.journal.watch(logger)
     this.debug = options.debug === true
     this.peers = []
 

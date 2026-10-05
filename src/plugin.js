@@ -18,6 +18,12 @@
 const { SyncEngine } = require('./sync-engine')
 const { parseConnectionString } = require('./connection-string')
 const { findRoomFolder } = require('./sync-folders')
+const { Journal } = require('./journal')
+const { Dashboard } = require('./dashboard')
+const control = require('./control')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
 const { writeIIIF } = require('./iiif')
 
 const VALID_SYNC_MODES = new Set(['auto', 'review', 'push', 'pull'])
@@ -29,9 +35,15 @@ const num = (v, fallback) => (Number.isFinite(Number(v)) && v !== '' && v != nul
 
 class TroparcelPlugin {
   constructor(options, context) {
-    this.context = context
+    // One journal per plugin instance, shared with its engine: the
+    // dashboard shows what happened, including before an engine exists.
+    this.journal = new Journal()
+    this.context = { ...context, logger: this.journal.watch(context.logger) }
+    this.rawOptions = options
     this.options = this.mergeOptions(options)
+    this.options.journal = this.journal
     this.engine = null
+    this.dashboard = null
 
     // The preferences window loads plugins too; it must never sync.
     if (this._isPrefsWindow()) return
@@ -40,7 +52,62 @@ class TroparcelPlugin {
       `Troparcel — ${this.options.transport} ${this.options.address}, ` +
       `mode: ${this.options.syncMode}, user: ${this.options.userId || '(anonymous)'}`)
 
-    if (this.options.autoSync) this._waitForProjectAndStart()
+    if (this.options.autoSync && this.options.connectionGiven) this._waitForProjectAndStart()
+    // Serve the dashboard from the start, on the address it had before: a
+    // page left open survives Tropy re-creating the plugin (settings saved).
+    this._dashboard().start().catch(err => this.context.logger.warn(`Troparcel: dashboard unavailable: ${err.message}`))
+    if (!this.options.connectionGiven || !this.options.userId) this._welcome()
+  }
+
+  /** Tropy's plugin settings file, next to the installed plugin. */
+  configFile() {
+    return this.options._configFile || path.join(__dirname, '..', 'config.json')
+  }
+
+  /** The dashboard, created on first use; same address across plugin reloads. */
+  _dashboard() {
+    if (!this.dashboard) {
+      let file = path.join(this.options.dataDir || path.join(os.homedir(), '.troparcel'), 'dashboard.json')
+      let saved = {}
+      try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* first time */ }
+      this.dashboard = new Dashboard({
+        status: () => control.status(this),
+        act: (name, input) => control.perform(this, name, input),
+        logger: this.context.logger,
+        secret: saved.secret,
+        port: saved.port,
+        onStart: ({ port, secret }) => {
+          try {
+            fs.mkdirSync(path.dirname(file), { recursive: true })
+            fs.writeFileSync(file, JSON.stringify({ ...saved, port, secret }), { mode: 0o600 })
+          } catch { /* the address will change next time */ }
+        }
+      })
+    }
+    return this.dashboard
+  }
+
+  /**
+   * Not set up yet: open the dashboard once, so a newcomer sees what to do
+   * without looking for it. Once per computer, not on every start.
+   */
+  _welcome() {
+    let file = path.join(this.options.dataDir || path.join(os.homedir(), '.troparcel'), 'dashboard.json')
+    let saved = {}
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* first time */ }
+    if (saved.welcomed) return
+    setTimeout(async () => {
+      if (this._unloading) return
+      try {
+        let url = await this._dashboard().open()
+        this.context.logger.info(`Troparcel: set up at ${url}`)
+        let now = {}
+        try { now = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* new */ }
+        fs.writeFileSync(file, JSON.stringify({ ...now, welcomed: true }), { mode: 0o600 })
+      } catch (err) {
+        this.context.logger.warn(`Troparcel: could not open its dashboard: ${err.message}`)
+      }
+    }, 2000)
   }
 
   /** The prefs window's logger is named "prefs". */
@@ -93,6 +160,9 @@ class TroparcelPlugin {
     let roomToken = options.roomToken || conn.roomToken || ''
 
     return {
+      // What the person entered (a connection, or the fields older versions
+      // used); empty means Troparcel is not set up and does not connect.
+      connectionGiven: options.connection || options.serverUrl || options.syncDir || '',
       transport: conn.transport,
       serverUrl: conn.serverUrl || null,
       // troparcel://folder/<name>: that folder in this computer's sync client
@@ -109,6 +179,7 @@ class TroparcelPlugin {
       userId: options.userId || '',
       // Where vaults, backups and downloaded photos go (tests, embedders).
       dataDir: options.dataDir || null,
+      _configFile: options._configFile || null,
       apiPort: num(options.apiPort, 2019), // only in the fallback user id
 
       autoSync: flag(options.autoSync, true),
@@ -182,6 +253,7 @@ class TroparcelPlugin {
         }
         this.context.logger.info(
           `Troparcel: cannot reach ${this.options.address}, retrying in ${Math.round(delay / 1000)}s`)
+        this.journal.problem(`Cannot reach ${this.options.address}. Trying again every few minutes; your work is kept meanwhile.`)
         await new Promise(r => { this._retryTimer = setTimeout(r, delay) })
         delay = Math.min(delay * 2, 5 * 60 * 1000)
       }
@@ -208,6 +280,9 @@ class TroparcelPlugin {
   async export(data) {
     if (this._isPrefsWindow()) return
     if (this.options.iiifFolder) return this._publishIIIF(data)
+    // File > Export > Troparcel is also how to reach the dashboard.
+    this._dashboard().open().catch(err => this.context.logger.warn(`Troparcel: could not open its dashboard: ${err.message}`))
+    if (!this.options.connectionGiven) return
     if (this.options.syncMode === 'pull') {
       this.context.logger.warn('Troparcel Export: mode is "pull" — nothing is shared')
       return
@@ -276,7 +351,9 @@ class TroparcelPlugin {
   getStatus() {
     let options = { ...this.options }
     if (options.roomToken) options.roomToken = '***'
+    if (options.roomKey) options.roomKey = '***'
     delete options._roomExplicit
+    delete options.journal
     return {
       version: require('../package.json').version,
       options,
@@ -291,6 +368,7 @@ class TroparcelPlugin {
   async unload() {
     this._unloading = true
     if (this._retryTimer) clearTimeout(this._retryTimer)
+    if (this.dashboard) this.dashboard.stop()
     let engine = this.engine
     this.engine = null
     if (engine) {

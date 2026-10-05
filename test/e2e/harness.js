@@ -204,7 +204,7 @@ class TropyInstance {
     delete env.WAYLAND_DISPLAY
     let tropy = [
       'dbus-run-session', '--',
-      'flatpak', 'run', '--nosocket=wayland', '--socket=x11',
+      'flatpak', 'run', '--nosocket=wayland', '--socket=x11', '--env=TROPARCEL_NO_BROWSER=1',
       'org.tropy.Tropy',
       `--data=${this.dataDir}`, `--logs=${this.logDir}`,
       `--port=${this.port}`, this.project

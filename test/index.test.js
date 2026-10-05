@@ -1432,7 +1432,8 @@ describe('plugin', () => {
 
       let plugin = new TroparcelPlugin({
         autoSync: false,
-        syncMode: 'pull'
+        syncMode: 'pull',
+        connection: 'troparcel://ws/localhost:2468/r'
       }, ctx)
 
       await plugin.export([{ id: 1 }])

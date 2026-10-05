@@ -9,5 +9,6 @@ const path = require('node:path')
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'troparcel-home-'))
 process.env.HOME = home
+process.env.TROPARCEL_NO_BROWSER = '1' // never open a browser from a test
 process.env.USERPROFILE = home
 process.on('exit', () => fs.rmSync(home, { recursive: true, force: true }))
